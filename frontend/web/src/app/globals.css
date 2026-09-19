@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-gray-50 font-sans text-gray-900 antialiased;
+    font-feature-settings: "palt" 0;
+  }
+
+  :focus-visible {
+    outline-color: theme("colors.accent.500");
+  }
+}

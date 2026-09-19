@@ -1,0 +1,547 @@
+// Agent Studio（Control Plane）の DB スキーマ
+//
+// 組織の分離（SEC-01 / SEC-04 / SEC-16）
+// - 組織に属するテーブルは organization_id を持ち、RLS（migrations の SQL）で自組織の行だけに制限する
+// - 別テーブルへの参照は (organization_id, id) の複合外部キーにして、組織をまたいだ参照を DB で禁止する
+// - アプリは RLS が効くロール（agent_studio_app）で接続する。マイグレーションはテーブル所有者で行う
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model organizations {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug       String   @unique
+  name       String
+  status     String   @default("active")
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  openai_settings  organization_openai_settings?
+  members          organization_members[]
+  agents           agents[]
+  agent_versions   agent_versions[]
+  tools            tools[]
+  tool_versions    tool_versions[]
+  connections      connections[]
+  policies         policies[]
+  runtimes         runtimes[]
+  bootstrap_tokens runtime_bootstrap_tokens[]
+  runtime_profiles runtime_profiles[]
+  deployments      deployments[]
+  runs             runs[]
+  run_inputs       run_inputs[]
+  sessions         agent_sessions[]
+  run_events       run_events[]
+  approvals        approvals[]
+  runtime_jobs     runtime_jobs[]
+  workflows        workflows[]
+  workflow_runs    workflow_runs[]
+  eval_cases       eval_cases[]
+  eval_runs        eval_runs[]
+}
+
+/// 組織ごとの OpenAI Project とキーの保管場所（SEC-11）。キーの値は持たない
+model organization_openai_settings {
+  organization_id    String   @id @db.Uuid
+  openai_project_id  String?
+  app_key_secret_arn String?
+  env_key_secret_arn String?
+  updated_at         DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+}
+
+model users {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 認証基盤（Cognito）の sub。招待直後でまだログインしていない場合は null
+  auth_subject      String?  @unique
+  email             String   @unique
+  display_name      String?
+  is_platform_admin Boolean  @default(false)
+  created_at        DateTime @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  memberships organization_members[]
+}
+
+model organization_members {
+  organization_id String   @db.Uuid
+  user_id         String   @db.Uuid
+  /// owner / admin / builder / operator / viewer
+  role            String
+  is_approver     Boolean  @default(false)
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  user         users         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@id([organization_id, user_id])
+  @@index([user_id])
+}
+
+model agents {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  key             String
+  name            String
+  description     String?
+  latest_version  Int      @default(0)
+  created_by      String?  @db.Uuid
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  versions     agent_versions[]
+  deployments  deployments[]
+  eval_cases   eval_cases[]
+
+  @@unique([organization_id, key])
+  @@unique([organization_id, id])
+}
+
+model agent_versions {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  agent_id        String    @db.Uuid
+  version         Int
+  /// draft / published / archived。published は変更不可（AGT-02）
+  status          String    @default("draft")
+  manifest        Json
+  manifest_yaml   String
+  created_by      String?   @db.Uuid
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  published_at    DateTime? @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent        agents        @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
+  deployments  deployments[]
+
+  @@unique([agent_id, version])
+  @@unique([organization_id, id])
+}
+
+model tools {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id    String   @db.Uuid
+  name               String
+  display_name       String
+  /// studio_function / openai_service_mcp / runtime_mcp
+  execution_location String
+  risk               String
+  latest_version     Int      @default(1)
+  created_at         DateTime @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations   @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  versions     tool_versions[]
+
+  @@unique([organization_id, name])
+  @@unique([organization_id, id])
+}
+
+model tool_versions {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  tool_id         String   @db.Uuid
+  version         Int
+  spec            Json
+  created_by      String?  @db.Uuid
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  tool         tools         @relation(fields: [organization_id, tool_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([tool_id, version])
+  @@unique([organization_id, id])
+}
+
+/// 接続先（CONN）。認証情報の値は持たず、保管場所（secret_locator）だけを持つ
+model connections {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id     String   @db.Uuid
+  name                String
+  description         String?
+  /// studio / openai_vault / runtime
+  scope               String
+  runtime_id          String?  @db.Uuid
+  runtime_secret_name String?
+  header_name         String?
+  /// studio: Secrets Manager の ARN / openai_vault: "vault_id" または "vault_id:credential_id"
+  secret_locator      String?
+  created_at          DateTime @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  runtime      runtimes?     @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
+
+  @@unique([organization_id, name])
+  @@unique([organization_id, id])
+}
+
+/// 組織全体に適用するポリシー（POL-06: 組織 → Agent → ツールの順に継承）
+model policies {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  name            String
+  rule            Json
+  enabled         Boolean  @default(true)
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  @@unique([organization_id, name])
+}
+
+/// 登録済みの Runtime（企業 × 環境の Execution Plane）
+model runtimes {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id    String    @db.Uuid
+  name               String
+  stage              String
+  /// studio_managed / customer_owned
+  provisioning_type  String
+  aws_account_id     String
+  aws_region         String
+  expected_role_name String
+  /// pending / active / degraded / offline / revoked
+  status             String    @default("pending")
+  controller_version String?
+  /// Session Worker から見た Tool Gateway の MCP エンドポイント（Controller が報告する）
+  gateway_url        String?
+  tool_catalog       Json      @default("[]")
+  last_heartbeat_at  DateTime? @db.Timestamptz(6)
+  registered_at      DateTime? @db.Timestamptz(6)
+  revoked_at         DateTime? @db.Timestamptz(6)
+  created_at         DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization     organizations              @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  bootstrap_tokens runtime_bootstrap_tokens[]
+  profiles         runtime_profiles[]
+  connections      connections[]
+  sessions         agent_sessions[]
+  jobs             runtime_jobs[]
+
+  /// 1つの AWS プリンシパルは、全組織を通じて1つの Runtime にしか対応しない
+  @@unique([aws_account_id, expected_role_name])
+  @@unique([organization_id, id])
+}
+
+model runtime_bootstrap_tokens {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  runtime_id      String    @db.Uuid
+  token_hash      String    @unique
+  expires_at      DateTime  @db.Timestamptz(6)
+  consumed_at     DateTime? @db.Timestamptz(6)
+  created_by      String?   @db.Uuid
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  runtime      runtimes      @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Cascade)
+}
+
+/// 実行環境の設定（ENV）
+model runtime_profiles {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  key             String
+  name            String
+  /// none / openai_hosted / self_hosted
+  type            String
+  template        String?
+  network         Json?
+  runtime_id      String?  @db.Uuid
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  runtime      runtimes?     @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
+  deployments  deployments[]
+
+  @@unique([organization_id, key])
+  @@unique([organization_id, id])
+}
+
+model deployments {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id    String   @db.Uuid
+  agent_id           String   @db.Uuid
+  agent_version_id   String   @db.Uuid
+  runtime_profile_id String   @db.Uuid
+  stage              String
+  /// active / superseded / archived
+  status             String   @default("active")
+  /// デプロイ時点のコンパイル結果（CMP-04）。シークレットは含めない（CMP-05）
+  compiled_config    Json
+  created_by         String?  @db.Uuid
+  created_at         DateTime @default(now()) @db.Timestamptz(6)
+
+  organization    organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent           agents           @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
+  agent_version   agent_versions   @relation(fields: [organization_id, agent_version_id], references: [organization_id, id], onDelete: Restrict)
+  runtime_profile runtime_profiles @relation(fields: [organization_id, runtime_profile_id], references: [organization_id, id], onDelete: Restrict)
+  runs            runs[]
+
+  @@unique([organization_id, id])
+  @@index([organization_id, agent_id, stage, status])
+}
+
+model runs {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id    String    @db.Uuid
+  deployment_id      String    @db.Uuid
+  workflow_run_id    String?   @db.Uuid
+  eval_run_id        String?   @db.Uuid
+  /// queued / provisioning / running / waiting_approval / requires_action / completed / failed / cancelled
+  status             String    @default("queued")
+  input              String
+  output             String?
+  error              String?
+  requested_by       String?   @db.Uuid
+  usage              Json?
+  last_event_seq     Int       @default(0)
+  /// イベント受信を担当している Worker（複数台で二重に受信しないためのリース）
+  stream_lease_owner String?
+  stream_lease_until DateTime? @db.Timestamptz(6)
+  created_at         DateTime  @default(now()) @db.Timestamptz(6)
+  started_at         DateTime? @db.Timestamptz(6)
+  finished_at        DateTime? @db.Timestamptz(6)
+
+  organization organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  deployment   deployments      @relation(fields: [organization_id, deployment_id], references: [organization_id, id], onDelete: Restrict)
+  sessions     agent_sessions[]
+  events       run_events[]
+  approvals    approvals[]
+  inputs       run_inputs[]
+
+  @@unique([organization_id, id])
+  @@index([organization_id, created_at(sort: Desc)])
+  @@index([status])
+}
+
+/// セッションに送る追加の入力（利用者の追加指示、承認結果の通知）。Worker が送信する
+model run_inputs {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  run_id          String    @db.Uuid
+  /// user / approval
+  kind            String
+  input           String
+  /// pending / sent
+  status          String    @default("pending")
+  created_by      String?   @db.Uuid
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  sent_at         DateTime? @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  run          runs          @relation(fields: [organization_id, run_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@index([run_id, status])
+}
+
+/// OpenAI Agents API のセッション（Run ごとに1つ以上）
+model agent_sessions {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id       String    @db.Uuid
+  run_id                String    @db.Uuid
+  environment_type      String
+  openai_session_id     String?   @unique
+  openai_environment_id String?
+  runtime_id            String?   @db.Uuid
+  /// creating / waiting_worker / connected / ended / failed
+  status                String    @default("creating")
+  /// Tool Gateway 用トークンの SHA-256（平文は保存しない）
+  token_hash            String?
+  allowed_tools         Json      @default("[]")
+  policies              Json      @default("[]")
+  worker_task_arn       String?
+  expires_at            DateTime? @db.Timestamptz(6)
+  created_at            DateTime  @default(now()) @db.Timestamptz(6)
+  ended_at              DateTime? @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  run          runs          @relation(fields: [organization_id, run_id], references: [organization_id, id], onDelete: Cascade)
+  runtime      runtimes?     @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
+  approvals    approvals[]
+  jobs         runtime_jobs[]
+
+  @@unique([organization_id, id])
+  @@index([runtime_id, status])
+}
+
+model run_events {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  run_id          String   @db.Uuid
+  seq             Int
+  type            String
+  summary         String
+  data            Json
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  run          runs          @relation(fields: [organization_id, run_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([run_id, seq])
+}
+
+model approvals {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  run_id          String?   @db.Uuid
+  session_id      String?   @db.Uuid
+  workflow_run_id String?   @db.Uuid
+  /// runtime_gateway（Tool Gateway のツール）/ studio_function（Agent Studio のツール）/ workflow（Workflow の承認ステップ）
+  source          String    @default("runtime_gateway")
+  /// studio_function のとき、承認後に結果を返す function call の ID
+  call_id         String?
+  tool            String
+  args_hash       String
+  args_preview    String
+  reason          String
+  /// pending / approved / denied / expired / consumed
+  status          String    @default("pending")
+  requested_at    DateTime  @default(now()) @db.Timestamptz(6)
+  expires_at      DateTime  @db.Timestamptz(6)
+  decided_by      String?   @db.Uuid
+  decided_at      DateTime? @db.Timestamptz(6)
+  comment         String?
+  consumed_at     DateTime? @db.Timestamptz(6)
+
+  organization organizations   @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  run          runs?           @relation(fields: [organization_id, run_id], references: [organization_id, id], onDelete: Cascade)
+  session      agent_sessions? @relation(fields: [organization_id, session_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@index([organization_id, status])
+  @@index([session_id, args_hash])
+}
+
+/// Runtime Controller が取りに来るジョブ（RTM-05）
+model runtime_jobs {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  runtime_id      String    @db.Uuid
+  session_id      String?   @db.Uuid
+  type            String
+  payload         Json
+  /// pending / leased / succeeded / failed / cancelled
+  status          String    @default("pending")
+  attempts        Int       @default(0)
+  leased_until    DateTime? @db.Timestamptz(6)
+  error           String?
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  completed_at    DateTime? @db.Timestamptz(6)
+
+  organization organizations   @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  runtime      runtimes        @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Cascade)
+  session      agent_sessions? @relation(fields: [organization_id, session_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@index([runtime_id, status, created_at])
+}
+
+model workflows {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  key             String
+  name            String
+  version         Int      @default(1)
+  definition      Json
+  created_by      String?  @db.Uuid
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations   @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  runs         workflow_runs[]
+
+  @@unique([organization_id, key])
+  @@unique([organization_id, id])
+}
+
+model workflow_runs {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id  String    @db.Uuid
+  workflow_id      String    @db.Uuid
+  workflow_version Int
+  /// 実行開始時点の定義（途中で定義が変わっても影響させない）
+  definition       Json
+  /// running / waiting_approval / completed / failed / cancelled
+  status           String    @default("running")
+  input            String
+  current_step     String?
+  steps            Json      @default("[]")
+  requested_by     String?   @db.Uuid
+  created_at       DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  finished_at      DateTime? @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  workflow     workflows     @relation(fields: [organization_id, workflow_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@index([organization_id, created_at(sort: Desc)])
+  @@index([status])
+}
+
+/// Eval のテストケース（EVAL-01）
+model eval_cases {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  agent_id        String   @db.Uuid
+  name            String
+  input           String
+  /// { must_contain: string[], must_not_contain: string[] }
+  expectations    Json
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent        agents        @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, id])
+}
+
+/// Eval の実行（あるデプロイに対して、Agent の全テストケースを流す）
+model eval_runs {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  agent_id        String    @db.Uuid
+  deployment_id   String    @db.Uuid
+  /// running / passed / failed
+  status          String    @default("running")
+  results         Json      @default("[]")
+  requested_by    String?   @db.Uuid
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  finished_at     DateTime? @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  @@index([organization_id, agent_id])
+}
+
+/// 監査ログ（AUD）。アプリのロールには INSERT / SELECT しか与えない
+model audit_logs {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// 組織が特定できない操作（Runtime 認証の失敗など）は null
+  organization_id String?  @db.Uuid
+  /// user / runtime / system
+  actor_type      String
+  actor_id        String?
+  actor_label     String?
+  action          String
+  target_type     String?
+  target_id       String?
+  /// success / failure / denied
+  result          String
+  detail          Json     @default("{}")
+  source_ip       String?
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([organization_id, created_at(sort: Desc)])
+}

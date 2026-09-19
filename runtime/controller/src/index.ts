@@ -1,0 +1,115 @@
+import { readFileSync } from "node:fs";
+import { ECSClient } from "@aws-sdk/client-ecs";
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { ConfigError, loadConfig, type ControllerConfig } from "./config.js";
+import { Controller } from "./controller.js";
+import { GrantStore } from "./grants.js";
+import { createIdentitySigner } from "./identity.js";
+import { DockerSessionLauncher, EcsSessionLauncher, NoopSessionLauncher, type SessionLauncher } from "./launcher.js";
+import { createLogger, errorInfo, type Logger } from "./logger.js";
+import { ControllerSecrets, MemorySecretStore, SecretsManagerStore } from "./secrets.js";
+import { AgentStudioClient, RuntimeAuth, StudioHttp, type StudioApi } from "./studio-client.js";
+
+function readVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: string };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+function createLauncher(
+  config: ControllerConfig,
+  secrets: ControllerSecrets,
+  studio: StudioApi,
+  logger: Logger,
+): SessionLauncher {
+  switch (config.launcher.type) {
+    case "ecs":
+      return new EcsSessionLauncher(new ECSClient({ region: config.region }), config.launcher);
+    case "docker":
+      // ECS ではタスク定義の secrets が環境キーを注入する。docker では Controller が渡す
+      return new DockerSessionLauncher(
+        config.launcher,
+        async () => {
+          const stored = await secrets.readEnvironmentKey();
+          if (stored) return stored;
+          const fetched = await studio.environmentKey();
+          if (fetched) await secrets.saveEnvironmentKey(fetched);
+          return fetched;
+        },
+        logger,
+      );
+    case "noop":
+      return new NoopSessionLauncher(logger);
+  }
+}
+
+async function main(): Promise<void> {
+  let config: ControllerConfig;
+  try {
+    config = loadConfig();
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`[runtime-controller] ${err.message}`);
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  const logger = createLogger(config.logLevel);
+  const version = readVersion();
+
+  const store =
+    config.secrets.store === "secrets-manager"
+      ? new SecretsManagerStore(new SecretsManagerClient({ region: config.region }))
+      : new MemorySecretStore();
+  const secrets = new ControllerSecrets(store, config.secrets, logger);
+
+  const http = new StudioHttp(config.agentStudioUrl, `agent-studio-runtime-controller/${version}`);
+  const auth = new RuntimeAuth({
+    http,
+    signIdentity: createIdentitySigner(config),
+    secrets,
+    controllerVersion: version,
+    logger,
+  });
+  const studio = new AgentStudioClient(http, auth);
+  const grants = new GrantStore();
+  const launcher = createLauncher(config, secrets, studio, logger);
+
+  logger.info(
+    {
+      version,
+      agent_studio_url: config.agentStudioUrl,
+      identity_mode: config.identity.mode,
+      launcher: launcher.kind,
+      secret_store: config.secrets.store,
+      max_concurrent_sessions: config.maxConcurrentSessions,
+    },
+    "設定を読み込みました",
+  );
+
+  const controller = new Controller({ config, logger, auth, studio, grants, launcher, secrets, controllerVersion: version });
+  await controller.start();
+
+  const shutdown = (signal: string) => {
+    logger.info({ signal }, "停止シグナルを受け取りました");
+    controller
+      .stop()
+      .then(() => process.exit(0))
+      .catch((err) => {
+        logger.error({ err: errorInfo(err) }, "停止処理に失敗しました");
+        process.exit(1);
+      });
+  };
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.on("unhandledRejection", (reason) => logger.error({ err: errorInfo(reason) }, "処理されていない Promise の失敗"));
+}
+
+main().catch((err) => {
+  console.error("[runtime-controller] 起動に失敗しました:", err instanceof Error ? err.message : err);
+  process.exit(1);
+});

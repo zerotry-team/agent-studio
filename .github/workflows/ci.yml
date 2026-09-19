@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: "22"
+  TERRAFORM_VERSION: "1.15.8"
+
+jobs:
+  changes:
+    name: 変更の検出
+    runs-on: ubuntu-24.04
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+      web: ${{ steps.filter.outputs.web }}
+      runtime: ${{ steps.filter.outputs.runtime }}
+      infra: ${{ steps.filter.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            app:
+              - 'packages/**'
+              - 'backend/**'
+              - 'prisma/**'
+              - 'package.json'
+              - 'yarn.lock'
+              - '.github/workflows/ci.yml'
+            web:
+              - 'packages/**'
+              - 'frontend/**'
+              - 'yarn.lock'
+            runtime:
+              - 'packages/**'
+              - 'runtime/**'
+              - 'yarn.lock'
+            infra:
+              - 'infra/**'
+
+  typescript:
+    name: 型チェック・単体テスト・ビルド
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: corepack enable
+      - uses: actions/cache@v4
+        with:
+          path: .yarn/cache
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: yarn-${{ runner.os }}-
+      - run: yarn install --immutable
+      - run: yarn prisma:generate
+      - run: yarn workspace @agent-studio/contracts build
+      - name: 型チェック
+        run: yarn type-check
+      - name: 単体テスト
+        run: yarn test
+      - name: ビルド
+        run: yarn build
+
+  database:
+    name: DB（マイグレーション・スキーマの差分・RLS・結合テスト）
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agent_studio
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/agent_studio
+      DATABASE_URL: postgresql://agent_studio_app:ci_app_password@localhost:5432/agent_studio
+      APP_DB_PASSWORD: ci_app_password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: corepack enable
+      - uses: actions/cache@v4
+        with:
+          path: .yarn/cache
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: yarn-${{ runner.os }}-
+      - run: yarn install --immutable
+      - run: yarn prisma:generate
+      - run: yarn workspace @agent-studio/contracts build
+      - name: アプリ用ロールの作成
+        run: yarn db:bootstrap
+      - name: マイグレーション
+        run: yarn prisma:migrate:deploy
+      - name: スキーマとマイグレーションの差分がないこと
+        run: yarn prisma:migrate:diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code
+      - name: 結合テスト（組織の分離・実行の流れ）
+        run: yarn workspace @agent-studio/api test:integration
+
+  terraform:
+    name: Terraform（fmt・validate）
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: needs.changes.outputs.infra == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      - name: fmt
+        run: terraform fmt -check -recursive infra
+      - name: validate
+        run: |
+          set -euo pipefail
+          for root in infra/bootstrap infra/agent-studio/* infra/company/*/*/; do
+            [ -f "$root/versions.tf" ] || continue
+            echo "::group::$root"
+            terraform -chdir="$root" init -backend=false -input=false >/dev/null
+            terraform -chdir="$root" validate
+            echo "::endgroup::"
+          done
+
+  images:
+    name: コンテナイメージのビルド（${{ matrix.image.name }}）
+    runs-on: ubuntu-24.04
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - { name: api, dockerfile: backend/api/Dockerfile, filter: app }
+          - { name: web, dockerfile: frontend/web/Dockerfile, filter: web }
+          - { name: runtime-controller, dockerfile: runtime/controller/Dockerfile, filter: runtime }
+          - { name: tool-gateway, dockerfile: runtime/tool-gateway/Dockerfile, filter: runtime }
+          - { name: session-worker, dockerfile: runtime/session-worker/Dockerfile, filter: runtime }
+          - { name: browser-worker, dockerfile: runtime/browser-worker/Dockerfile, filter: runtime }
+          - { name: demo-internal-api, dockerfile: runtime/demo-internal-api/Dockerfile, filter: runtime }
+    steps:
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs[matrix.image.filter] == 'true'
+      - uses: docker/setup-buildx-action@v3
+        if: needs.changes.outputs[matrix.image.filter] == 'true'
+      - uses: docker/build-push-action@v6
+        if: needs.changes.outputs[matrix.image.filter] == 'true'
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}

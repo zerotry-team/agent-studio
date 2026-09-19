@@ -1,0 +1,20 @@
+# ローカル開発用。本番は RDS for PostgreSQL（infra/modules/control-plane）。
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agent_studio
+    ports:
+      - "5434:5432"
+    volumes:
+      - agent-studio-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  agent-studio-pg:

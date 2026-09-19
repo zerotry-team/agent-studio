@@ -1,0 +1,181 @@
+"use client";
+
+import { Ban } from "lucide-react";
+import Link from "next/link";
+import { useState } from "react";
+import { cancelRunAction } from "@/actions/runs";
+import { ErrorState } from "@/components/common/error-state";
+import { PageHeader } from "@/components/common/page-header";
+import { RunStatusBadge, StageBadge } from "@/components/common/status-badges";
+import { TimeAgo } from "@/components/common/time-ago";
+import { LiveIndicator } from "@/components/runs/live-indicator";
+import { RunApprovals } from "@/components/runs/run-approvals";
+import { RunArtifacts } from "@/components/runs/run-artifacts";
+import { RunEventTimeline } from "@/components/runs/run-event-timeline";
+import { RunMessageForm } from "@/components/runs/run-message-form";
+import { RunInfoCard, RunOutputPlaceholder, RunTextPanel } from "@/components/runs/run-panels";
+import { isTerminalRunStatus, useRunStream } from "@/components/runs/use-run-stream";
+import { Alert } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { CopyButton } from "@/components/ui/copy-button";
+import { CardSkeleton, Skeleton } from "@/components/ui/skeleton";
+import { useActionMutation } from "@/hooks/use-action-mutation";
+import { useSession } from "@/hooks/use-session";
+
+function RunDetailSkeleton() {
+  return (
+    <>
+      <div className="mb-6 space-y-3" aria-hidden="true">
+        <Skeleton className="h-4 w-24" />
+        <Skeleton className="h-7 w-64 max-w-full" />
+        <Skeleton className="h-4 w-48" />
+      </div>
+      <div className="grid gap-6 lg:grid-cols-3">
+        <div className="space-y-6 lg:col-span-2">
+          <CardSkeleton />
+          <CardSkeleton />
+          <CardSkeleton />
+        </div>
+        <CardSkeleton />
+      </div>
+    </>
+  );
+}
+
+export default function RunDetailPage({ params }: { params: { id: string } }) {
+  const runId = params.id;
+  const { can } = useSession();
+  const stream = useRunStream(runId);
+  const { run, events, resume, setRun } = stream;
+  const [confirmCancel, setConfirmCancel] = useState(false);
+
+  const cancel = useActionMutation(cancelRunAction, {
+    successMessage: "実行を中止しました",
+    onSuccess: (updated) => {
+      setRun(updated);
+      // 中止までの最後の経過を受け取る
+      resume();
+    },
+  });
+
+  if (!run) {
+    if (stream.error) {
+      return (
+        <>
+          <PageHeader title="実行の詳細" back={{ href: "/runs", label: "実行履歴" }} />
+          <ErrorState message={stream.error.message} onRetry={stream.reload} retrying={stream.loading} />
+        </>
+      );
+    }
+    return <RunDetailSkeleton />;
+  }
+
+  const terminal = isTerminalRunStatus(run.status);
+  const canStart = can("run.start");
+  const canCancel = canStart && !terminal;
+  const canMessage = canStart && run.status !== "cancelled" && run.status !== "failed";
+  const hasApprovalRequests = events.some((e) => e.type === "approval.requested");
+
+  return (
+    <>
+      <PageHeader
+        back={{ href: "/runs", label: "実行履歴" }}
+        title={
+          <Link
+            href={`/agents/${run.agent.id}`}
+            className="rounded hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
+          >
+            {run.agent.name}
+          </Link>
+        }
+        meta={
+          <>
+            <Badge tone="neutral">v{run.agent.version}</Badge>
+            <span role="status" aria-live="polite">
+              <RunStatusBadge status={run.status} />
+            </span>
+            <StageBadge stage={run.deployment.stage} />
+          </>
+        }
+        description={
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span>{run.runtime_profile.name} で実行</span>
+            <span className="text-gray-300" aria-hidden="true">
+              |
+            </span>
+            <span>
+              受け付け: <TimeAgo value={run.created_at} />
+            </span>
+            {stream.polling ? <LiveIndicator /> : null}
+          </span>
+        }
+        actions={
+          canCancel ? (
+            <Button variant="danger-outline" icon={<Ban className="h-4 w-4" aria-hidden="true" />} onClick={() => setConfirmCancel(true)}>
+              中止する
+            </Button>
+          ) : null
+        }
+      />
+
+      {stream.pollError ? (
+        <Alert tone="warning" className="mb-6" title="最新の状態を読み込めませんでした">
+          {stream.pollError}
+          {stream.polling ? "（自動でもう一度読み込みます）" : null}
+        </Alert>
+      ) : null}
+
+      <div className="grid gap-6 lg:grid-cols-3">
+        <div className="min-w-0 space-y-6 lg:col-span-2">
+          {run.error ? (
+            <Alert tone="danger" title="エラーが発生しました">
+              <p className="whitespace-pre-wrap break-words">{run.error}</p>
+            </Alert>
+          ) : null}
+
+          {run.status === "requires_action" && canMessage ? (
+            <Alert tone="warning" title="エージェントが指示を待っています">
+              画面の下の「追加の指示」から、続けて伝えたいことを送ってください。
+            </Alert>
+          ) : null}
+
+          <RunApprovals runId={run.id} status={run.status} hasRequests={hasApprovalRequests} onDecided={resume} />
+
+          <RunTextPanel title="指示" text={run.input} placeholder="—" />
+
+          <RunTextPanel
+            title="結果"
+            text={run.output}
+            placeholder={<RunOutputPlaceholder run={run} />}
+            actions={run.output ? <CopyButton value={run.output} label="結果をコピー" /> : null}
+          />
+
+          <RunArtifacts runId={run.id} finished={terminal} />
+
+          <RunEventTimeline events={events} finished={terminal} />
+
+          {canMessage ? <RunMessageForm runId={run.id} onSent={resume} /> : null}
+        </div>
+
+        <div className="min-w-0 space-y-6">
+          <RunInfoCard run={run} />
+        </div>
+      </div>
+
+      <ConfirmDialog
+        open={confirmCancel}
+        onClose={() => setConfirmCancel(false)}
+        title="この実行を中止しますか？"
+        description="エージェントの作業を途中で止めます。すでに行われた操作は元に戻りません。中止した実行は再開できません。"
+        confirmLabel="中止する"
+        tone="danger"
+        onConfirm={async () => {
+          const res = await cancel.mutate(run.id);
+          return res.ok ? undefined : false;
+        }}
+      />
+    </>
+  );
+}

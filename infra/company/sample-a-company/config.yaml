@@ -1,0 +1,138 @@
+# テナント（企業）ごとの Runtime の設定。production/ と staging/ の Terraform がこのファイルを読む。
+# テナントの追加手順は infra/company/README.md を参照。
+
+# Agent Studio（production）で作成した組織の ID（UUID）。組織を作成したら置き換える
+organization_id: "00000000-0000-4000-8000-000000000000"
+# Agent Studio の組織の slug（このディレクトリ名と同じにする）
+slug: sample-a-company
+# リソース名の接頭辞 as-<short_name>-<prod|stg> に使う（20 文字以内の英小文字・数字・ハイフン）
+short_name: sample-a
+region: ap-northeast-1
+
+# ステージごとの設定。キーは production / staging
+stages:
+  production:
+    # 適用先の AWS アカウント ID。書いておくと別のアカウントに誤って適用するのを防げる（推奨）。
+    # 先頭の 0 が消えないよう、必ず引用符で囲む（例: "012345678901"）
+    aws_account_id: ""
+    # 接続する Agent Studio（infra/agent-studio/production の出力 public_url と runtime_server_id）
+    agent_studio_url: "https://d0000000000000.cloudfront.net"
+    runtime_server_id: agent-studio-production
+    # Agent Studio で Runtime を登録したあとに表示される ID（タグにだけ使う。登録前は空）
+    runtime_id: ""
+  staging:
+    aws_account_id: ""
+    agent_studio_url: "https://d1111111111111.cloudfront.net"
+    runtime_server_id: agent-studio-staging
+    runtime_id: ""
+    # staging の Agent Studio は DB が別なので、組織 ID も別になる
+    organization_id: "00000000-0000-4000-8000-000000000001"
+    # runtime の設定をステージごとに上書きできる（runtime の 1 階層目のキー単位）
+    runtime:
+      nat_gateway_count: 1
+      session_worker:
+        cpu: 1024
+        memory: 2048
+        max_concurrent: 3
+        max_lifetime_minutes: 60
+        idle_timeout_minutes: 15
+
+runtime:
+  # 社内ネットワークとつなぐ場合は重ならない CIDR にする
+  vpc_cidr: 10.40.0.0/16
+  nat_gateway_count: 1
+  browser_enabled: true
+  demo_internal_api_enabled: true
+  # Tool Gateway から到達を許す社内ネットワーク
+  allowed_internal_cidrs: []
+  # DNS Firewall で追加で許可するドメイン（Browser Worker で開くサイトもここに入れる）
+  extra_allowed_domains:
+    - example.com
+    - "*.example.com"
+  session_worker:
+    cpu: 1024
+    memory: 2048
+    max_concurrent: 10
+    max_lifetime_minutes: 120
+    idle_timeout_minutes: 15
+
+  # 業務システムの接続名。Secrets Manager に agent-studio/runtime/<short_name>/<stage>/connections/<名前> を空で作る
+  connections:
+    - demo-internal-api
+
+  # Tool Gateway のツール設定（packages/contracts/src/runtime-config.ts の RuntimeToolConfig）。
+  # SSM パラメータ /<prefix>/tool-config に JSON で入る。文字列中の <prefix> は as-<short_name>-<prod|stg> に置き換わる。
+  # ここにないツールは、Agent Studio 側で設定しても実行できない（CRT-11）。
+  tools:
+    version: 1
+    tools:
+      - name: get_product
+        description: "商品 ID を指定して、商品名・現在の価格・在庫数を取得します。"
+        risk: read
+        input_schema:
+          type: object
+          properties:
+            product_id:
+              type: string
+              description: "商品 ID（例: P-001）"
+          required:
+            - product_id
+          additionalProperties: false
+        http:
+          method: GET
+          url: "http://demo-api.<prefix>.internal:8090/products/{product_id}"
+          auth:
+            type: bearer
+            secret: demo-internal-api
+          timeout_ms: 10000
+
+      - name: update_price
+        description: "商品の価格を変更します。price_change に変更額（円）を指定します。値下げはマイナスです。"
+        risk: financial
+        input_schema:
+          type: object
+          properties:
+            product_id:
+              type: string
+              description: "商品 ID（例: P-001）"
+            price_change:
+              type: number
+              description: "価格の変更額（円）。値上げはプラス、値下げはマイナス"
+          required:
+            - product_id
+            - price_change
+          additionalProperties: false
+        http:
+          method: POST
+          url: "http://demo-api.<prefix>.internal:8090/products/{product_id}/price"
+          auth:
+            type: bearer
+            secret: demo-internal-api
+          timeout_ms: 10000
+        # Runtime 側（顧客が管理）の制限。Agent Studio の設定に関係なく適用される
+        policies:
+          - type: deny
+            tool: update_price
+            when:
+              field: price_change
+              op: ">"
+              value: 10000
+              abs: true
+            reason: "1 回の価格変更は ±10,000 円までです（Runtime 側の制限）"
+
+    upstream_mcp:
+      - name: browser
+        url: "http://browser.<prefix>.internal:8931/mcp"
+        tools:
+          - name: browser_navigate
+            risk: read
+            reads_untrusted_content: true
+          - name: browser_snapshot
+            risk: read
+            reads_untrusted_content: true
+          - name: browser_click
+            risk: write
+          - name: browser_type
+            risk: write
+
+    policies: []

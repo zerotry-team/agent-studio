@@ -1,0 +1,52 @@
+{
+  "name": "agent-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Studio — 企業ごとに分離された実行環境で業務AIエージェントを設計・実行するSaaS",
+  "workspaces": [
+    "packages/*",
+    "backend/*",
+    "frontend/*",
+    "runtime/*"
+  ],
+  "scripts": {
+    "dev": "yarn workspaces foreach -pi --include '@agent-studio/{api,web}' run dev",
+    "dev:api": "yarn workspace @agent-studio/api dev",
+    "dev:worker": "yarn workspace @agent-studio/api dev:worker",
+    "dev:web": "yarn workspace @agent-studio/web dev",
+    "build": "yarn workspaces foreach -At run build",
+    "type-check": "yarn workspaces foreach -At run type-check",
+    "test": "yarn workspaces foreach -At run test",
+    "lint": "yarn workspaces foreach -At run lint",
+    "db:up": "docker compose up -d postgres",
+    "db:bootstrap": "yarn workspace @agent-studio/api db:bootstrap",
+    "prisma:generate": "prisma generate --config=prisma/prisma.config.ts",
+    "prisma:migrate:dev": "prisma migrate dev --config=prisma/prisma.config.ts",
+    "prisma:migrate:deploy": "prisma migrate deploy --config=prisma/prisma.config.ts",
+    "prisma:migrate:status": "prisma migrate status --config=prisma/prisma.config.ts",
+    "prisma:migrate:diff": "prisma migrate diff --config=prisma/prisma.config.ts",
+    "prisma:migrate:reset": "prisma migrate reset --config=prisma/prisma.config.ts",
+    "prisma:seed": "yarn workspace @agent-studio/api seed"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "dotenv": "^17.2.3",
+    "prisma": "^7.0.0",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "yarn@4.17.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependenciesMeta": {
+    "@prisma/engines": {
+      "built": true
+    },
+    "esbuild": {
+      "built": true
+    },
+    "prisma": {
+      "built": true
+    }
+  }
+}

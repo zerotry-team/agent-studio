@@ -1,0 +1,208 @@
+import { z } from "zod";
+import { toolNameSchema } from "./common.js";
+import { policySchema } from "./policy.js";
+import { inputSchemaSchema, toolRiskSchema } from "./tools.js";
+
+/**
+ * Agent Studio（Control Plane）と Runtime Controller（Execution Plane）の間のプロトコル。
+ * 通信は常に Runtime → Agent Studio のアウトバウンド HTTPS（RTM-05 / CRT-07）。
+ */
+export const RUNTIME_PROTOCOL_VERSION = 1 as const;
+
+/** 署名済み GetCallerIdentity に必ず含める、Agent Studio 固有のヘッダ（SEC-15） */
+export const RUNTIME_SERVER_ID_HEADER = "x-agent-studio-server-id";
+
+/** STS に送る本文（固定） */
+export const STS_GET_CALLER_IDENTITY_BODY = "Action=GetCallerIdentity&Version=2011-06-15";
+
+/**
+ * ローカル開発用の身元（Agent Studio 側が RUNTIME_IDENTITY_MODE=dev のときだけ受け付ける）。
+ * url は dev://<12桁のアカウントID>/<ロール名>
+ */
+export const DEV_IDENTITY_PROTOCOL = "dev:";
+
+/**
+ * Runtime が自分の IAM ロールで SigV4 署名した sts:GetCallerIdentity リクエスト。
+ * Agent Studio はこれを STS にそのまま転送し、呼び出し元の ARN を得る（SEC-05）。
+ */
+export const signedIdentitySchema = z
+  .object({
+    method: z.literal("POST"),
+    url: z.url(),
+    headers: z.record(z.string(), z.string()),
+    /** base64 */
+    body: z.string().max(4096),
+  })
+  .strict();
+export type SignedIdentity = z.infer<typeof signedIdentitySchema>;
+
+export const registerRequestSchema = z
+  .object({
+    bootstrap_token: z.string().min(32).max(256),
+    identity: signedIdentitySchema,
+    controller_version: z.string().min(1).max(64),
+  })
+  .strict();
+export type RegisterRequest = z.infer<typeof registerRequestSchema>;
+
+export const registerResponseSchema = z.object({
+  runtime_id: z.uuid(),
+  organization_id: z.uuid(),
+  stage: z.enum(["staging", "production"]),
+  access_token: z.string(),
+  expires_in: z.number().int(),
+  /** OpenAI の環境キー（Runtime の Secrets Manager に保存する） */
+  environment_key: z.string().nullable(),
+});
+export type RegisterResponse = z.infer<typeof registerResponseSchema>;
+
+export const tokenRequestSchema = z.object({ identity: signedIdentitySchema }).strict();
+export type TokenRequest = z.infer<typeof tokenRequestSchema>;
+
+export const tokenResponseSchema = z.object({
+  runtime_id: z.uuid(),
+  organization_id: z.uuid(),
+  access_token: z.string(),
+  expires_in: z.number().int(),
+});
+export type TokenResponse = z.infer<typeof tokenResponseSchema>;
+
+/** Runtime 側の Tool Gateway が提供できるツール（Agent Studio に報告する） */
+export const runtimeToolCatalogEntrySchema = z.object({
+  name: toolNameSchema,
+  description: z.string().max(1000),
+  input_schema: inputSchemaSchema,
+  risk: toolRiskSchema,
+  reads_untrusted_content: z.boolean(),
+});
+export type RuntimeToolCatalogEntry = z.infer<typeof runtimeToolCatalogEntrySchema>;
+
+export const heartbeatRequestSchema = z
+  .object({
+    controller_version: z.string().min(1).max(64),
+    /** Session Worker から見た Tool Gateway の MCP エンドポイント（Agent 設定の MCP の URL に使う） */
+    gateway_url: z.url().max(500),
+    active_sessions: z.array(z.uuid()).max(1000),
+    tools: z.array(runtimeToolCatalogEntrySchema).max(500),
+  })
+  .strict();
+export type HeartbeatRequest = z.infer<typeof heartbeatRequestSchema>;
+
+/** Tool Gateway がツール呼び出しを認可するための情報 */
+export const sessionGrantSchema = z.object({
+  session_id: z.uuid(),
+  run_id: z.uuid(),
+  /** Session Worker が Tool Gateway に提示するトークンの SHA-256。平文は Agent Studio も保存しない */
+  token_hash: z.string().regex(/^[0-9a-f]{64}$/),
+  allowed_tools: z.array(toolNameSchema).max(200),
+  policies: z.array(policySchema).max(200),
+  expires_at: z.iso.datetime(),
+});
+export type SessionGrant = z.infer<typeof sessionGrantSchema>;
+
+export const startSessionJobSchema = z.object({
+  type: z.literal("start_session"),
+  job_id: z.uuid(),
+  session: sessionGrantSchema.extend({
+    openai_session_id: z.string().min(1),
+    environment_id: z.string().min(1),
+    remote_url: z.string().min(1),
+    max_lifetime_minutes: z.number().int().min(1).max(1440),
+    idle_timeout_minutes: z.number().int().min(1).max(1440),
+  }),
+});
+
+export const stopSessionJobSchema = z.object({
+  type: z.literal("stop_session"),
+  job_id: z.uuid(),
+  session_id: z.uuid(),
+  reason: z.string().max(500),
+});
+
+export const rotateEnvironmentKeyJobSchema = z.object({
+  type: z.literal("rotate_environment_key"),
+  job_id: z.uuid(),
+});
+
+export const runtimeJobSchema = z.discriminatedUnion("type", [
+  startSessionJobSchema,
+  stopSessionJobSchema,
+  rotateEnvironmentKeyJobSchema,
+]);
+export type RuntimeJob = z.infer<typeof runtimeJobSchema>;
+export type StartSessionJob = z.infer<typeof startSessionJobSchema>;
+
+export const nextJobResponseSchema = z.object({ job: runtimeJobSchema.nullable() });
+
+export const jobResultRequestSchema = z
+  .object({
+    status: z.enum(["succeeded", "failed"]),
+    error: z.string().max(2000).optional(),
+  })
+  .strict();
+export type JobResultRequest = z.infer<typeof jobResultRequestSchema>;
+
+export const workerEventTypeSchema = z.enum(["worker_starting", "worker_running", "worker_stopped", "worker_failed"]);
+export const sessionEventRequestSchema = z
+  .object({
+    type: workerEventTypeSchema,
+    task_arn: z.string().max(512).optional(),
+    detail: z.string().max(2000).optional(),
+  })
+  .strict();
+export type SessionEventRequest = z.infer<typeof sessionEventRequestSchema>;
+
+export const activeSessionsResponseSchema = z.object({ sessions: z.array(sessionGrantSchema) });
+
+export const approvalRequestSchema = z
+  .object({
+    session_id: z.uuid(),
+    tool: toolNameSchema,
+    args_hash: z.string().regex(/^[0-9a-f]{64}$/),
+    /** 承認者に見せる引数（Tool Gateway 側で長さを制限したもの） */
+    args_preview: z.string().max(4000),
+    reason: z.string().max(1000),
+    timeout_minutes: z.number().int().min(1).max(10080),
+  })
+  .strict();
+export type ApprovalRequest = z.infer<typeof approvalRequestSchema>;
+
+export const approvalStatusSchema = z.enum(["pending", "approved", "denied", "expired", "consumed"]);
+export type ApprovalStatus = z.infer<typeof approvalStatusSchema>;
+
+export const approvalResponseSchema = z.object({
+  approval_id: z.uuid(),
+  status: approvalStatusSchema,
+});
+export type ApprovalResponse = z.infer<typeof approvalResponseSchema>;
+
+export const toolAuditEventSchema = z.object({
+  session_id: z.uuid(),
+  tool: z.string().max(128),
+  args_hash: z.string().max(64),
+  decision: z.enum(["allowed", "denied", "approval_required", "executed", "failed"]),
+  detail: z.string().max(1000).optional(),
+  duration_ms: z.number().int().nonnegative().optional(),
+  at: z.iso.datetime(),
+});
+export type ToolAuditEvent = z.infer<typeof toolAuditEventSchema>;
+
+export const auditBatchRequestSchema = z.object({ events: z.array(toolAuditEventSchema).min(1).max(500) }).strict();
+
+export const environmentKeyResponseSchema = z.object({ environment_key: z.string().nullable() });
+
+/** Runtime API のパス（Agent Studio 側のルート定義と Runtime Controller のクライアントで共有） */
+export const RUNTIME_API = {
+  register: "/runtime/v1/register",
+  token: "/runtime/v1/token",
+  heartbeat: "/runtime/v1/heartbeat",
+  nextJob: "/runtime/v1/jobs/next",
+  jobResult: (jobId: string) => `/runtime/v1/jobs/${jobId}/result`,
+  sessionEvent: (sessionId: string) => `/runtime/v1/sessions/${sessionId}/events`,
+  activeSessions: "/runtime/v1/sessions/active",
+  approvals: "/runtime/v1/approvals",
+  approval: (approvalId: string) => `/runtime/v1/approvals/${approvalId}`,
+  consumeApproval: (approvalId: string) => `/runtime/v1/approvals/${approvalId}/consume`,
+  audit: "/runtime/v1/audit",
+  environmentKey: "/runtime/v1/environment-key",
+} as const;

@@ -1,0 +1,72 @@
+# ローカル開発用の Tool Gateway のツール設定（TOOL_CONFIG_PATH に指定する）。
+# 本番では infra/company/<tenant>/config.yaml の runtime.tools が SSM パラメータ /<prefix>/tool-config に入る。
+# 形式は packages/contracts/src/runtime-config.ts の RuntimeToolConfig。
+#
+# 接続先は手元で動かす demo-internal-api（http://localhost:8090）。
+# 認証情報は CONNECTION_SECRETS_SOURCE=env のとき、環境変数 CONNECTION_SECRET_DEMO_INTERNAL_API から読む
+# （値は demo-internal-api の DEMO_API_TOKEN と同じにする）。
+version: 1
+
+tools:
+  - name: list_products
+    description: "商品の一覧（商品 ID・商品名・現在の価格・在庫数）を取得します。"
+    risk: read
+    input_schema:
+      type: object
+      properties: {}
+      additionalProperties: false
+    http:
+      method: GET
+      url: "http://localhost:8090/products"
+      auth: { type: bearer, secret: demo-internal-api }
+      timeout_ms: 5000
+
+  - name: get_product
+    description: "商品 ID を指定して、商品名・現在の価格・在庫数を取得します。"
+    risk: read
+    input_schema:
+      type: object
+      properties:
+        product_id: { type: string, description: "商品 ID（例: P-001）" }
+      required: [product_id]
+      additionalProperties: false
+    http:
+      method: GET
+      url: "http://localhost:8090/products/{product_id}"
+      auth: { type: bearer, secret: demo-internal-api }
+      timeout_ms: 5000
+
+  - name: update_price
+    description: "商品の価格を変更します。price_change に変更額（円）を指定します。値下げはマイナスです。"
+    risk: financial
+    input_schema:
+      type: object
+      properties:
+        product_id: { type: string, description: "商品 ID（例: P-001）" }
+        price_change: { type: number, description: "価格の変更額（円）。値上げはプラス、値下げはマイナス" }
+      required: [product_id, price_change]
+      additionalProperties: false
+    http:
+      method: POST
+      url: "http://localhost:8090/products/{product_id}/price"
+      auth: { type: bearer, secret: demo-internal-api }
+      timeout_ms: 5000
+    # Runtime 側（顧客が管理）の制限。Agent Studio の設定に関係なく適用される
+    policies:
+      - type: deny
+        tool: update_price
+        when: { field: price_change, op: ">", value: 10000, abs: true }
+        reason: "1 回の価格変更は ±10,000 円までです（Runtime 側の制限）"
+
+# Browser Worker（runtime/browser-worker）を手元で動かす場合はコメントを外す
+upstream_mcp: []
+# upstream_mcp:
+#   - name: browser
+#     url: "http://localhost:8931/mcp"
+#     tools:
+#       - { name: browser_navigate, risk: read, reads_untrusted_content: true }
+#       - { name: browser_snapshot, risk: read, reads_untrusted_content: true }
+#       - { name: browser_click, risk: write }
+#       - { name: browser_type, risk: write }
+
+policies: []

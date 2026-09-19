@@ -1,0 +1,92 @@
+import { z } from "zod";
+import { toolNameSchema } from "./common.js";
+
+/**
+ * ツールの実行場所（TOOL-02）
+ * - studio_function:    Agent Studio が実行する function tool（通知・Webhook など）
+ * - openai_service_mcp: OpenAI から接続する公開 MCP サーバー（connection_origin: "service"）
+ * - runtime_mcp:        企業 Runtime 内の Tool Gateway 経由で実行する（connection_origin: "environment"）
+ */
+export const toolExecutionLocationSchema = z.enum(["studio_function", "openai_service_mcp", "runtime_mcp"]);
+export type ToolExecutionLocation = z.infer<typeof toolExecutionLocationSchema>;
+
+/** リスク区分（TOOL-04）。承認ポリシーの初期値に使う。 */
+export const toolRiskSchema = z.enum(["read", "write", "external_send", "financial", "destructive"]);
+export type ToolRisk = z.infer<typeof toolRiskSchema>;
+
+export const WRITE_LIKE_RISKS: readonly ToolRisk[] = ["write", "external_send", "financial", "destructive"];
+
+/** ツール入力の JSON Schema（トップレベルは object に限定） */
+export const inputSchemaSchema = z
+  .object({
+    type: z.literal("object"),
+    properties: z.record(z.string(), z.unknown()).optional(),
+    required: z.array(z.string()).optional(),
+    additionalProperties: z.boolean().optional(),
+  })
+  .loose();
+export type ToolInputSchema = z.infer<typeof inputSchemaSchema>;
+
+const EMPTY_INPUT_SCHEMA: ToolInputSchema = { type: "object", properties: {}, additionalProperties: false };
+
+/** Agent Studio が実行する function tool の実装種別 */
+export const studioFunctionSpecSchema = z
+  .object({
+    handler: z.literal("http_webhook"),
+    /** 送信先 URL（https のみ） */
+    url: z.url().refine((u) => u.startsWith("https://"), "https の URL を指定してください"),
+    /** 認証ヘッダの値を持つ Connection（任意） */
+    connection_id: z.uuid().optional(),
+  })
+  .strict();
+
+export const serviceMcpSpecSchema = z
+  .object({
+    server_url: z.url().refine((u) => u.startsWith("https://"), "https の URL を指定してください"),
+    /** OpenAI の vault に保存した認証情報を使う場合の Connection */
+    connection_id: z.uuid().optional(),
+    /** 使ってよいツール名（省略時はすべて） */
+    allowed_tools: z.array(z.string().min(1).max(128)).max(100).optional(),
+  })
+  .strict();
+
+export const toolVersionSpecSchema = z.discriminatedUnion("execution_location", [
+  z
+    .object({
+      execution_location: z.literal("studio_function"),
+      description: z.string().min(1).max(1000),
+      input_schema: inputSchemaSchema.default(EMPTY_INPUT_SCHEMA),
+      risk: toolRiskSchema,
+      studio_function: studioFunctionSpecSchema,
+    })
+    .strict(),
+  z
+    .object({
+      execution_location: z.literal("openai_service_mcp"),
+      description: z.string().min(1).max(1000),
+      risk: toolRiskSchema,
+      service_mcp: serviceMcpSpecSchema,
+    })
+    .strict(),
+  z
+    .object({
+      execution_location: z.literal("runtime_mcp"),
+      description: z.string().min(1).max(1000),
+      input_schema: inputSchemaSchema.default(EMPTY_INPUT_SCHEMA),
+      risk: toolRiskSchema,
+      /** ブラウザや外部の文章など、信頼できない内容を読み込むツールか（POL-07） */
+      reads_untrusted_content: z.boolean().default(false),
+    })
+    .strict(),
+]);
+export type ToolVersionSpec = z.infer<typeof toolVersionSpecSchema>;
+export type ToolVersionSpecInput = z.input<typeof toolVersionSpecSchema>;
+
+export const createToolInputSchema = z
+  .object({
+    name: toolNameSchema,
+    display_name: z.string().min(1).max(100),
+    spec: toolVersionSpecSchema,
+  })
+  .strict();
+export type CreateToolInput = z.input<typeof createToolInputSchema>;

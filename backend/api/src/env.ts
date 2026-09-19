@@ -1,0 +1,92 @@
+import { hostname } from "node:os";
+import { z } from "zod";
+
+const isProduction = process.env.NODE_ENV === "production";
+
+const envSchema = z
+  .object({
+    NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+    APP_ENV: z.string().default("local"),
+    PORT: z.coerce.number().int().default(3200),
+    PUBLIC_BASE_URL: z.string().default("http://localhost:3201"),
+    LOG_LEVEL: z.string().default("info"),
+
+    // DB: DATABASE_URL か、DB_* の組み合わせ（ECS ではこちら）
+    DATABASE_URL: z.string().optional(),
+    DB_HOST: z.string().optional(),
+    DB_PORT: z.coerce.number().int().default(5432),
+    DB_NAME: z.string().default("agent_studio"),
+    DB_APP_USER: z.string().default("agent_studio_app"),
+    DB_APP_PASSWORD: z.string().optional(),
+    DB_POOL_MAX: z.coerce.number().int().default(10),
+    DB_SSL_CA_PATH: z.string().default("/etc/ssl/certs/rds-global-bundle.pem"),
+
+    // 利用者の認証
+    AUTH_MODE: z.enum(["cognito", "dev"]).default(isProduction ? "cognito" : "dev"),
+    COGNITO_USER_POOL_ID: z.string().optional(),
+    COGNITO_CLIENT_ID: z.string().optional(),
+
+    // Runtime の認証
+    RUNTIME_TOKEN_SECRET: z.string().min(32).optional(),
+    RUNTIME_SERVER_ID: z.string().default("agent-studio-local"),
+    RUNTIME_IDENTITY_MODE: z.enum(["aws", "dev"]).default("aws"),
+
+    // シークレットの保管
+    SECRETS_MODE: z.enum(["aws", "memory"]).default(isProduction ? "aws" : "memory"),
+    SECRETS_PREFIX: z.string().default("agent-studio/local"),
+    SECRETS_KMS_KEY_ID: z.string().optional(),
+    AWS_REGION: z.string().default("ap-northeast-1"),
+
+    ARTIFACTS_BUCKET: z.string().optional(),
+    AUDIT_EXPORT_BUCKET: z.string().optional(),
+
+    // OpenAI Agents API
+    AGENTS_API_MODE: z.enum(["openai", "fake"]).default(isProduction ? "openai" : "fake"),
+    OPENAI_DEFAULT_MODEL: z.string().default(""),
+    /** ローカル開発だけで使う共通キー（本番では組織ごとのキーのみ使う） */
+    OPENAI_API_KEY: z.string().optional(),
+
+    // 日本語 → Manifest の生成（Claude）
+    ANTHROPIC_API_KEY: z.string().optional(),
+    MANIFEST_GENERATOR_MODEL: z.string().default("claude-opus-5"),
+
+    // Worker
+    WORKER_ID: z.string().default(`${hostname()}-${process.pid}`),
+    WORKER_MAX_CONCURRENT_RUNS: z.coerce.number().int().min(1).default(20),
+    SESSION_MAX_LIFETIME_MINUTES: z.coerce.number().int().default(120),
+    SESSION_IDLE_TIMEOUT_MINUTES: z.coerce.number().int().default(15),
+    WORKER_CONNECT_TIMEOUT_MINUTES: z.coerce.number().int().default(10),
+  })
+  .superRefine((env, ctx) => {
+    if (env.NODE_ENV !== "production") return;
+    // 本番で開発用の設定が有効になっていたら起動しない
+    const devOnly: [boolean, string][] = [
+      [env.AUTH_MODE === "dev", "AUTH_MODE=dev は本番では使えません"],
+      [env.RUNTIME_IDENTITY_MODE === "dev", "RUNTIME_IDENTITY_MODE=dev は本番では使えません"],
+      [env.SECRETS_MODE === "memory", "SECRETS_MODE=memory は本番では使えません"],
+      [!env.RUNTIME_TOKEN_SECRET, "RUNTIME_TOKEN_SECRET が必要です"],
+      [env.APP_ENV === "production" && env.AGENTS_API_MODE === "fake", "本番環境では AGENTS_API_MODE=fake は使えません"],
+    ];
+    for (const [bad, message] of devOnly) {
+      if (bad) ctx.addIssue({ code: "custom", message });
+    }
+    if (env.AUTH_MODE === "cognito" && (!env.COGNITO_USER_POOL_ID || !env.COGNITO_CLIENT_ID)) {
+      ctx.addIssue({ code: "custom", message: "COGNITO_USER_POOL_ID と COGNITO_CLIENT_ID が必要です" });
+    }
+  });
+
+export type Env = z.infer<typeof envSchema>;
+
+export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
+  const result = envSchema.safeParse(source);
+  if (!result.success) {
+    const messages = result.error.issues.map((i) => `- ${i.path.join(".") || "(env)"}: ${i.message}`).join("\n");
+    throw new Error(`環境変数が正しくありません:\n${messages}`);
+  }
+  return result.data;
+}
+
+/** 開発用の固定値（本番では superRefine で必須にしている） */
+export function runtimeTokenSecret(env: Env): string {
+  return env.RUNTIME_TOKEN_SECRET ?? "local-development-runtime-token-secret-0123456789";
+}

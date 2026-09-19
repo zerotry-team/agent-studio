@@ -1,0 +1,215 @@
+name: Deploy Agent Studio
+
+# Agent Studio 本体（Control Plane）のデプロイ。
+# - main への push: staging に自動でデプロイ
+# - 手動実行: staging / production を選んでデプロイ（production は GitHub Environment の承認ルールで保護する）
+#
+# 流れ（infra/README.md「Agent Studio のデプロイの流れ」）:
+#   1. api / web のイメージをビルドして ECR に push（タグ = commit SHA）
+#   2. Terraform: 基盤と migrate のタスク定義だけを新しいイメージにする（サービスは今のイメージのまま）
+#   3. マイグレーションを run-task で実行
+#   4. Terraform: api / worker / web を新しいイメージにする
+#   5. サービスの安定を待ち、デプロイしたタグを SSM に記録
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - "backend/**"
+      - "frontend/**"
+      - "prisma/**"
+      - "infra/agent-studio/**"
+      - "infra/modules/control-plane/**"
+      - "infra/modules/network/**"
+      - "infra/modules/ecs-execution-role/**"
+      - "yarn.lock"
+      - ".github/workflows/deploy-control-plane.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: デプロイ先
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-agent-studio-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+env:
+  STAGE: ${{ github.event.inputs.environment || 'staging' }}
+  TERRAFORM_VERSION: "1.15.8"
+
+jobs:
+  images:
+    name: イメージのビルド（${{ matrix.image.name }}）
+    runs-on: ubuntu-24.04
+    environment: agent-studio-${{ github.event.inputs.environment || 'staging' }}
+    strategy:
+      matrix:
+        image:
+          - { name: api, dockerfile: backend/api/Dockerfile }
+          - { name: web, dockerfile: frontend/web/Dockerfile }
+    steps:
+      - name: AWS の設定を確認
+        id: configured
+        run: |
+          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ]; then
+            echo "::notice::GitHub Environment agent-studio-${STAGE} に AWS_DEPLOY_ROLE_ARN が設定されていないため、デプロイをスキップします（infra/README.md）"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.configured.outputs.ok == 'true'
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.configured.outputs.ok == 'true'
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        if: steps.configured.outputs.ok == 'true'
+        id: ecr
+      - uses: docker/setup-buildx-action@v3
+        if: steps.configured.outputs.ok == 'true'
+      - uses: docker/build-push-action@v6
+        if: steps.configured.outputs.ok == 'true'
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/agent-studio/${{ matrix.image.name }}:${{ github.sha }}
+          cache-from: type=gha,scope=deploy-${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=deploy-${{ matrix.image.name }}
+
+  deploy:
+    name: デプロイ（${{ github.event.inputs.environment || 'staging' }}）
+    runs-on: ubuntu-24.04
+    needs: images
+    environment: agent-studio-${{ github.event.inputs.environment || 'staging' }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      ROOT: infra/agent-studio/${{ github.event.inputs.environment || 'staging' }}
+      NEW_TAG: ${{ github.sha }}
+    steps:
+      - name: AWS の設定を確認
+        id: configured
+        run: |
+          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ]; then
+            echo "::notice::AWS の設定がないため、デプロイをスキップします"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.configured.outputs.ok == 'true'
+      - uses: hashicorp/setup-terraform@v3
+        if: steps.configured.outputs.ok == 'true'
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.configured.outputs.ok == 'true'
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform init
+        if: steps.configured.outputs.ok == 'true'
+        run: |
+          terraform -chdir="$ROOT" init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=agent-studio/${STAGE}/terraform.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: いま動いているイメージのタグ
+        if: steps.configured.outputs.ok == 'true'
+        id: current
+        run: |
+          TAG=$(aws ssm get-parameter --name "/as/${STAGE}/deployed-image-tag" --query Parameter.Value --output text 2>/dev/null || echo none)
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "現在のタグ: ${TAG}"
+
+      - name: 基盤と migrate のタスク定義を更新（サービスはまだ今のイメージ）
+        if: steps.configured.outputs.ok == 'true'
+        run: |
+          terraform -chdir="$ROOT" apply -input=false -auto-approve \
+            -var="aws_account_id=${{ vars.AWS_ACCOUNT_ID }}" \
+            -var="image_registry=${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com" \
+            -var="image_tag=${{ steps.current.outputs.tag }}" \
+            -var="migrate_image_tag=${NEW_TAG}"
+
+      - name: マイグレーション
+        if: steps.configured.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          CLUSTER=$(terraform -chdir="$ROOT" output -raw cluster_name)
+          FAMILY=$(terraform -chdir="$ROOT" output -raw migrate_task_definition_family)
+          SG=$(terraform -chdir="$ROOT" output -raw migrate_security_group_id)
+          SUBNETS=$(terraform -chdir="$ROOT" output -json private_subnet_ids | jq -r 'join(",")')
+          TASK_ARN=$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$FAMILY" --launch-type FARGATE \
+            --started-by "github-${GITHUB_RUN_ID}" \
+            --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SG}],assignPublicIp=DISABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+          echo "migrate task: ${TASK_ARN}"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
+          EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+            --query "tasks[0].containers[?name=='api'].exitCode | [0]" --output text)
+          REASON=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --query 'tasks[0].stoppedReason' --output text)
+          echo "exit code: ${EXIT_CODE} / ${REASON}"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::マイグレーションに失敗しました（CloudWatch Logs を確認してください）"
+            exit 1
+          fi
+
+      - name: api / worker / web を新しいイメージにする
+        if: steps.configured.outputs.ok == 'true'
+        run: |
+          terraform -chdir="$ROOT" apply -input=false -auto-approve \
+            -var="aws_account_id=${{ vars.AWS_ACCOUNT_ID }}" \
+            -var="image_registry=${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com" \
+            -var="image_tag=${NEW_TAG}" \
+            -var="migrate_image_tag=${NEW_TAG}"
+
+      - name: サービスの安定を待つ
+        if: steps.configured.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          CLUSTER=$(terraform -chdir="$ROOT" output -raw cluster_name)
+          aws ecs wait services-stable --cluster "$CLUSTER" --services \
+            "$(terraform -chdir="$ROOT" output -raw api_service_name)" \
+            "$(terraform -chdir="$ROOT" output -raw worker_service_name)" \
+            "$(terraform -chdir="$ROOT" output -raw web_service_name)"
+
+      - name: ヘルスチェック
+        if: steps.configured.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          URL=$(terraform -chdir="$ROOT" output -raw public_url)
+          for _ in $(seq 1 30); do
+            if curl -fsS "${URL}/health"; then echo; exit 0; fi
+            sleep 10
+          done
+          echo "::error::${URL}/health が応答しません"
+          exit 1
+
+      - name: デプロイしたタグを記録
+        if: steps.configured.outputs.ok == 'true'
+        run: aws ssm put-parameter --name "/as/${STAGE}/deployed-image-tag" --value "${NEW_TAG}" --type String --overwrite
+
+      - name: まとめ
+        if: steps.configured.outputs.ok == 'true'
+        run: |
+          {
+            echo "### Agent Studio（${STAGE}）"
+            echo "- URL: $(terraform -chdir="$ROOT" output -raw public_url)"
+            echo "- イメージ: \`${NEW_TAG}\`"
+            echo "- Runtime の接続先（runtime_server_id）: \`$(terraform -chdir="$ROOT" output -raw runtime_server_id)\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,26 @@
+{
+  "name": "@agent-studio/demo-internal-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "受け入れシナリオ用の社内 API モック（商品と価格）",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "type-check": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.17",
+    "hono": "^4.13.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.23.13",
+    "typescript": "5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

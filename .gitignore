@@ -1,0 +1,43 @@
+# dependencies
+node_modules/
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+
+# build output
+dist/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+generated/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+
+# terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.auto.tfvars
+terraform.tfvars
+!*.example.tfvars
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
