@@ -108,3 +108,10 @@ variable "github_deployment_branch" {
   type        = string
   default     = "main"
 }
+
+variable "github_environment_secrets" {
+  description = "GitHub Environment に設定するシークレット（ログで *** に置き換わる。公開リポジトリで見せたくない値。例: INITIAL_ADMIN_EMAIL、IMAGE_REGISTRY）"
+  type        = map(string)
+  default     = {}
+  sensitive   = true
+}

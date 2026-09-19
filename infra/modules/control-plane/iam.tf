@@ -107,12 +107,12 @@ resource "aws_iam_role_policy" "app_task" {
 
 resource "aws_iam_role" "web_task" {
   name               = "${local.name}-web-task"
-  description        = "Agent Studio Web（AWS の権限なし）"
+  description        = "Agent Studio web (no AWS permissions)"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
 }
 
 resource "aws_iam_role" "migrate_task" {
   name               = "${local.name}-migrate-task"
-  description        = "Agent Studio DB migration（AWS の権限なし。DB のシークレットは実行ロールが注入する）"
+  description        = "Agent Studio DB migration (no AWS permissions; DB secrets are injected by the execution role)"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
 }

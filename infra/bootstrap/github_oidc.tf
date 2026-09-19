@@ -49,7 +49,7 @@ data "aws_iam_policy_document" "github_deploy_assume" {
 
 resource "aws_iam_role" "github_deploy" {
   name                 = var.deploy_role_name
-  description          = "GitHub Actions (${var.github_repository}) が Terraform の適用とデプロイに使うロール"
+  description          = "Used by GitHub Actions (${var.github_repository}) to apply Terraform and deploy"
   assume_role_policy   = data.aws_iam_policy_document.github_deploy_assume.json
   max_session_duration = 3600
 }

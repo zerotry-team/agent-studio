@@ -24,7 +24,7 @@ data "aws_iam_policy_document" "ecs_tasks_assume" {
 
 resource "aws_iam_role" "runtime" {
   name               = "${local.prefix}-runtime"
-  description        = "Agent Studio Runtime Controller + Tool Gateway（Agent Studio に登録するロール）"
+  description        = "Agent Studio Runtime Controller + Tool Gateway (registered in Agent Studio)"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
 }
 
@@ -126,7 +126,7 @@ resource "aws_iam_role_policy" "runtime" {
 
 resource "aws_iam_role" "session_worker_task" {
   name               = "${local.prefix}-session-worker-task"
-  description        = "Session Worker（AWS の権限なし）"
+  description        = "Session Worker (no AWS permissions)"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
 }
 

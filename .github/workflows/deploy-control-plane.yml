@@ -49,6 +49,9 @@ jobs:
     name: イメージのビルド（${{ matrix.image.name }}）
     runs-on: ubuntu-24.04
     environment: agent-studio-${{ github.event.inputs.environment || 'staging' }}
+    env:
+      # シークレットを参照したジョブでは、その値（とそれを含む ARN など）がログで *** になる
+      MASK_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
     strategy:
       matrix:
         image:
@@ -98,6 +101,7 @@ jobs:
     env:
       ROOT: infra/agent-studio/${{ github.event.inputs.environment || 'staging' }}
       NEW_TAG: ${{ github.sha }}
+      MASK_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
     steps:
       - name: AWS の設定を確認
         id: configured
@@ -141,9 +145,9 @@ jobs:
         if: steps.configured.outputs.ok == 'true'
         run: |
           terraform -chdir="$ROOT" apply -input=false -auto-approve \
-            -var="aws_account_id=${{ vars.AWS_ACCOUNT_ID }}" \
-            -var="image_registry=${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com" \
-            -var="initial_admin_email=${{ vars.INITIAL_ADMIN_EMAIL }}" \
+            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+            -var="image_registry=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com" \
+            -var="initial_admin_email=${{ secrets.INITIAL_ADMIN_EMAIL }}" \
             -var="image_tag=${{ steps.current.outputs.tag }}" \
             -var="migrate_image_tag=${NEW_TAG}"
 
@@ -174,9 +178,9 @@ jobs:
         if: steps.configured.outputs.ok == 'true'
         run: |
           terraform -chdir="$ROOT" apply -input=false -auto-approve \
-            -var="aws_account_id=${{ vars.AWS_ACCOUNT_ID }}" \
-            -var="image_registry=${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com" \
-            -var="initial_admin_email=${{ vars.INITIAL_ADMIN_EMAIL }}" \
+            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+            -var="image_registry=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com" \
+            -var="initial_admin_email=${{ secrets.INITIAL_ADMIN_EMAIL }}" \
             -var="image_tag=${NEW_TAG}" \
             -var="migrate_image_tag=${NEW_TAG}"
 

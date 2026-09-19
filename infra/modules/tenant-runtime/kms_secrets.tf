@@ -49,7 +49,7 @@ resource "aws_kms_alias" "this" {
 
 resource "aws_secretsmanager_secret" "bootstrap_token" {
   name                    = "${local.secrets_prefix}/bootstrap-token"
-  description             = "Agent Studio が発行した Bootstrap Token（一度だけ有効）"
+  description             = "Bootstrap token issued by Agent Studio (single use)"
   kms_key_id              = aws_kms_key.this.arn
   recovery_window_in_days = var.secret_recovery_window_days
 }
@@ -67,7 +67,7 @@ resource "aws_secretsmanager_secret_version" "bootstrap_token" {
 
 resource "aws_secretsmanager_secret" "openai_environment_key" {
   name                    = "${local.secrets_prefix}/openai-environment-key"
-  description             = "OpenAI の環境キー（Session Worker の CODEX_API_KEY）"
+  description             = "OpenAI environment key (CODEX_API_KEY of Session Worker)"
   kms_key_id              = aws_kms_key.this.arn
   recovery_window_in_days = var.secret_recovery_window_days
 }
@@ -87,7 +87,7 @@ resource "aws_secretsmanager_secret" "connection" {
   for_each = toset(local.connection_names)
 
   name                    = "${local.secrets_prefix}/connections/${each.value}"
-  description             = "業務システム ${each.value} の認証情報（Tool Gateway だけが読む）"
+  description             = "Credential for ${each.value} (read only by Tool Gateway)"
   kms_key_id              = aws_kms_key.this.arn
   recovery_window_in_days = var.secret_recovery_window_days
 }

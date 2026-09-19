@@ -47,6 +47,9 @@ jobs:
     name: Runtime のイメージ（${{ matrix.image.name }}）
     runs-on: ubuntu-24.04
     environment: agent-studio-${{ github.event.inputs.stage || 'staging' }}
+    env:
+      # シークレットを参照したジョブでは、その値（とそれを含む ARN など）がログで *** になる
+      MASK_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
     strategy:
       matrix:
         image:
@@ -121,11 +124,13 @@ jobs:
     environment: company-${{ matrix.slug }}-${{ github.event.inputs.stage || 'staging' }}
     env:
       ROOT: infra/company/${{ matrix.slug }}/${{ github.event.inputs.stage || 'staging' }}
+      MASK_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      MASK_IMAGE_REGISTRY: ${{ secrets.IMAGE_REGISTRY }}
     steps:
       - name: AWS の設定を確認
         id: configured
         run: |
-          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ] || [ -z "${{ vars.IMAGE_REGISTRY }}" ]; then
+          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ] || [ -z "${{ secrets.IMAGE_REGISTRY }}" ]; then
             echo "::notice::GitHub Environment company-${{ matrix.slug }}-${STAGE} に AWS_DEPLOY_ROLE_ARN / IMAGE_REGISTRY がないため、スキップします"
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
@@ -154,7 +159,7 @@ jobs:
         if: steps.configured.outputs.ok == 'true'
         run: |
           terraform -chdir="$ROOT" apply -input=false -auto-approve \
-            -var="image_registry=${{ vars.IMAGE_REGISTRY }}" \
+            -var="image_registry=${{ secrets.IMAGE_REGISTRY }}" \
             -var="image_tag=${{ github.sha }}"
       - name: Runtime の安定を待つ
         if: steps.configured.outputs.ok == 'true'

@@ -48,3 +48,19 @@ variable "allowed_regions" {
   type        = list(string)
   default     = ["ap-northeast-1"]
 }
+
+variable "attach_companies_scp" {
+  description = "Companies OU に SCP（ガードレール）を付けるか。Organizations で SCP が有効になっていない場合、true にすると組織全体で SCP を有効にする必要がある"
+  type        = bool
+  default     = true
+}
+
+variable "create_bootstrap_user" {
+  description = <<-EOT
+    infra/bootstrap の適用に使う IAM ユーザーを作るか。ルートユーザーはロールを引き受けられないため、
+    作成したアカウントに入るための最小限のユーザー（OrganizationAccountAccessRole の引き受けだけができる）を作る。
+    初期設定が終わったら false にして適用し、削除する。
+  EOT
+  type        = bool
+  default     = false
+}

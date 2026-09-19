@@ -44,7 +44,7 @@ resource "aws_ecr_lifecycle_policy" "this" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "直近 ${var.ecr_image_retention_count} 個のイメージだけ残す"
+      description  = "Keep only the latest ${var.ecr_image_retention_count} images"
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"

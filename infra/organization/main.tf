@@ -82,15 +82,17 @@ data "aws_iam_policy_document" "companies_guardrails" {
 }
 
 resource "aws_organizations_policy" "companies_guardrails" {
+  count = var.attach_companies_scp ? 1 : 0
+
   name        = "agent-studio-companies-guardrails"
-  description = "企業の Runtime のアカウントのガードレール（リージョン制限・証跡の停止禁止・組織からの離脱禁止）"
+  description = "Guardrails for company runtime accounts (region restriction, no CloudTrail stop, no leaving organization)"
   type        = "SERVICE_CONTROL_POLICY"
   content     = data.aws_iam_policy_document.companies_guardrails.json
 }
 
 resource "aws_organizations_policy_attachment" "companies_guardrails" {
-  count = contains(var.organizational_units, "Companies") ? 1 : 0
+  count = var.attach_companies_scp && contains(var.organizational_units, "Companies") ? 1 : 0
 
-  policy_id = aws_organizations_policy.companies_guardrails.id
+  policy_id = aws_organizations_policy.companies_guardrails[0].id
   target_id = aws_organizations_organizational_unit.this["Companies"].id
 }

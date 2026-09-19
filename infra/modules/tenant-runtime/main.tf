@@ -53,7 +53,7 @@ module "network" {
 # Tool Gateway のツール設定（RuntimeToolConfig の JSON）。Tool Gateway が起動時に読む
 resource "aws_ssm_parameter" "tool_config" {
   name        = "/${local.prefix}/tool-config"
-  description = "Tool Gateway のツール設定（infra/company/<tenant>/config.yaml の runtime.tools）"
+  description = "Tool Gateway tool config (runtime.tools in infra/company/<tenant>/config.yaml)"
   type        = "String"
   tier        = local.tool_config_bytes > 4096 ? "Advanced" : "Standard"
   value       = local.tool_config_json

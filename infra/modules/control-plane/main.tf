@@ -48,7 +48,7 @@ module "network" {
 
 resource "aws_ssm_parameter" "deployed_image_tag" {
   name        = "/as/${var.environment}/deployed-image-tag"
-  description = "現在デプロイされている api / worker / web のイメージタグ（CI/CD が書き込む）"
+  description = "Image tag of api/worker/web currently deployed (written by CI/CD)"
   type        = "String"
   value       = "none"
 

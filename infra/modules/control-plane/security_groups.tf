@@ -7,7 +7,7 @@
 
 resource "aws_security_group" "alb" {
   name        = "${local.name}-alb"
-  description = "ALB: CloudFront からだけ受け付ける"
+  description = "ALB: accepts only CloudFront"
   vpc_id      = module.network.vpc_id
   tags        = { Name = "${local.name}-alb" }
 }
@@ -88,7 +88,7 @@ resource "aws_vpc_security_group_ingress_rule" "api_from_alb" {
 
 resource "aws_vpc_security_group_ingress_rule" "api_from_web" {
   security_group_id            = aws_security_group.api.id
-  description                  = "Service Connect (web -> api)"
+  description                  = "Service Connect from web to api"
   referenced_security_group_id = aws_security_group.web.id
   ip_protocol                  = "tcp"
   from_port                    = 3200
