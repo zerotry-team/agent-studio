@@ -32,8 +32,10 @@ const envSchema = z
     RUNTIME_IDENTITY_MODE: z.enum(["aws", "dev"]).default("aws"),
 
     // シークレットの保管
-    SECRETS_MODE: z.enum(["aws", "memory"]).default(isProduction ? "aws" : "memory"),
+    SECRETS_MODE: z.enum(["aws", "file", "memory"]).default(isProduction ? "aws" : "file"),
     SECRETS_PREFIX: z.string().default("agent-studio/local"),
+    /** SECRETS_MODE=file のときの保存先（ローカル開発用。API と Worker で同じパスにする） */
+    SECRETS_FILE: z.string().default(".secrets.local.json"),
     SECRETS_KMS_KEY_ID: z.string().optional(),
     AWS_REGION: z.string().default("ap-northeast-1"),
 
@@ -63,7 +65,7 @@ const envSchema = z
     const devOnly: [boolean, string][] = [
       [env.AUTH_MODE === "dev", "AUTH_MODE=dev は本番では使えません"],
       [env.RUNTIME_IDENTITY_MODE === "dev", "RUNTIME_IDENTITY_MODE=dev は本番では使えません"],
-      [env.SECRETS_MODE === "memory", "SECRETS_MODE=memory は本番では使えません"],
+      [env.SECRETS_MODE !== "aws", `SECRETS_MODE=${env.SECRETS_MODE} は本番では使えません`],
       [!env.RUNTIME_TOKEN_SECRET, "RUNTIME_TOKEN_SECRET が必要です"],
       [env.APP_ENV === "production" && env.AGENTS_API_MODE === "fake", "本番環境では AGENTS_API_MODE=fake は使えません"],
     ];

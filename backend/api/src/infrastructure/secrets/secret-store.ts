@@ -1,3 +1,5 @@
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import {
   CreateSecretCommand,
   GetSecretValueCommand,
@@ -57,7 +59,37 @@ export class AwsSecretStore implements SecretStore {
   }
 }
 
-/** ローカル開発・テスト用（本番では env.ts が起動を止める） */
+/** ローカル開発用: JSON ファイルに保存する。API と Worker が同じファイルを見るのでプロセス間で共有できる */
+export class FileSecretStore implements SecretStore {
+  constructor(private readonly filePath: string) {}
+
+  private async read(): Promise<Record<string, string>> {
+    try {
+      return JSON.parse(await readFile(this.filePath, "utf8")) as Record<string, string>;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+      throw e;
+    }
+  }
+
+  async put(name: string, value: string): Promise<string> {
+    const arn = `arn:aws:secretsmanager:local:000000000000:secret:${name}`;
+    const values = await this.read();
+    values[arn] = value;
+    await mkdir(dirname(resolve(this.filePath)), { recursive: true });
+    // 他のプロセスが半端な内容を読まないよう、一時ファイルに書いてから置き換える
+    const tmp = `${this.filePath}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify(values, null, 2), { mode: 0o600 });
+    await rename(tmp, this.filePath);
+    return arn;
+  }
+
+  async get(ref: string): Promise<string | null> {
+    return (await this.read())[ref] ?? null;
+  }
+}
+
+/** テスト用（プロセス内だけ・本番では env.ts が起動を止める） */
 export class MemorySecretStore implements SecretStore {
   private readonly values = new Map<string, string>();
 
@@ -73,7 +105,14 @@ export class MemorySecretStore implements SecretStore {
 }
 
 export function createSecretStore(env: Env): SecretStore {
-  return env.SECRETS_MODE === "aws" ? new AwsSecretStore(env.AWS_REGION, env.SECRETS_KMS_KEY_ID) : new MemorySecretStore();
+  switch (env.SECRETS_MODE) {
+    case "aws":
+      return new AwsSecretStore(env.AWS_REGION, env.SECRETS_KMS_KEY_ID);
+    case "file":
+      return new FileSecretStore(env.SECRETS_FILE);
+    case "memory":
+      return new MemorySecretStore();
+  }
 }
 
 /** シークレット名の規約（deployment-contract.md §4.1） */

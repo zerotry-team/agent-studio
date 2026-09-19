@@ -89,6 +89,8 @@ Dockerfile はすべてリポジトリのルートをビルドコンテキスト
 | `COGNITO_USER_POOL_ID` / `COGNITO_CLIENT_ID` | Cognito | 環境変数 |
 | `RUNTIME_TOKEN_SECRET` | `as-<env>/runtime-token-secret` | シークレット |
 | `RUNTIME_SERVER_ID` | `agent-studio-<env>` | 環境変数 |
+| `SECRETS_MODE` | `aws`（ローカルは `file`: `SECRETS_FILE` の JSON に保存。`memory` はテスト専用でプロセス内にしか残らない） | 環境変数 |
+| `SECRETS_FILE` | `SECRETS_MODE=file` のときの保存先。既定 `.secrets.local.json`（API と Worker で同じパスにする） | 環境変数 |
 | `SECRETS_PREFIX` | `agent-studio/<env>` | 環境変数 |
 | `SECRETS_KMS_KEY_ID` | KMS キーの ARN | 環境変数 |
 | `ARTIFACTS_BUCKET` / `AUDIT_EXPORT_BUCKET` | S3 バケット名 | 環境変数 |
