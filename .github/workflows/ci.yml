@@ -26,8 +26,8 @@ jobs:
       runtime: ${{ steps.filter.outputs.runtime }}
       infra: ${{ steps.filter.outputs.infra }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -53,12 +53,12 @@ jobs:
     name: 型チェック・単体テスト・ビルド
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - run: corepack enable
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .yarn/cache
           key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
@@ -96,12 +96,12 @@ jobs:
       DATABASE_URL: postgresql://agent_studio_app:ci_app_password@localhost:5432/agent_studio
       APP_DB_PASSWORD: ci_app_password
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - run: corepack enable
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .yarn/cache
           key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
@@ -124,8 +124,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.infra == 'true'
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
       - name: fmt
@@ -157,11 +157,11 @@ jobs:
           - { name: browser-worker, dockerfile: runtime/browser-worker/Dockerfile, filter: runtime }
           - { name: demo-internal-api, dockerfile: runtime/demo-internal-api/Dockerfile, filter: runtime }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: needs.changes.outputs[matrix.image.filter] == 'true'
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
         if: needs.changes.outputs[matrix.image.filter] == 'true'
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         if: needs.changes.outputs[matrix.image.filter] == 'true'
         with:
           context: .
