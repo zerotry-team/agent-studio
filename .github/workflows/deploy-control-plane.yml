@@ -51,7 +51,7 @@ jobs:
     environment: agent-studio-${{ github.event.inputs.environment || 'staging' }}
     env:
       # シークレットを参照したジョブでは、その値（とそれを含む ARN など）がログで *** になる
-      MASK_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AS_LOG_MASK_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
     strategy:
       matrix:
         image:
@@ -101,7 +101,7 @@ jobs:
     env:
       ROOT: infra/agent-studio/${{ github.event.inputs.environment || 'staging' }}
       NEW_TAG: ${{ github.sha }}
-      MASK_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AS_LOG_MASK_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
     steps:
       - name: AWS の設定を確認
         id: configured

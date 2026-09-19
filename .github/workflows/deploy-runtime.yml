@@ -49,7 +49,7 @@ jobs:
     environment: agent-studio-${{ github.event.inputs.stage || 'staging' }}
     env:
       # シークレットを参照したジョブでは、その値（とそれを含む ARN など）がログで *** になる
-      MASK_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AS_LOG_MASK_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
     strategy:
       matrix:
         image:
@@ -124,8 +124,8 @@ jobs:
     environment: company-${{ matrix.slug }}-${{ github.event.inputs.stage || 'staging' }}
     env:
       ROOT: infra/company/${{ matrix.slug }}/${{ github.event.inputs.stage || 'staging' }}
-      MASK_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-      MASK_IMAGE_REGISTRY: ${{ secrets.IMAGE_REGISTRY }}
+      AS_LOG_MASK_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AS_LOG_MASK_IMAGE_REGISTRY: ${{ secrets.IMAGE_REGISTRY }}
     steps:
       - name: AWS の設定を確認
         id: configured
