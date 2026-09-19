@@ -2,7 +2,7 @@
 
 aws_account_id    = "222222222222"
 environment       = "sample-a-company-production"
-github_repository = "zerotry/agent-studio"
+github_repository = "zerotry-team/agent-studio"
 github_environments = [
   "company-sample-a-company-production",
 ]
