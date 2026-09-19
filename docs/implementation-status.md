@@ -53,8 +53,8 @@ AWS と本物の OpenAI を使った検証は未実施。要件定義書 §4.3 �
 - 登録・承認・後片付けの流れは結合テストで確認済み（Runtime 側は API を直接呼んで確認）
 
 ### Phase 4 マルチテナントの強化 — 一部
-- 済: Runtime の失効、環境キーの配り直し（ジョブ）、運営管理者フラグの保護、Terraform の state の暗号化
-- 残: 監査ログの S3 Object Lock への書き出し（バケットは Terraform で作成済み、書き出す処理は未実装）、break-glass、イメージの署名、SSO（SAML）、ペネトレーションテスト
+- 済: Runtime の失効、環境キーの配り直し（ジョブ）、運営管理者フラグの保護、Terraform の state の暗号化、監査ログの S3 Object Lock への書き出し（1時間ごと）
+- 残: break-glass、イメージの署名、SSO（SAML）、ペネトレーションテスト
 
 ### Phase 5 MCP / Browser — 実装済み（AWS 上は未確認）
 - Tool Gateway の HTTP ツール・上流の MCP（Browser Worker）、ポリシー、承認、監査
@@ -66,8 +66,26 @@ AWS と本物の OpenAI を使った検証は未実施。要件定義書 §4.3 �
 - 残: AWS アカウントの自動作成、パターン B 向けの CloudFormation、画面からの構築と進捗表示
 
 ### Phase 7 以降 — 一部
-- 済: Eval（テストケース・実行・判定）、月ごとの利用量
-- 残: 料金計算、運用ダッシュボード、実行の成果物（`/workspace/outputs`）の S3 への保存
+- 済: Eval（テストケース・実行・判定）、月ごとの利用量、実行の成果物（`/workspace/outputs`）の S3 への保存と画面からのダウンロード
+- 残: 料金計算、運用ダッシュボード
+
+## 確認できていること
+
+| 対象 | 方法 | 結果 |
+|---|---|---|
+| 型・単体テスト | `yarn type-check` / `yarn test`（全ワークスペース） | 205 件すべて成功 |
+| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration`（PostgreSQL） | 20 件すべて成功 |
+| ビルド | `yarn build`、`docker build`（api / web / runtime の全イメージ） | 成功 |
+| Terraform | `fmt` / `validate`（5 つのルートモジュール）、モックのプロバイダーでの apply | 成功 |
+| ワークフロー | actionlint | 指摘なし |
+| Runtime の実プロセス | 手元で API + Controller + Tool Gateway + 社内 API モックを動かし、MCP クライアントで呼び出し | 登録・ハートビート・ツールの絞り込み・Runtime 側の拒否・承認待ち → 承認 → 1 回だけ実行 → 監査ログ まで確認 |
+| 画面 | 開発用ログインでダッシュボード・実行の詳細を表示 | 表示できる |
+
+## 気づいている改善点
+
+- 実行の詳細の「実行した人」が利用者 ID で表示される（メールアドレスの表示にする）
+- 承認依頼の通知がない（画面のみ）
+- API の `/runs/:id/events` はポーリング（2 秒ごと）。多数の利用者が同時に見る場合は SSE などを検討する
 
 ## 本番に出す前に必要な作業
 
