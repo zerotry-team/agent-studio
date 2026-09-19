@@ -115,3 +115,9 @@ variable "github_environment_secrets" {
   default     = {}
   sensitive   = true
 }
+
+variable "create_ecs_service_linked_role" {
+  description = "ECS のサービスリンクロール（AWSServiceRoleForECS）を作るか。新しいアカウントには無く、Service Connect を使うクラスターの作成が失敗するため作っておく。アカウントに既にある場合は false"
+  type        = bool
+  default     = true
+}
