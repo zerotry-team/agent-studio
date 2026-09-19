@@ -126,6 +126,7 @@ jobs:
       ROOT: infra/company/${{ matrix.slug }}/${{ github.event.inputs.stage || 'staging' }}
       AS_LOG_MASK_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AS_LOG_MASK_IMAGE_REGISTRY: ${{ secrets.IMAGE_REGISTRY }}
+      AS_LOG_MASK_AGENT_STUDIO_URL: ${{ secrets.AGENT_STUDIO_URL }}
     steps:
       - name: AWS の設定を確認
         id: configured
@@ -160,6 +161,7 @@ jobs:
         run: |
           terraform -chdir="$ROOT" apply -input=false -auto-approve \
             -var="image_registry=${{ secrets.IMAGE_REGISTRY }}" \
+            -var="agent_studio_url=${{ secrets.AGENT_STUDIO_URL }}" \
             -var="image_tag=${{ github.sha }}"
       - name: Runtime の安定を待つ
         if: steps.configured.outputs.ok == 'true'

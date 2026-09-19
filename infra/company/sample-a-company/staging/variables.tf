@@ -8,3 +8,9 @@ variable "image_tag" {
   type        = string
   default     = "none"
 }
+
+variable "agent_studio_url" {
+  description = "接続する Agent Studio の URL。空なら config.yaml の agent_studio_url を使う（CI は公開リポジトリに URL を置かないよう、シークレット AGENT_STUDIO_URL を渡す）"
+  type        = string
+  default     = ""
+}

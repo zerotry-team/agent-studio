@@ -121,3 +121,13 @@ variable "create_ecs_service_linked_role" {
   type        = bool
   default     = true
 }
+
+variable "github_oidc_sub_prefix" {
+  description = <<-EOT
+    GitHub の OIDC トークンの sub の接頭辞（リポジトリで「変更されない ID を含む形式」を使っている場合）。
+    gh api repos/<owner>/<repo>/actions/oidc/customization/sub の sub_claim_prefix（例: repo:owner@123/name@456）。
+    空なら従来の形式（repo:<owner>/<name>）だけを信頼する
+  EOT
+  type        = string
+  default     = ""
+}

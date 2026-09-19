@@ -6,7 +6,7 @@ module "runtime" {
   tenant_short      = local.config.short_name
   stage             = local.stage
   region            = local.config.region
-  agent_studio_url  = local.stage_config.agent_studio_url
+  agent_studio_url  = var.agent_studio_url != "" ? var.agent_studio_url : local.stage_config.agent_studio_url
   runtime_server_id = local.stage_config.runtime_server_id
 
   image_registry = var.image_registry

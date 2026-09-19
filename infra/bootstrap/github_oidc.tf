@@ -42,7 +42,11 @@ data "aws_iam_policy_document" "github_deploy_assume" {
     condition {
       test     = "StringEquals"
       variable = "${local.github_oidc_host}:sub"
-      values   = [for env in var.github_environments : "repo:${var.github_repository}:environment:${env}"]
+      # 従来の形式と、リポジトリで ID を含む形式を使っている場合の両方を受け付ける
+      values = concat(
+        [for env in var.github_environments : "repo:${var.github_repository}:environment:${env}"],
+        var.github_oidc_sub_prefix != "" ? [for env in var.github_environments : "${var.github_oidc_sub_prefix}:environment:${env}"] : [],
+      )
     }
   }
 }

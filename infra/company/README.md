@@ -55,3 +55,14 @@ infra/company/
 
 `runtime.tools` を変えて適用すると、Tool Gateway のタスク定義が更新されて再起動し、新しい設定を読み込む。
 スキーマは `packages/contracts/src/runtime-config.ts`（Tool Gateway が起動時に検証する）。
+
+## 公開リポジトリで見せない値
+
+リポジトリが公開のため、次の値は config.yaml に書かず、GitHub Environment `company-<tenant>-<stage>` のシークレットで渡す
+（infra/bootstrap の `github_environment_secrets` で設定できる）。
+
+| シークレット | 内容 |
+|---|---|
+| `AWS_ACCOUNT_ID` | テナントのアカウント ID（bootstrap が自動で設定） |
+| `IMAGE_REGISTRY` | Agent Studio 側の ECR（アカウント ID を含む） |
+| `AGENT_STUDIO_URL` | 接続する Agent Studio の URL（config.yaml の `agent_studio_url` より優先） |
