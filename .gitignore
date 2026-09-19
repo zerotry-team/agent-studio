@@ -20,6 +20,7 @@ generated/
 .env
 .env.*
 !.env.example
+.secrets.local.json
 *.pem
 
 # terraform
