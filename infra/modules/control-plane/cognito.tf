@@ -107,3 +107,22 @@ resource "aws_cognito_user_pool_domain" "this" {
 locals {
   cognito_domain_url = "https://${aws_cognito_user_pool_domain.this.domain}.auth.${local.region}.amazoncognito.com"
 }
+
+# 最初の運営管理者（自己登録は無効なので、1 人目は Terraform で招待する）
+resource "aws_cognito_user" "initial_admin" {
+  count = var.initial_admin_email != "" ? 1 : 0
+
+  user_pool_id             = aws_cognito_user_pool.this.id
+  username                 = var.initial_admin_email
+  desired_delivery_mediums = ["EMAIL"]
+
+  attributes = {
+    email          = var.initial_admin_email
+    email_verified = true
+  }
+
+  # パスワードの変更やメールアドレスの確認は利用者側で行うので、作成後の差分は見ない
+  lifecycle {
+    ignore_changes = [attributes, desired_delivery_mediums, message_action, enabled]
+  }
+}

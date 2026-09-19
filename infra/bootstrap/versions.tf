@@ -9,12 +9,25 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+    github = {
+      source  = "integrations/github"
+      version = "~> 6.0"
+    }
   }
 }
 
 provider "aws" {
   region              = var.region
   allowed_account_ids = [var.aws_account_id]
+
+  # infra/organization で作ったアカウントは、管理アカウントの認証情報のまま OrganizationAccountAccessRole を引き受けて適用する
+  dynamic "assume_role" {
+    for_each = var.assume_role_arn != "" ? [1] : []
+    content {
+      role_arn     = var.assume_role_arn
+      session_name = "agent-studio-bootstrap"
+    }
+  }
 
   default_tags {
     tags = {
@@ -23,4 +36,10 @@ provider "aws" {
       "ManagedBy"               = "terraform"
     }
   }
+}
+
+# GitHub Environment と変数（manage_github_environments = true のとき）。
+# トークンは環境変数 GITHUB_TOKEN（例: export GITHUB_TOKEN=$(gh auth token)）
+provider "github" {
+  owner = split("/", var.github_repository)[0]
 }

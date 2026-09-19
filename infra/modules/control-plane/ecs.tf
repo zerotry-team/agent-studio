@@ -334,11 +334,14 @@ resource "aws_ecs_task_definition" "migrate" {
   }
 
   container_definitions = jsonencode([{
-    name             = "api"
-    image            = local.migrate_image
-    essential        = true
-    command          = ["node", "dist/scripts/migrate.js"]
-    environment      = local.backend_environment_list
+    name      = "api"
+    image     = local.migrate_image
+    essential = true
+    command   = ["node", "dist/scripts/migrate.js"]
+    environment = concat(
+      local.backend_environment_list,
+      var.initial_admin_email != "" ? [{ name = "INITIAL_PLATFORM_ADMIN_EMAIL", value = var.initial_admin_email }] : [],
+    )
     secrets          = [for k, v in local.migrate_secrets : { name = k, valueFrom = v }]
     logConfiguration = local.log_configuration["migrate"]
   }])

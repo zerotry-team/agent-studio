@@ -56,3 +56,9 @@ variable "manifest_generator_model" {
   type        = string
   default     = "claude-opus-5"
 }
+
+variable "initial_admin_email" {
+  description = "最初の運営管理者のメールアドレス（CI は GitHub Environment の変数 INITIAL_ADMIN_EMAIL を渡す）"
+  type        = string
+  default     = ""
+}

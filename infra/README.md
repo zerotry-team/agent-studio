@@ -7,7 +7,8 @@ Agent Studio の AWS 構成（Terraform）。名前・ポート・環境変数�
 
 ```text
 infra/
-├── bootstrap/                 # アカウントごとに 1 回、管理者が適用（state バケット、GitHub OIDC、デプロイ用ロール、ECR）
+├── organization/              # AWS Organizations でアカウントを作る（管理アカウントで 1 回）
+├── bootstrap/                 # アカウントごとに 1 回、管理者が適用（state バケット、GitHub OIDC、デプロイ用ロール、ECR、GitHub Environment）
 ├── modules/
 │   ├── network/               # VPC（public / private / database サブネット、NAT、S3 ゲートウェイエンドポイント）
 │   ├── ecs-execution-role/    # ECS の実行ロール（ECR・ログ・注入するシークレットを ARN で限定）
@@ -38,7 +39,7 @@ state は各アカウントの `as-tfstate-<account_id>-<region>` バケット�
 
 ## 初めて構築するときの順番
 
-1. **アカウントを用意する**: `agent-studio-staging`、`agent-studio-production`、テナントごとのアカウント（要件定義書 §12.1）
+1. **アカウントを用意する**: `infra/organization` で Terraform から作る（infra/organization/README.md）。`agent-studio-staging`、`agent-studio-production`、テナントごとのアカウント（要件定義書 §12.1）
 2. **各アカウントを bootstrap する**（管理者。`bootstrap/README.md`）
    - Agent Studio のアカウント: `create_ecr_repositories = true`。テナントに pull させるなら `ecr_pull_organization_id` / `ecr_pull_account_ids`
    - テナントのアカウント: `create_ecr_repositories = false`

@@ -53,3 +53,26 @@ export async function ensureAppRole(config: pg.ClientConfig, appPassword: string
     await client.end();
   }
 }
+
+/** 運営管理者の権限を付ける（利用者がまだログインしていなければ、メールアドレスで先に作る） */
+export async function grantPlatformAdmin(config: pg.ClientConfig, rawEmail: string): Promise<void> {
+  const email = rawEmail.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new Error("メールアドレスの形式が正しくありません");
+  const client = new pg.Client(config);
+  await client.connect();
+  try {
+    const res = await client.query<{ id: string }>(
+      `INSERT INTO users (email, is_platform_admin) VALUES ($1, true)
+       ON CONFLICT (email) DO UPDATE SET is_platform_admin = true, updated_at = now()
+       RETURNING id`,
+      [email],
+    );
+    await client.query(
+      `INSERT INTO audit_logs (organization_id, actor_type, actor_label, action, target_type, target_id, result)
+       VALUES (NULL, 'system', 'grant-platform-admin', 'user.platform_admin.grant', 'user', $1, 'success')`,
+      [res.rows[0]!.id],
+    );
+  } finally {
+    await client.end();
+  }
+}

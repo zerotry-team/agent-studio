@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { adminConnection, ensureAppRole } from "./db-admin.js";
+import { adminConnection, ensureAppRole, grantPlatformAdmin } from "./db-admin.js";
 
 /**
  * ECS の migrate タスク（CI/CD が run-task する）。
@@ -28,3 +28,10 @@ if (result.status !== 0) {
   process.exit(result.status ?? 1);
 }
 console.log("マイグレーションが完了しました");
+
+// 最初の運営管理者（Terraform の initial_admin_email）。何度実行しても同じ結果になる
+const initialAdmin = process.env.INITIAL_PLATFORM_ADMIN_EMAIL?.trim();
+if (initialAdmin) {
+  await grantPlatformAdmin(admin.client, initialAdmin);
+  console.log("最初の運営管理者を設定しました");
+}

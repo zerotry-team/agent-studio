@@ -41,3 +41,10 @@ terraform.tfvars
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# infra/organization の出力（アカウント ID を含むため公開リポジトリに置かない）
+infra/bootstrap/organization-output.json
+infra/bootstrap/*.tfvars
+!infra/bootstrap/*.example.tfvars
+infra/organization/*.tfvars
+!infra/organization/example.tfvars

@@ -133,7 +133,7 @@ jobs:
       - name: validate
         run: |
           set -euo pipefail
-          for root in infra/bootstrap infra/agent-studio/* infra/company/*/*/; do
+          for root in infra/organization infra/bootstrap infra/agent-studio/* infra/company/*/*/; do
             [ -f "$root/versions.tf" ] || continue
             echo "::group::$root"
             terraform -chdir="$root" init -backend=false -input=false >/dev/null

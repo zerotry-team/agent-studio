@@ -299,3 +299,9 @@ variable "migrate_memory" {
   type    = number
   default = 1024
 }
+
+variable "initial_admin_email" {
+  description = "最初の運営管理者のメールアドレス。Cognito に招待（メールで仮パスワードが届く）し、migrate が運営管理者の権限を付ける。空なら何もしない"
+  type        = string
+  default     = ""
+}

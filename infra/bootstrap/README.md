@@ -71,3 +71,54 @@ terraform output
 
 - GitHub の OIDC トークンの `sub` を組織でカスタマイズしている場合（`repo:...:environment:...` 以外の形式）は、信頼ポリシーの条件を合わせて直す。
 - `github_environments` に入れた Environment には、GitHub 側で保護ルール（必須の承認者、デプロイできるブランチ）を必ず設定する。このロールはアカウントの管理者権限を持つ。
+
+## Organizations で作ったアカウント（infra/organization）
+
+管理アカウントの認証情報のまま、各アカウントの `OrganizationAccountAccessRole` を引き受けて適用する（`assume_role_arn`）。
+`manage_github_environments = true` にすると、GitHub Environment（デプロイできるのは main ブランチだけ）と変数も Terraform で作る。
+
+```bash
+cd infra/bootstrap
+export AWS_PROFILE=agent-studio-management
+export GITHUB_TOKEN=$(gh auth token)        # GitHub Environment を作る権限（repo）が必要
+terraform init
+
+# Agent Studio のアカウント
+terraform workspace new agent-studio-production
+terraform apply -var-file=agent-studio-production.tfvars
+
+# Sample A 社のアカウント
+terraform workspace new sample-a-company-production
+terraform apply -var-file=sample-a-company-production.tfvars
+```
+
+変数ファイルの例（`organization-output.json` の値を使う）:
+
+```hcl
+# agent-studio-production.tfvars
+aws_account_id             = "<account_ids の agent-studio-production>"
+assume_role_arn            = "<admin_role_arns の agent-studio-production>"
+environment                = "production"
+github_repository          = "zerotry-team/agent-studio"
+github_environments        = ["agent-studio-production"]
+create_ecr_repositories    = true
+ecr_pull_organization_id   = "<organization_id>"     # Organizations 内の企業のアカウントが Runtime のイメージを pull できる
+manage_github_environments = true
+github_environment_variables = {
+  INITIAL_ADMIN_EMAIL = "<最初の運営管理者のメールアドレス>"
+}
+
+# sample-a-company-production.tfvars
+aws_account_id             = "<account_ids の sample-a-company-production>"
+assume_role_arn            = "<admin_role_arns の sample-a-company-production>"
+environment                = "sample-a-company-production"
+github_repository          = "zerotry-team/agent-studio"
+github_environments        = ["company-sample-a-company-production"]
+create_ecr_repositories    = false
+manage_github_environments = true
+github_environment_variables = {
+  IMAGE_REGISTRY = "<Agent Studio のアカウント ID>.dkr.ecr.ap-northeast-1.amazonaws.com"
+}
+```
+
+承認者（必須のレビュー）は、最初の動作確認が終わったあとに GitHub の画面で production の Environment に設定する。

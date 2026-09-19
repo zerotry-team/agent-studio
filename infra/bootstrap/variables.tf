@@ -84,3 +84,27 @@ variable "ecr_pull_account_ids" {
     error_message = "ecr_pull_account_ids は 12 桁の数字で指定してください。"
   }
 }
+
+variable "assume_role_arn" {
+  description = "適用時に引き受ける IAM ロール（infra/organization の出力 admin_role_arns）。空なら今の認証情報のまま適用する"
+  type        = string
+  default     = ""
+}
+
+variable "manage_github_environments" {
+  description = "GitHub Environment（github_environments）と、その変数（AWS_REGION など）を Terraform で作るか"
+  type        = bool
+  default     = false
+}
+
+variable "github_environment_variables" {
+  description = "GitHub Environment に追加で設定する変数（例: company 環境の IMAGE_REGISTRY、agent-studio 環境の INITIAL_ADMIN_EMAIL）"
+  type        = map(string)
+  default     = {}
+}
+
+variable "github_deployment_branch" {
+  description = "GitHub Environment からデプロイできるブランチ"
+  type        = string
+  default     = "main"
+}

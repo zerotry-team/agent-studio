@@ -17,6 +17,8 @@ module "control_plane" {
   image_tag         = var.image_tag
   migrate_image_tag = var.migrate_image_tag
 
+  initial_admin_email = var.initial_admin_email
+
   domain_name                   = var.domain_name
   acm_certificate_arn_us_east_1 = var.acm_certificate_arn_us_east_1
   alb_certificate_arn           = var.alb_certificate_arn
