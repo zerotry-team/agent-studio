@@ -40,12 +40,19 @@ export async function ensureAppRole(config: pg.ClientConfig, appPassword: string
   const client = new pg.Client(config);
   await client.connect();
   try {
-    const exists = await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [APP_ROLE]);
+    const exists = await client.query<{ rolsuper: boolean; rolbypassrls: boolean; rolcreatedb: boolean; rolcreaterole: boolean }>(
+      "SELECT rolsuper, rolbypassrls, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = $1", [APP_ROLE],
+    );
     const password = client.escapeLiteral(appPassword);
     if (exists.rowCount === 0) {
       await client.query(`CREATE ROLE ${APP_ROLE} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD ${password}`);
     } else {
-      await client.query(`ALTER ROLE ${APP_ROLE} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD ${password}`);
+      // RDSの管理ユーザーは真のSUPERUSERではない。値がfalseでも属性の再指定は拒否される。
+      // 既存ロールの安全性は検査し、パスワードなど変更可能な属性だけを更新する。
+      if (exists.rows[0]!.rolsuper || exists.rows[0]!.rolbypassrls || exists.rows[0]!.rolcreatedb || exists.rows[0]!.rolcreaterole) {
+        throw new Error(`${APP_ROLE} に管理者属性が設定されています。安全なアプリ用ロールが必要です`);
+      }
+      await client.query(`ALTER ROLE ${APP_ROLE} WITH LOGIN PASSWORD ${password}`);
     }
     const db = (await client.query<{ db: string }>("SELECT current_database() AS db")).rows[0]!.db;
     await client.query(`GRANT CONNECT ON DATABASE ${client.escapeIdentifier(db)} TO ${APP_ROLE}`);
