@@ -302,6 +302,7 @@ export const toRunDto = (r: RunWithRelations): RunDto => ({
     type: r.deployment.runtime_profile.type as RuntimeProfileType,
   },
   requested_by: r.requested_by,
+  requested_by_email: null,
   usage: (r.usage as RunDto["usage"]) ?? null,
   created_at: r.created_at.toISOString(),
   started_at: iso(r.started_at),

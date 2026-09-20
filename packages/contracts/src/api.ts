@@ -702,6 +702,7 @@ export interface RunDto {
   agent: { id: string; key: string; name: string; version: number };
   runtime_profile: { id: string; key: string; name: string; type: RuntimeProfileType };
   requested_by: string | null;
+  requested_by_email: string | null;
   usage: { input_tokens: number; output_tokens: number } | null;
   created_at: string;
   started_at: string | null;

@@ -80,7 +80,7 @@ export function RunInfoCard({ run }: { run: RunDto }) {
                 </div>
               ),
             },
-            { label: "実行した人", value: run.requested_by ?? "—" },
+            { label: "実行した人", value: run.requested_by_email ?? run.requested_by ?? "—" },
             { label: "受け付けた日時", value: formatDateTime(run.created_at) },
             { label: "開始した日時", value: formatDateTime(run.started_at) },
             { label: "終了した日時", value: formatDateTime(run.finished_at) },

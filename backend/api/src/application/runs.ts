@@ -15,7 +15,7 @@ import type { Tx } from "../infrastructure/db/tenant-db.js";
 import { artifactPrefix } from "../infrastructure/storage/object-store.js";
 import { auditBy, requireApprover, requireRole, scopeOf, type MemberActor } from "./context.js";
 import type { Deps } from "./deps.js";
-import { runInclude, toApprovalDto, toRunDto, toRunEventDto } from "./dto.js";
+import { runInclude, toApprovalDto, toRunDto, toRunEventDto, type RunWithRelations } from "./dto.js";
 import { appendRunEvent, setRunStatus } from "./run-events.js";
 
 /** 承認結果をエージェントに伝える文面（runtime_gateway の承認） */
@@ -28,13 +28,24 @@ export const APPROVAL_MESSAGES = {
     `${tool} の操作の承認期限が切れました（承認ID: ${id}）。この操作は実行せず、その旨を報告してください。`,
 };
 
+async function runsWithRequesterEmails(tx: Tx, runs: RunWithRelations[]): Promise<RunDto[]> {
+  const requesterIds = [...new Set(runs.flatMap((run) => (run.requested_by ? [run.requested_by] : [])))];
+  const requesters = requesterIds.length
+    ? await tx.users.findMany({ where: { id: { in: requesterIds } }, select: { id: true, email: true } })
+    : [];
+  const emailById = new Map(requesters.map((requester) => [requester.id, requester.email]));
+  return runs.map((run) => ({
+    ...toRunDto(run),
+    requested_by_email: run.requested_by ? (emailById.get(run.requested_by) ?? null) : null,
+  }));
+}
+
 export class RunService {
   constructor(private readonly deps: Deps) {}
 
   async list(actor: MemberActor, q: { limit: number; before?: string; deployment_id?: string }): Promise<RunDto[]> {
-    return this.deps.db.run(scopeOf(actor), async (tx) =>
-      (
-        await tx.runs.findMany({
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const runs = await tx.runs.findMany({
           where: {
             organization_id: actor.organizationId,
             ...(q.deployment_id ? { deployment_id: q.deployment_id } : {}),
@@ -43,16 +54,16 @@ export class RunService {
           include: runInclude,
           orderBy: { created_at: "desc" },
           take: q.limit,
-        })
-      ).map(toRunDto),
-    );
+        });
+      return runsWithRequesterEmails(tx, runs);
+    });
   }
 
   async get(actor: MemberActor, id: string): Promise<RunDto> {
     return this.deps.db.run(scopeOf(actor), async (tx) => {
       const run = await tx.runs.findFirst({ where: { id, organization_id: actor.organizationId }, include: runInclude });
       if (!run) throw notFound("実行");
-      return toRunDto(run);
+      return (await runsWithRequesterEmails(tx, [run]))[0]!;
     });
   }
 
@@ -65,7 +76,7 @@ export class RunService {
         orderBy: { seq: "asc" },
         take: 500,
       });
-      return { run: toRunDto(run), events: events.map(toRunEventDto) };
+      return { run: (await runsWithRequesterEmails(tx, [run]))[0]!, events: events.map(toRunEventDto) };
     });
   }
 
@@ -93,7 +104,7 @@ export class RunService {
       const run = await createRunInTx(tx, actor.organizationId, input.deployment_id, input.input, actor.userId);
       await recordAudit(tx, auditBy(actor, { action: "run.create", targetType: "run", targetId: run.id, detail: { deployment_id: input.deployment_id } }));
       const full = await tx.runs.findUniqueOrThrow({ where: { id: run.id }, include: runInclude });
-      return toRunDto(full);
+      return (await runsWithRequesterEmails(tx, [full]))[0]!;
     });
   }
 
@@ -122,7 +133,8 @@ export class RunService {
           detail: { agent_id: agentId, stage, deployment_id: deployment.id, source: "agent_api" },
         }),
       );
-      return toRunDto(await tx.runs.findUniqueOrThrow({ where: { id: run.id }, include: runInclude }));
+      const full = await tx.runs.findUniqueOrThrow({ where: { id: run.id }, include: runInclude });
+      return (await runsWithRequesterEmails(tx, [full]))[0]!;
     });
   }
 
@@ -155,7 +167,8 @@ export class RunService {
         data: { status: "expired" },
       });
       await recordAudit(tx, auditBy(actor, { action: "run.cancel", targetType: "run", targetId: id }));
-      return toRunDto(await tx.runs.findUniqueOrThrow({ where: { id }, include: runInclude }));
+      const full = await tx.runs.findUniqueOrThrow({ where: { id }, include: runInclude });
+      return (await runsWithRequesterEmails(tx, [full]))[0]!;
     });
   }
 

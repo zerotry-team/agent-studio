@@ -66,6 +66,7 @@ describe("実行の流れ（擬似 OpenAI）", () => {
     expect(done.status).toBe("completed");
     expect(done.output).toContain("こんにちは");
     expect(done.usage.input_tokens).toBeGreaterThan(0);
+    expect(done.requested_by_email).toBe(operator.email);
   });
 
   it("成果物は完了前に S3 に保存され、期限付き URL で取得できる", async () => {
