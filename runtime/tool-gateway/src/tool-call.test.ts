@@ -270,7 +270,7 @@ describe("ToolCallService: Run専用Browser endpoint", () => {
     const publicGrant: SessionGrant = {
       ...grant([]),
       allowed_tools: ["browser_snapshot", "browser_exec_js"],
-      browser: { endpoint: "http://10.40.1.25:8931/mcp/run-token", mode: "public_ephemeral", allowed_domains: ["example.com"] },
+      browser: { endpoint: "http://10.40.1.25:8931/mcp/run-token", mode: "public_ephemeral", allow_public_web: false, allowed_domains: ["example.com"] },
     };
     expect(catalog.visibleFor(publicGrant).map((tool) => tool.name)).toEqual(["browser_snapshot", "browser_exec_js"]);
     await service.call(publicGrant, "browser_snapshot", {});

@@ -305,11 +305,12 @@ export class Controller {
                 enabled: true as const,
                 mode,
                 allowed_domains: allowedDomains,
+                allow_public_web: grant.browser?.allow_public_web ?? false,
                 code_execution_enabled: mode === "public_ephemeral" && grant.allowed_tools.includes("browser_exec_js"),
                 computer_actions_enabled: false,
                 viewport: { width: 1440, height: 900 },
               };
-              grant.browser = { endpoint, mode, allowed_domains: allowedDomains };
+              grant.browser = { endpoint, mode, allowed_domains: allowedDomains, allow_public_web: browserConfig.allow_public_web };
               extra.browser = {
                 status: "running",
                 taskArn: browserTask.taskArn,

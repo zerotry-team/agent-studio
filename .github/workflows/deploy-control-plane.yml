@@ -34,6 +34,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   id-token: write
 
 concurrency:
@@ -45,8 +46,34 @@ env:
   TERRAFORM_VERSION: "1.15.8"
 
 jobs:
+  ci:
+    name: 同じコミットのCI成功を確認
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: CIの結果を待つ
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 120); do
+            RUN=$(gh api "repos/${GH_REPO}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&event=push&per_page=1" --jq '.workflow_runs[0] | {status, conclusion}')
+            STATUS=$(jq -r '.status' <<< "$RUN")
+            if [ "$STATUS" = "completed" ]; then
+              CONCLUSION=$(jq -r '.conclusion' <<< "$RUN")
+              if [ "$CONCLUSION" = "success" ]; then exit 0; fi
+              echo "::error::同じコミットのCIが成功していません: ${CONCLUSION}"
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "::error::同じコミットのCI完了を確認できませんでした"
+          exit 1
+
   images:
     name: イメージのビルド（${{ matrix.image.name }}）
+    needs: ci
     runs-on: ubuntu-24.04
     environment: agent-studio-${{ github.event.inputs.environment || 'staging' }}
     env:
@@ -61,9 +88,9 @@ jobs:
       - name: AWS の設定を確認
         id: configured
         run: |
-          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ]; then
-            echo "::notice::GitHub Environment agent-studio-${STAGE} に AWS_DEPLOY_ROLE_ARN が設定されていないため、デプロイをスキップします（infra/README.md）"
-            echo "ok=false" >> "$GITHUB_OUTPUT"
+          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ] || [ -z "${{ vars.AWS_REGION }}" ] || [ -z "${{ vars.TF_STATE_BUCKET }}" ] || [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
+            echo "::error::GitHub Environment agent-studio-${STAGE} に 必須のAWS設定（Role / Region / State bucket / Account ID）が揃っていないため、デプロイできません（infra/README.md）"
+            exit 1
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
@@ -106,9 +133,9 @@ jobs:
       - name: AWS の設定を確認
         id: configured
         run: |
-          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ]; then
-            echo "::notice::AWS の設定がないため、デプロイをスキップします"
-            echo "ok=false" >> "$GITHUB_OUTPUT"
+          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ] || [ -z "${{ vars.AWS_REGION }}" ] || [ -z "${{ vars.TF_STATE_BUCKET }}" ] || [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
+            echo "::error::AWS の設定がないため、デプロイできません"
+            exit 1
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi

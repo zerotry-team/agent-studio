@@ -32,6 +32,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   id-token: write
 
 concurrency:
@@ -43,8 +44,34 @@ env:
   TERRAFORM_VERSION: "1.15.8"
 
 jobs:
+  ci:
+    name: 同じコミットのCI成功を確認
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: CIの結果を待つ
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 120); do
+            RUN=$(gh api "repos/${GH_REPO}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&event=push&per_page=1" --jq '.workflow_runs[0] | {status, conclusion}')
+            STATUS=$(jq -r '.status' <<< "$RUN")
+            if [ "$STATUS" = "completed" ]; then
+              CONCLUSION=$(jq -r '.conclusion' <<< "$RUN")
+              if [ "$CONCLUSION" = "success" ]; then exit 0; fi
+              echo "::error::同じコミットのCIが成功していません: ${CONCLUSION}"
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "::error::同じコミットのCI完了を確認できませんでした"
+          exit 1
+
   images:
     name: Runtime のイメージ（${{ matrix.image.name }}）
+    needs: ci
     runs-on: ubuntu-24.04
     environment: agent-studio-${{ github.event.inputs.stage || 'staging' }}
     env:
@@ -63,9 +90,9 @@ jobs:
       - name: AWS の設定を確認
         id: configured
         run: |
-          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ]; then
-            echo "::notice::GitHub Environment agent-studio-${STAGE} に AWS の設定がないため、スキップします"
-            echo "ok=false" >> "$GITHUB_OUTPUT"
+          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ] || [ -z "${{ vars.AWS_REGION }}" ] || [ -z "${{ vars.TF_STATE_BUCKET }}" ] || [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
+            echo "::error::GitHub Environment agent-studio-${STAGE} に AWS の設定がないため、デプロイできません"
+            exit 1
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
@@ -109,7 +136,7 @@ jobs:
             slug=$(basename "$(dirname "$dir")")
             if [ "$TENANT" = "all" ] || [ "$TENANT" = "$slug" ]; then slugs+=("$slug"); fi
           done
-          if [ ${#slugs[@]} -eq 0 ]; then echo "matrix=[]" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ ${#slugs[@]} -eq 0 ]; then echo "::error::デプロイ対象のテナントがありません"; exit 1; fi
           printf '%s\n' "${slugs[@]}" | jq -R . | jq -cs . | sed 's/^/matrix=/' >> "$GITHUB_OUTPUT"
 
   deploy:
@@ -132,9 +159,9 @@ jobs:
       - name: AWS の設定を確認
         id: configured
         run: |
-          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ] || [ -z "${{ secrets.IMAGE_REGISTRY }}" ]; then
-            echo "::notice::GitHub Environment company-${{ matrix.slug }}-${STAGE} に AWS_DEPLOY_ROLE_ARN / IMAGE_REGISTRY がないため、スキップします"
-            echo "ok=false" >> "$GITHUB_OUTPUT"
+          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ] || [ -z "${{ vars.AWS_REGION }}" ] || [ -z "${{ vars.TF_STATE_BUCKET }}" ] || [ -z "${{ secrets.IMAGE_REGISTRY }}" ] || [ -z "${{ secrets.AGENT_STUDIO_URL }}" ]; then
+            echo "::error::GitHub Environment company-${{ matrix.slug }}-${STAGE} に 必須のAWS設定（Role / Region / State bucket / Image registry / Agent Studio URL）が揃っていないため、デプロイできません"
+            exit 1
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi

@@ -237,7 +237,7 @@ describe("JobHandler start_session", () => {
       browser: {
         enabled: true,
         mode: "public_ephemeral",
-        allowed_domains: ["example.com"],
+        allow_public_web: false, allowed_domains: ["example.com"],
         code_execution_enabled: false,
         computer_actions_enabled: false,
         viewport: { width: 1440, height: 900 },
@@ -249,7 +249,7 @@ describe("JobHandler start_session", () => {
     expect(grants.lookupByTokenHash("a".repeat(64))?.browser).toMatchObject({
       endpoint: expect.stringContaining("/mcp/"),
       mode: "public_ephemeral",
-      allowed_domains: ["example.com"],
+      allow_public_web: false, allowed_domains: ["example.com"],
     });
 
     await handler.handle({ type: "stop_session", job_id: JOB_ID, session_id: SESSION_ID, reason: "done" });
@@ -340,7 +340,7 @@ describe("SessionMonitor", () => {
       config: {
         enabled: true,
         mode: "public_ephemeral",
-        allowed_domains: ["example.com"],
+        allow_public_web: false, allowed_domains: ["example.com"],
         code_execution_enabled: false,
         computer_actions_enabled: false,
         viewport: { width: 1440, height: 900 },

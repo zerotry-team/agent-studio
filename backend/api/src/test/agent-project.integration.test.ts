@@ -47,6 +47,21 @@ describe("Agent Project / Preview / Promote", () => {
 
   beforeAll(async () => {
     h = createHarness();
+    // この結合テストは接続・設定値・Buildを検証する。キーワード推測の生成器には依存しない。
+    h.deps.generator.generate = async () => ({
+      key: "social-post-agent", name: "SNS投稿Agent", description: "SNS投稿の分析と公開",
+      instructions: "ベンチマークと過去投稿を分析し、投稿案を作成してください。",
+      variables: [
+        { name: "BENCHMARK_URL", label: "調査先", description: "調査するURL", example: null, required: true },
+        { name: "ACCOUNT_ID", label: "アカウント", description: "投稿するアカウント", example: null, required: true },
+        { name: "BRAND_TONE", label: "文体", description: "投稿の文体", example: null, required: true },
+      ],
+      requirements: [
+        { description: "Webを調査", kind: "tool", candidate_tools: ["browser_navigate", "browser_snapshot"], confidence: 1, reason: "Browser", uses_variables: ["BENCHMARK_URL"] },
+        { description: "投稿を分析して公開", kind: "tool", candidate_tools: socialOperations.map((operation) => operation.name!), confidence: 1, reason: "Social Router", uses_variables: ["ACCOUNT_ID", "BRAND_TONE"] },
+      ],
+      conditional_approvals: [],
+    });
     const email = `project-owner-${h.suffix}@example.com`;
     const org = await h.createOrg("project", [{ email, role: "owner", approver: true }]);
     owner = { email, org: org.id };

@@ -511,6 +511,9 @@ export class RunDriver {
         case "message":
           if (item.phase === "final_answer" && fromRoot) {
             const text = outputText(item);
+            // 再接続でturn.createdを取り逃しても、最終回答はターンが進んだ証拠になる。
+            state.turnStarted = true;
+            if (text.trim()) state.turnDidWork = true;
             await tx.runs.update({ where: { id: this.runId }, data: { output: text } });
             await appendRunEvent(tx, state.run, "message", "エージェントの回答", { role: "assistant", text });
           }

@@ -148,7 +148,7 @@ export class JobHandler {
       record.browser.status = "running";
       record.grant = {
         ...record.grant,
-        browser: { endpoint, mode: browser.mode, allowed_domains: browser.allowed_domains },
+        browser: { endpoint, mode: browser.mode, allowed_domains: browser.allowed_domains, allow_public_web: browser.allow_public_web },
       };
       log.info({ browser_task_arn: browserTaskArn }, "Browser Session Worker が RUNNING になりました");
     }

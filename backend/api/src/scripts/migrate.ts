@@ -29,6 +29,19 @@ if (result.status !== 0) {
 }
 console.log("マイグレーションが完了しました");
 
+// 適用済みでもスキーマと不一致ならサービス更新を止める。
+const schemaPath = fileURLToPath(new URL("../../../../prisma/schema.prisma", import.meta.url));
+const diff = spawnSync(process.execPath, [prismaCli, "migrate", "diff", "--config", prismaConfig,
+  "--from-config-datasource", "--to-schema", schemaPath, "--exit-code"], {
+  stdio: "inherit",
+  env: { ...process.env, DIRECT_URL: admin.url },
+});
+if (diff.status !== 0) {
+  console.error("適用後のDBとPrismaスキーマが一致しません。サービスの更新を中止します");
+  process.exit(diff.status ?? 1);
+}
+console.log("適用後のDBとPrismaスキーマの一致を確認しました");
+
 // 最初の運営管理者（Terraform の initial_admin_email）。何度実行しても同じ結果になる
 const initialAdmin = process.env.INITIAL_PLATFORM_ADMIN_EMAIL?.trim();
 if (initialAdmin) {

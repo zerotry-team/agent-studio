@@ -12,7 +12,7 @@ const RUN_ID = "22222222-2222-4222-8222-222222222222";
 const config: BrowserSessionConfig = {
   enabled: true,
   mode: "public_ephemeral",
-  allowed_domains: ["example.com"],
+  allow_public_web: false, allowed_domains: ["example.com"],
   code_execution_enabled: false,
   computer_actions_enabled: false,
   viewport: { width: 1440, height: 900 },

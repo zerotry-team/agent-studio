@@ -78,7 +78,7 @@ describe("GrantStore", () => {
     const store = new GrantStore();
     store.upsert(
       grant(1, {
-        browser: { endpoint: "http://10.40.1.2:8931/mcp/token", mode: "public_ephemeral", allowed_domains: ["example.com"] },
+        browser: { endpoint: "http://10.40.1.2:8931/mcp/token", mode: "public_ephemeral", allow_public_web: false, allowed_domains: ["example.com"] },
       }),
     );
     store.upsert(grant(1, { allowed_tools: ["browser_snapshot"] }));
