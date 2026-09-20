@@ -12,7 +12,7 @@ import type {
   ToolDto,
 } from "@agent-studio/contracts";
 import { isBrowserAccessConfigured, isBrowserCapability, usesBrowserCapability } from "@agent-studio/contracts";
-import { CalendarClock, Check, CircleAlert, CloudUpload, History, Link2, MessageSquare, Rocket, RotateCcw, Settings, Trash2 } from "lucide-react";
+import { CalendarClock, Check, CircleAlert, CloudUpload, ExternalLink, History, Link2, MessageSquare, Rocket, RotateCcw, Settings, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
@@ -24,7 +24,7 @@ import {
   setBrowserAccessAction,
 } from "@/actions/agents";
 import { listConnectionsAction } from "@/actions/connections";
-import { listConnectorsAction } from "@/actions/connectors";
+import { listConnectorsAction, setConnectorOAuthAppAction } from "@/actions/connectors";
 import { listDeploymentsAction, promoteDeploymentAction, rollbackDeploymentAction } from "@/actions/deployments";
 import { createScheduleAction, deleteScheduleAction, listSchedulesAction, updateScheduleAction } from "@/actions/schedules";
 import { AgentRun } from "@/components/agents/agent-run";
@@ -127,7 +127,7 @@ function EnvironmentBadge({ label, deployment }: { label: string; deployment?: D
 }
 
 function Overview({ project, connectionError, onChanged, onGoTo }: { project: AgentProjectDto; connectionError: string | null; onChanged: () => Promise<void>; onGoTo: (tab: ProjectTab) => void }) {
-  const { organization } = useSession();
+  const { organization, can } = useSession();
   const createPreview = useActionMutation(createPreviewAction, {
     successMessage: "Previewを作成しました",
     // 作ったらそのまま試せるところまで運ぶ
@@ -167,7 +167,7 @@ function Overview({ project, connectionError, onChanged, onGoTo }: { project: Ag
         <CardHeader title="Agent Builder" description="必要な能力と接続を解決し、実行できるPreviewまで準備します。" />
         <CardBody className="space-y-3">
           {connectionError === "qiita_oauth_not_configured" ? (
-            <Alert tone="warning">Qiita OAuthのアプリ設定がまだありません。Agent Studio運営環境へClient IDとClient Secretを登録すると、ここからQiita認証を再開できます。</Alert>
+            <Alert tone="warning">Qiitaを初めて使うため、運営者による1回限りの準備が必要です。下の案内から設定すると、自動で認証へ進みます。</Alert>
           ) : connectionError ? (
             <Alert tone="danger">Qiitaとの接続を完了できませんでした。もう一度認証してください。</Alert>
           ) : null}
@@ -189,6 +189,8 @@ function Overview({ project, connectionError, onChanged, onGoTo }: { project: Ag
               connectorId={connectorId}
               connectorName={group.connectorName}
               connectorKey={group.connectorKey}
+              oauthSetupRequired={connectionError === "qiita_oauth_not_configured" && group.connectorKey === "qiita"}
+              canConfigureOAuthApp={can("organization.edit")}
               connected={group.requirements.every((requirement) => requirement.state === "resolved")}
               capabilities={[...new Set(group.requirements.flatMap((requirement) => requirement.tool_names))]}
               connections={(connections.data ?? []).filter(
@@ -393,6 +395,8 @@ function ConnectorSetup({
   connectorId,
   connectorName,
   connectorKey,
+  oauthSetupRequired,
+  canConfigureOAuthApp,
   connected,
   capabilities,
   connections,
@@ -402,6 +406,8 @@ function ConnectorSetup({
   connectorId: string;
   connectorName: string;
   connectorKey: string | null;
+  oauthSetupRequired: boolean;
+  canConfigureOAuthApp: boolean;
   connected: boolean;
   capabilities: string[];
   connections: ConnectionDto[];
@@ -419,6 +425,15 @@ function ConnectorSetup({
   };
 
   if (connections.length === 0) {
+    if (connectorKey === "qiita" && oauthSetupRequired) {
+      return (
+        <QiitaOAuthAppSetup
+          agentId={agentId}
+          connectorId={connectorId}
+          canConfigure={canConfigureOAuthApp}
+        />
+      );
+    }
     return (
       <div className="rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-3">
         <p className="text-sm font-medium text-gray-900">{connectorName}に接続してください</p>
@@ -463,6 +478,63 @@ function ConnectorSetup({
         </div>
       </div>
       {link.error ? <p className="mt-2 text-xs text-red-600">{link.error.message}</p> : null}
+    </div>
+  );
+}
+
+/** Provider側でOAuth applicationが未登録でも、Agent Builderから離れず準備して認証を再開する。 */
+function QiitaOAuthAppSetup({ agentId, connectorId, canConfigure }: { agentId: string; connectorId: string; canConfigure: boolean }) {
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [callbackUrl, setCallbackUrl] = useState("/integrations/qiita/oauth/callback");
+  useEffect(() => setCallbackUrl(`${window.location.origin}/integrations/qiita/oauth/callback`), []);
+  const save = useActionMutation(setConnectorOAuthAppAction, {
+    successMessage: "Qiita OAuthアプリを安全に保存しました。認証へ進みます",
+    onSuccess: () => {
+      window.location.assign(
+        `/integrations/qiita/oauth/start?connector=${encodeURIComponent(connectorId)}&agent=${encodeURIComponent(agentId)}`,
+      );
+    },
+  });
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!clientId.trim() || !clientSecret) return;
+    void save.mutate(connectorId, { client_id: clientId.trim(), client_secret: clientSecret });
+  };
+
+  return (
+    <div className="rounded-lg border border-amber-300 bg-amber-50/70 px-4 py-4">
+      <p className="text-sm font-semibold text-gray-900">Qiitaを利用可能にする（初回のみ）</p>
+      <p className="mt-1 text-xs leading-relaxed text-gray-600">
+        この準備はAgentごとではなく、この組織で最初の1回だけです。完了後、他の利用者は「Qiitaで認証」を押すだけになります。
+      </p>
+      {!canConfigure ? (
+        <Alert className="mt-3" tone="warning">組織のownerにこの初回設定を依頼しました。設定が終わると、ここから続行できます。</Alert>
+      ) : (
+        <form className="mt-3 space-y-3" onSubmit={submit}>
+          <ol className="list-decimal space-y-1 pl-5 text-xs leading-relaxed text-gray-700">
+            <li>
+              <a className="font-medium text-accent-700 underline" href="https://qiita.com/settings/applications" target="_blank" rel="noreferrer">
+                QiitaでOAuthアプリを登録 <ExternalLink className="inline h-3 w-3" aria-hidden="true" />
+              </a>
+            </li>
+            <li>リダイレクト先URLに次を指定します。</li>
+          </ol>
+          <code className="block break-all rounded-md border border-amber-200 bg-white px-2.5 py-2 text-xs text-gray-800">{callbackUrl}</code>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Client ID" required error={save.fieldErrors.client_id}>
+              <Input value={clientId} onChange={(event) => setClientId(event.target.value)} autoComplete="off" />
+            </Field>
+            <Field label="Client Secret" required hint="保存後は表示されません" error={save.fieldErrors.client_secret}>
+              <Input type="password" value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} autoComplete="new-password" />
+            </Field>
+          </div>
+          {save.error ? <Alert tone="danger">{save.error.message}</Alert> : null}
+          <Button type="submit" size="sm" loading={save.pending} disabled={!clientId.trim() || !clientSecret}>
+            安全に保存してQiita認証へ進む
+          </Button>
+        </form>
+      )}
     </div>
   );
 }

@@ -2,10 +2,12 @@ import type { Prisma } from "@prisma/client";
 import {
   createToolInputSchema,
   createConnectorSchema,
+  setConnectorOAuthAppSchema,
   updateConnectorSchema,
   discoverMcpToolsSchema,
   toolVersionSpecSchema,
   type ConnectorDto,
+  type ConnectorOAuthAppDto,
   type ConnectorOperationInput,
   type DiscoverMcpToolsInput,
   type UpdateConnectorInput,
@@ -16,6 +18,7 @@ import {
   type CreateToolInput,
   type CreateToolVersionInput,
   type SetConnectionSecretInput,
+  type SetConnectorOAuthAppInput,
   type ToolDto,
   type ToolVersionDto,
 } from "@agent-studio/contracts";
@@ -38,6 +41,11 @@ function canonicalJson(value: unknown): string {
     return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
+}
+
+function usableEnvSecret(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed && trimmed !== "unset" ? trimmed : null;
 }
 
 /** 連携サービスの1操作から、ツールの spec を組み立てる（登録と編集で同じ形にする） */
@@ -121,6 +129,64 @@ export class ToolService {
       if (!connector) throw notFound("連携サービス");
       return toConnectorDto(connector);
     });
+  }
+
+  /** OAuth applicationの準備状況。Client Secretは存在の有無だけを返す。 */
+  async getConnectorOAuthApp(actor: MemberActor, id: string): Promise<ConnectorOAuthAppDto> {
+    const connector = await this.deps.db.run(scopeOf(actor), (tx) =>
+      tx.connectors.findFirst({ where: { id, organization_id: actor.organizationId } }),
+    );
+    if (!connector) throw notFound("連携サービス");
+    if (connector.key !== "qiita") throw validationError("この連携サービスはOAuth application設定に対応していません");
+    const envClientId = usableEnvSecret(this.deps.env.QIITA_OAUTH_CLIENT_ID);
+    const envClientSecret = usableEnvSecret(this.deps.env.QIITA_OAUTH_CLIENT_SECRET);
+    const clientId = connector.oauth_client_id ?? envClientId;
+    const hasClientSecret = Boolean(connector.oauth_client_secret_locator || envClientSecret);
+    return {
+      connector_id: connector.id,
+      provider: connector.key,
+      configured: Boolean(clientId && hasClientSecret),
+      client_id: clientId ?? null,
+      has_client_secret: hasClientSecret,
+    };
+  }
+
+  /** OAuth applicationを運営者が一度だけ登録する。Secret本体はSecret Store以外へ保存しない。 */
+  async setConnectorOAuthApp(actor: MemberActor, id: string, raw: SetConnectorOAuthAppInput): Promise<ConnectorOAuthAppDto> {
+    requireRole(actor, "owner");
+    const input = setConnectorOAuthAppSchema.parse(raw);
+    const connector = await this.deps.db.run(scopeOf(actor), (tx) =>
+      tx.connectors.findFirst({ where: { id, organization_id: actor.organizationId } }),
+    );
+    if (!connector) throw notFound("連携サービス");
+    if (connector.key !== "qiita") throw validationError("この連携サービスはOAuth application設定に対応していません");
+    const locator = await this.deps.secrets.put(
+      secretNames.connectorOAuthApp(this.deps.env.SECRETS_PREFIX, actor.organizationId, connector.id),
+      input.client_secret,
+      { "agentstudio:organization_id": actor.organizationId, "agentstudio:connector_id": connector.id },
+    );
+    await this.deps.db.run(scopeOf(actor), async (tx) => {
+      await tx.connectors.update({
+        where: { id: connector.id },
+        data: { oauth_client_id: input.client_id, oauth_client_secret_locator: locator },
+      });
+      await recordAudit(
+        tx,
+        auditBy(actor, {
+          action: "connector.oauth_app.update",
+          targetType: "connector",
+          targetId: connector.id,
+          detail: { provider: connector.key, client_id_updated: true, client_secret_updated: true },
+        }),
+      );
+    });
+    return {
+      connector_id: connector.id,
+      provider: connector.key,
+      configured: true,
+      client_id: input.client_id,
+      has_client_secret: true,
+    };
   }
 
   /** 登録前に MCP サーバーへ接続し、申告されている操作の一覧を返す（入力補助）。 */
@@ -446,9 +512,12 @@ export class ToolService {
       tx.connectors.findFirst({ where: { id: connectorId, organization_id: actor.organizationId, key: "qiita" } }),
     );
     if (!connector) throw notFound("Qiita連携");
-    const clientId = this.deps.env.QIITA_OAUTH_CLIENT_ID;
-    const clientSecret = this.deps.env.QIITA_OAUTH_CLIENT_SECRET;
-    if (!clientId || !clientSecret || clientId === "unset" || clientSecret === "unset") {
+    const clientId = connector.oauth_client_id ?? usableEnvSecret(this.deps.env.QIITA_OAUTH_CLIENT_ID);
+    const storedClientSecret = connector.oauth_client_secret_locator
+      ? await this.deps.secrets.get(connector.oauth_client_secret_locator)
+      : null;
+    const clientSecret = storedClientSecret ?? usableEnvSecret(this.deps.env.QIITA_OAUTH_CLIENT_SECRET);
+    if (!clientId || !clientSecret) {
       throw preconditionFailed("Qiita OAuthがまだAgent Studioに設定されていません");
     }
 

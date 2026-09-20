@@ -30,6 +30,7 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 - 一発のManifest生成画面を `Agent Builder` として拡張し、Qiita Connectionがなければ同じ画面からOAuthを開始できるようにした。認可後はtokenをAPI側で交換してSecret Storeへ保存し、Previewへ権限を結び、既存の自動Preview作成へ戻る。
 - Qiita Connectorは公式API v2の `POST /api/v2/items` を使用する。記事本文・タイトル・1〜5件のタグを入力とし、リスクは `external_send`。
 - 現在の実ブラウザでは、Qiita OAuth applicationのClient ID / Client Secretが未設定であることをAgent Builder自身が検出して停止するところまで確認済み。QiitaアカウントとOAuth applicationの登録後に、実認可・Preview Run・公開記事確認を行う必要がある。
+- 外部サービス側のOAuth applicationが未準備でも行き止まりにならないよう、Agent Builder内にowner向けの初回セットアップを追加した。Client IDとClient Secretを入力すると、SecretはSecret Storeだけに保存し、そのまま利用者認証へ遷移する。owner以外には運営者対応待ちを明示し、Agentを実行可能になるまで完成扱いにしない。
 
 今回追加済み:
 

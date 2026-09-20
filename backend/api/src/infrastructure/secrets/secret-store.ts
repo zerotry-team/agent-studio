@@ -121,4 +121,6 @@ export const secretNames = {
   openAiEnvKey: (prefix: string, organizationId: string) => `${prefix}/orgs/${organizationId}/openai-env-key`,
   connection: (prefix: string, organizationId: string, connectionId: string) =>
     `${prefix}/orgs/${organizationId}/connections/${connectionId}`,
+  connectorOAuthApp: (prefix: string, organizationId: string, connectorId: string) =>
+    `${prefix}/orgs/${organizationId}/connectors/${connectorId}/oauth-client-secret`,
 };

@@ -91,23 +91,23 @@ model organization_members {
 }
 
 model agents {
-  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organization_id       String   @db.Uuid
-  key                   String
-  name                  String
-  description           String?
+  id                      String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id         String   @db.Uuid
+  key                     String
+  name                    String
+  description             String?
   /// 利用者が入力した業務説明。Manifest は Advanced 表示に留める
-  project_brief         String?
+  project_brief           String?
   /// Capability Resolver の直近結果。Secret は含めない
-  capability_resolution Json     @default("{}")
+  capability_resolution   Json     @default("{}")
   /// ブラウザで接続してよい範囲。"restricted"（許可したドメインだけ）か "public"（公開Web全般）
-  browser_access        String   @default("restricted")
+  browser_access          String   @default("restricted")
   /// restricted のときに接続を許すドメイン
-  browser_allowed_domains Json   @default("[]")
-  latest_version        Int      @default(0)
-  created_by            String?  @db.Uuid
-  created_at            DateTime @default(now()) @db.Timestamptz(6)
-  updated_at            DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+  browser_allowed_domains Json     @default("[]")
+  latest_version          Int      @default(0)
+  created_by              String?  @db.Uuid
+  created_at              DateTime @default(now()) @db.Timestamptz(6)
+  updated_at              DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
   organization        organizations               @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   versions            agent_versions[]
@@ -146,19 +146,22 @@ model agent_versions {
 
 /// 利用者に見せる連携サービス。配下の Tool は権限・リスク・監査の単位として分離したまま維持する
 model connectors {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organization_id String   @db.Uuid
-  key             String
-  name            String
-  description     String
+  id                          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id             String   @db.Uuid
+  key                         String
+  name                        String
+  description                 String
   /// http_openapi / mcp / internal / openai_builtin / runtime
-  adapter         String
-  base_url        String?
+  adapter                     String
+  base_url                    String?
   /// none / static_bearer / runtime_secret
-  auth_type       String   @default("none")
-  icon            String?
-  created_at      DateTime @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+  auth_type                   String   @default("none")
+  /// OAuth appの公開識別子。Client Secret本体はSecret Storeへ保存する
+  oauth_client_id             String?
+  oauth_client_secret_locator String?
+  icon                        String?
+  created_at                  DateTime @default(now()) @db.Timestamptz(6)
+  updated_at                  DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
   organization  organizations            @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   tools         tools[]

@@ -298,6 +298,23 @@ export type SetConnectionSecretInput = z.infer<typeof setConnectionSecretSchema>
 export const exchangeQiitaOAuthSchema = z.object({ code: z.string().min(1).max(2000) }).strict();
 export type ExchangeQiitaOAuthInput = z.infer<typeof exchangeQiitaOAuthSchema>;
 
+/** 外部サービス側で一度だけ発行するOAuth applicationの設定。Secretは書き込み専用。 */
+export const setConnectorOAuthAppSchema = z
+  .object({
+    client_id: z.string().trim().min(1).max(500),
+    client_secret: z.string().min(1).max(2000),
+  })
+  .strict();
+export type SetConnectorOAuthAppInput = z.infer<typeof setConnectorOAuthAppSchema>;
+
+export interface ConnectorOAuthAppDto {
+  connector_id: string;
+  provider: string;
+  configured: boolean;
+  client_id: string | null;
+  has_client_secret: boolean;
+}
+
 export interface ConnectionDto {
   id: string;
   name: string;

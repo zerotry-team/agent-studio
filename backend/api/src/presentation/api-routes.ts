@@ -27,6 +27,7 @@ import {
   listQuerySchema,
   sendRunMessageSchema,
   setConnectionSecretSchema,
+  setConnectorOAuthAppSchema,
   setAgentEnvironmentSchema,
   setOpenAiCredentialsSchema,
   startEvalRunSchema,
@@ -117,6 +118,18 @@ export function createApiRoutes(deps: Deps, s: Services) {
     c.json(await s.tools.updateConnector(c.get("member"), id(c.req.param("id")), await json(c, updateConnectorSchema))),
   );
   org.get("/connectors/:id", async (c) => c.json(await s.tools.getConnector(c.get("member"), id(c.req.param("id")))));
+  org.get("/connectors/:id/oauth-app", async (c) =>
+    c.json(await s.tools.getConnectorOAuthApp(c.get("member"), id(c.req.param("id")))),
+  );
+  org.put("/connectors/:id/oauth-app", async (c) =>
+    c.json(
+      await s.tools.setConnectorOAuthApp(
+        c.get("member"),
+        id(c.req.param("id")),
+        await json(c, setConnectorOAuthAppSchema),
+      ),
+    ),
+  );
 
   org.get("/connections", async (c) => c.json(await s.tools.listConnections(c.get("member"))));
   org.post("/connections", async (c) => c.json(await s.tools.createConnection(c.get("member"), await json(c, createConnectionSchema)), 201));
