@@ -7,7 +7,7 @@ AWS アカウントごとに **1 回だけ**、管理者が自分の認証情報
 | Terraform の state バケット | `as-tfstate-<account_id>-<region>` | バージョニング、SSE-KMS、パブリックアクセスのブロック、TLS 以外を拒否。ロックは S3 ネイティブ（`use_lockfile`）なので DynamoDB は不要 |
 | GitHub Actions の OIDC プロバイダー | `token.actions.githubusercontent.com` | アカウントに既にある場合は `create_github_oidc_provider = false` |
 | デプロイ用ロール | `as-github-deploy` | 信頼するのは `repo:<github_repository>:environment:<env>` だけ。権限は AdministratorAccess（理由は `github_oidc.tf` のコメント） |
-| ECR リポジトリ 7 つ | `agent-studio/*` | `create_ecr_repositories = true` のとき（Agent Studio のアカウントだけ）。Runtime 用の 5 つはテナントのアカウントから pull できる |
+| ECR リポジトリ 8 つ | `agent-studio/*` | `create_ecr_repositories = true` のとき（Agent Studio のアカウントだけ）。Runtime 用の 6 つはテナントのアカウントから pull できる |
 
 ## state の置き場所
 
