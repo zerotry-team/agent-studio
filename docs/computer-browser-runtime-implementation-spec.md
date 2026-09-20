@@ -825,7 +825,7 @@ Runtime           Sample A production
 - [x] `CBR-027` Browser Automation Connectorを1サービスとして登録する。
 - [x] `CBR-028` Capability ResolverにBrowser要件の判定を追加する。
 - [x] `CBR-029` 内部Browser ToolをBuild時に自動展開する。
-- [ ] `CBR-030` Agent作成時に必要なConnectionと許可ドメインだけ確認する。
+- [x] `CBR-030` Agent作成時に必要なConnectionと許可ドメインだけ確認する。
 - [ ] `CBR-031` Run画面へScreenshotとBrowser状態を追加する。
 - [x] `CBR-032` Preview成功後、同一BuildをProductionへ昇格できることを確認する。
 

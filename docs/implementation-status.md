@@ -24,6 +24,7 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 - Computer / Browser Runtime Phase 1とNetwork/Securityの主要部。RunごとのBrowser Session Task、Private IPの動的Session Grant、Tool Gatewayの動的routing、Screenshot/Snapshot/Browser Action、公開Web向け制限付きコード実行、Orphan Sweeperを実装。
 - Browser専用Egress Proxyを追加し、FQDN allowlist、IP literal、private/link-local/metadata系address拒否を強制。`proxy` modeではBrowser TaskのSecurity Groupから直接Internet向け80/443を削除した。
 - `browser-automation` Connectorを1能力として扱い、Build時に内部Action群へ展開。`authenticated_restricted`では`browser_exec_js`をContract、Gateway、Workerの3箇所で無効化した。
+- Agent作成後はBrowser内部Actionを個別表示せず、必要なConnectionと許可ドメインだけを確認する。Browser接続範囲が未設定の間はPreviewを作成しないことをAPI結合テストと実ブラウザで確認した。
 - 新しいBrowser Worker + Egress ProxyをDocker上で接続し、Proxy経由で`https://example.com`を開き、画像応答とSnapshot内容を確認した。AWS上の実OpenAI E2E、Browser Profile/Human Login、Upload/Download、Computer Actionは未確認・未実装。
 
 残件:
@@ -103,8 +104,8 @@ SDK（`openai` 7.x）の型を調べた結果（docs/reference/openai-agents-sdk
 
 | 対象 | 方法 | 結果 |
 |---|---|---|
-| 型・単体テスト | `yarn type-check` / `yarn test`（全ワークスペース） | 型検査成功、278 件すべて成功 |
-| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration`（PostgreSQL） | 28 件すべて成功 |
+| 型・単体テスト | `yarn type-check` / `yarn test`（全ワークスペース） | 型検査成功、281 件すべて成功 |
+| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration`（PostgreSQL） | 29 件すべて成功 |
 | ビルド | `yarn build`、`docker build`（api / web / runtime の全イメージ） | 成功 |
 | Terraform | `fmt` / `validate`（5 つのルートモジュール）、モックのプロバイダーでの apply | 成功 |
 | ワークフロー | actionlint | 指摘なし |

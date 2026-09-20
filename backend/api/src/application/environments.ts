@@ -2,6 +2,8 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import {
   createRuntimeProfileSchema,
+  isBrowserAccessConfigured,
+  usesBrowserCapability,
   type AgentManifest,
   parseToolRef,
   type BootstrapTokenDto,
@@ -216,6 +218,12 @@ export class EnvironmentService {
       const version = agent.versions.find((candidate) => candidate.status === "published");
       if (!version) throw preconditionFailed("公開済みのAgent Versionがありません");
       const manifest = version.manifest as unknown as AgentManifest;
+      const resolution = agent.capability_resolution as unknown as CapabilityResolutionDto;
+      const browserDomains = Array.isArray(agent.browser_allowed_domains) ? (agent.browser_allowed_domains as string[]) : [];
+      const browserAccess = agent.browser_access === "public" ? "public" : "restricted";
+      if (usesBrowserCapability(resolution) && !isBrowserAccessConfigured(browserAccess, browserDomains)) {
+        throw preconditionFailed("ブラウザで接続できる範囲を設定してください");
+      }
       const profile = manifest.environment.profile
         ? await tx.runtime_profiles.findUnique({
             where: { organization_id_key: { organization_id: actor.organizationId, key: manifest.environment.profile } },
@@ -228,11 +236,10 @@ export class EnvironmentService {
           });
       if (!profile) throw preconditionFailed("Previewを動かす環境がありません。SettingsでEnvironmentを設定してください");
 
-      const resolution = agent.capability_resolution as unknown as CapabilityResolutionDto;
       const { variables, allowedTools } = await this.assertProjectDependencies(tx, actor.organizationId, agentId, "staging", resolution);
       const { config, warnings } = await this.compile(tx, actor.organizationId, manifest, profile, allowedTools, {
-        access: agent.browser_access === "public" ? "public" : "restricted",
-        allowed_domains: Array.isArray(agent.browser_allowed_domains) ? (agent.browser_allowed_domains as string[]) : [],
+        access: browserAccess,
+        allowed_domains: browserDomains,
       });
       const latestBuild = await tx.agent_builds.findFirst({ where: { agent_id: agentId }, orderBy: { build_number: "desc" } });
       const build = await tx.agent_builds.create({

@@ -121,6 +121,53 @@ describe("Agent Project / Preview / Promote", () => {
 
   afterAll(async () => h.close());
 
+  it("Browser Agentは接続範囲を決めるまでPreviewを作らない", async () => {
+    const originalGenerate = h.deps.generator.generate;
+    h.deps.generator.generate = async () => ({
+      key: "browser-report-agent",
+      name: "競合料金比較レポート",
+      description: "公開料金ページを比較する",
+      instructions: "公開されている料金ページを確認し、比較してください。",
+      variables: [],
+      requirements: [
+        {
+          description: "公開料金ページを確認する",
+          kind: "tool",
+          candidate_tools: ["browser_navigate", "browser_snapshot"],
+          confidence: 1,
+          reason: "Browser",
+          uses_variables: [],
+        },
+      ],
+      conditional_approvals: [],
+    });
+    try {
+      const created = await h.request("POST", "/api/v1/agent-projects", {
+        ...owner,
+        body: { description: "競合の公開料金ページを比較してレポートにする" },
+      });
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      expect(created.body.agent.capability_resolution.ready).toBe(true);
+      expect(created.body.auto_preview_created).toBe(false);
+      expect(created.body.builds).toHaveLength(0);
+      expect(created.body.deployments).toHaveLength(0);
+
+      const blocked = await h.request("POST", `/api/v1/agents/${created.body.agent.id}/preview`, owner);
+      expect(blocked.status).toBe(412);
+      expect(blocked.body.error.message).toContain("ブラウザで接続できる範囲");
+
+      const configured = await h.request("PUT", `/api/v1/agents/${created.body.agent.id}/browser-access`, {
+        ...owner,
+        body: { access: "restricted", allowed_domains: ["example.com"] },
+      });
+      expect(configured.status).toBe(200);
+      const preview = await h.request("POST", `/api/v1/agents/${created.body.agent.id}/preview`, owner);
+      expect(preview.status, JSON.stringify(preview.body)).toBe(201);
+    } finally {
+      h.deps.generator.generate = originalGenerate;
+    }
+  });
+
   it("不足ConnectionとVariablesだけを設定し、Preview Buildを作る", async () => {
     const created = await h.request("POST", "/api/v1/agent-projects", {
       ...owner,
@@ -145,6 +192,14 @@ describe("Agent Project / Preview / Promote", () => {
       });
       expect(variables.status).toBe(200);
     }
+
+    const browserAccess = await h.request("PUT", `/api/v1/agents/${projectId}/browser-access`, {
+      ...owner,
+      body: { access: "restricted", allowed_domains: ["example.com"] },
+    });
+    expect(browserAccess.status).toBe(200);
+    const createdPreview = await h.request("POST", `/api/v1/agents/${projectId}/preview`, owner);
+    expect(createdPreview.status, JSON.stringify(createdPreview.body)).toBe(201);
 
     const project = await h.request("GET", `/api/v1/agents/${projectId}/project`, owner);
     expect(project.body.agent.capability_resolution.ready).toBe(true);

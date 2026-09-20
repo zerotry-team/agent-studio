@@ -10,7 +10,7 @@
     "runtime/*"
   ],
   "scripts": {
-    "dev": "yarn workspaces foreach -pi --include '@agent-studio/{api,web}' run dev",
+    "dev": "yarn workspaces foreach -A -pi --include '@agent-studio/{api,web}' run dev",
     "dev:api": "yarn workspace @agent-studio/api dev",
     "dev:worker": "yarn workspace @agent-studio/api dev:worker",
     "dev:web": "yarn workspace @agent-studio/web dev",

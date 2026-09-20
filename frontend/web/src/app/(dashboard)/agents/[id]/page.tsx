@@ -11,6 +11,7 @@ import type {
   Stage,
   ToolDto,
 } from "@agent-studio/contracts";
+import { isBrowserAccessConfigured, isBrowserCapability, usesBrowserCapability } from "@agent-studio/contracts";
 import { CalendarClock, Check, CircleAlert, CloudUpload, History, Link2, MessageSquare, Rocket, RotateCcw, Settings, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -140,8 +141,8 @@ function Overview({ project, onChanged, onGoTo }: { project: AgentProjectDto; on
   // 操作の識別子だけでは何をするか分からないので、連携サービスの定義から表示名と影響を引く
   const operations = new Map((connectors.data ?? []).flatMap((connector) => connector.tools.map((tool) => [tool.name, tool] as const)));
   // ブラウザを使うなら、接続してよい範囲を決めるまで動かせない（未設定はどこにも行けない）
-  const usesBrowser = resolution.selected_tools.some((name) => name.startsWith("browser_") || name === "computer_action");
-  const browserReady = project.agent.browser_access === "public" || project.agent.browser_allowed_domains.length > 0;
+  const usesBrowser = usesBrowserCapability(resolution);
+  const browserReady = isBrowserAccessConfigured(project.agent.browser_access, project.agent.browser_allowed_domains);
   // 同じ連携サービスを使う作業は1つにまとめる。接続は連携サービス単位で1回設定すれば、その下の作業すべてに効く
   const groups = new Map<string, { connectorName: string; requirements: CapabilityRequirementDto[] }>();
   const standalone: CapabilityRequirementDto[] = [];
@@ -254,6 +255,7 @@ function RequirementRow({
 }) {
   const ready = requirement.state === "resolved";
   const label = ready ? "準備済み" : requirement.state === "needs_connection" ? "未接続" : "確認が必要";
+  const browserRequirement = requirement.tool_names.some(isBrowserCapability);
   return (
     <div className="rounded-lg border border-gray-100 px-3 py-3">
       <div className="flex items-start justify-between gap-4">
@@ -266,7 +268,12 @@ function RequirementRow({
         </div>
         <Badge tone={ready ? "success" : "warning"}>{label}</Badge>
       </div>
-      {operations.length > 0 ? (
+      {browserRequirement ? (
+        <div className="mt-2.5 border-l-2 border-gray-100 pl-3 text-xs">
+          <p className="font-medium text-gray-800">Browser Automation</p>
+          <p className="mt-0.5 text-gray-500">公開Webページの閲覧と画面操作に使用します。内部の操作はAgent Studioが安全ルールに従って選びます。</p>
+        </div>
+      ) : operations.length > 0 ? (
         <ul className="mt-2.5 space-y-1.5 border-l-2 border-gray-100 pl-3">
           {operations.map((operation) => (
             <li key={operation.id} className="flex flex-wrap items-center gap-2 text-xs">
@@ -310,7 +317,7 @@ function BrowserAccessSetup({
   domains: string[];
   onChanged: () => Promise<void>;
 }) {
-  const configured = access === "public" || domains.length > 0;
+  const configured = isBrowserAccessConfigured(access, domains);
   const [choice, setChoice] = useState<BrowserAccess>(access);
   const [text, setText] = useState(domains.join("\n"));
   const save = useActionMutation(setBrowserAccessAction, { successMessage: "接続範囲を保存し、稼働中の環境に反映しました", onSuccess: onChanged });

@@ -182,17 +182,16 @@ Egress ProxyにはTerraformから`ALLOWED_DOMAINS`を渡す。Browser Workerに�
 完了:
 
 - Phase 1 `CBR-001`〜`CBR-010`
-- Phase 2 `CBR-011`〜`CBR-015`、`CBR-018`
+- Phase 2 `CBR-011`〜`CBR-015`、`CBR-017`〜`CBR-018`
 - Phase 3 `CBR-026`
-- Phase 4 `CBR-027`〜`CBR-029`、`CBR-032`
+- Phase 4 `CBR-027`〜`CBR-030`、`CBR-032`
 - Phase 6 `CBR-040`
 
 未完了:
 
 - `CBR-016`: Upload/Downloadの保存先、サイズ上限、成果物化
-- `CBR-017`: 完了。Control Plane API、Runtime Controller、Tool Gatewayの構造化ログと例外文字列へ共通redactionを適用し、Secret/Cookie/Header/Screenshot Base64/JWT/URL queryを実ログテストで検証
 - `CBR-019`〜`CBR-025`: Browser Profile、暗号化Store、Human Login Relay/UI
-- `CBR-030`〜`CBR-031`: Connection/許可ドメイン確認とRun画面のBrowser状態表示
+- `CBR-031`: Run画面のBrowser状態表示
 - `CBR-033`〜`CBR-038`: Computer Adapterと座標ベース操作
 - `CBR-039`、`CBR-041`〜`CBR-046`: 分離性、Prompt Injection、二重投稿、秘密値、AWS実環境E2E、負荷試験
 

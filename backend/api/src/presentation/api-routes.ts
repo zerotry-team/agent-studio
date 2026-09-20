@@ -21,6 +21,7 @@ import {
   createWorkflowSchema,
   generateManifestSchema,
   inviteMemberSchema,
+  isBrowserAccessConfigured,
   linkAgentConnectionSchema,
   listQuerySchema,
   sendRunMessageSchema,
@@ -34,6 +35,7 @@ import {
   updatePolicySchema,
   updateWorkflowSchema,
   updateAgentScheduleSchema,
+  usesBrowserCapability,
 } from "@agent-studio/contracts";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -54,6 +56,14 @@ export function createApiRoutes(deps: Deps, s: Services) {
   const json = async <T extends z.ZodType>(c: { req: { json: () => Promise<unknown> } }, schema: T): Promise<z.infer<T>> =>
     schema.parse(await c.req.json());
   const id = (v: string | undefined) => uuidParam.parse(v);
+  const readyForPreview = (agent: {
+    capability_resolution: { ready: boolean; selected_tools: string[] };
+    browser_access: "restricted" | "public";
+    browser_allowed_domains: string[];
+  }) =>
+    agent.capability_resolution.ready &&
+    (!usesBrowserCapability(agent.capability_resolution) ||
+      isBrowserAccessConfigured(agent.browser_access, agent.browser_allowed_domains));
 
   // ---- 組織を選ばない操作 ----
   app.get("/me", async (c) => c.json(await s.organizations.me(c.get("user"))));
@@ -141,7 +151,7 @@ export function createApiRoutes(deps: Deps, s: Services) {
     const input = await json(c, createAgentProjectSchema);
     const agent = await s.agents.createProject(actor, input.description);
     let autoPreviewCreated = false;
-    if (agent.capability_resolution.ready) {
+    if (readyForPreview(agent)) {
       try {
         await s.environments.createPreview(actor, agent.id);
         autoPreviewCreated = true;
@@ -166,7 +176,7 @@ export function createApiRoutes(deps: Deps, s: Services) {
     const agentId = id(c.req.param("id"));
     const project = await s.agents.linkConnection(actor, agentId, await json(c, linkAgentConnectionSchema));
     const hasPreview = project.deployments.some((deployment) => deployment.stage === "staging" && deployment.status === "active");
-    if (project.agent.capability_resolution.ready && !hasPreview) await s.environments.createPreview(actor, agentId);
+    if (readyForPreview(project.agent) && !hasPreview) await s.environments.createPreview(actor, agentId);
     return c.json(await s.agents.getProject(actor, agentId));
   });
   org.put("/agents/:id/environment", async (c) => {
@@ -174,7 +184,7 @@ export function createApiRoutes(deps: Deps, s: Services) {
     const agentId = id(c.req.param("id"));
     const project = await s.agents.setEnvironment(actor, agentId, await json(c, setAgentEnvironmentSchema));
     const hasPreview = project.deployments.some((deployment) => deployment.stage === "staging" && deployment.status === "active");
-    if (project.agent.capability_resolution.ready && !hasPreview) await s.environments.createPreview(actor, agentId);
+    if (readyForPreview(project.agent) && !hasPreview) await s.environments.createPreview(actor, agentId);
     return c.json(await s.agents.getProject(actor, agentId));
   });
   org.post("/agents/:id/preview", async (c) => c.json(await s.environments.createPreview(c.get("member"), id(c.req.param("id"))), 201));
