@@ -39,7 +39,10 @@ export interface ControllerDeps {
   fetchImpl?: typeof fetch;
 }
 
-const JOB_WAIT_SECONDS = 20;
+// 本番の外向き HTTP 経路では、設定上の CloudFront / ALB timeout より前に
+// 15 秒で 504 になることがある。十分な余白を持たせ、正常な空レスポンスで
+// 次の poll に移れる長さにする。
+const JOB_WAIT_SECONDS = 10;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const MONITOR_INTERVAL_MS = 15_000;
 const AUDIT_FLUSH_INTERVAL_MS = 5_000;
