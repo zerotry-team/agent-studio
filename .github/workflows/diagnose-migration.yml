@@ -29,3 +29,17 @@ jobs:
           CLUSTER: as-${{ inputs.environment }}
           TASK_ARN: ${{ inputs.task_arn }}
         run: bash .github/scripts/show-migration-logs.sh
+      - name: 稼働中サービスのイメージと状態（読み取りのみ）
+        env:
+          CLUSTER: as-${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          for SERVICE in api worker web; do
+            aws ecs describe-services --cluster "$CLUSTER" --services "${CLUSTER}-${SERVICE}" \
+              --query 'services[].{service:serviceName,desired:desiredCount,running:runningCount,deployments:deployments[].{status:status,rollout:rolloutState,taskDefinition:taskDefinition},events:events[:3].message}'
+            TASKS=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "${CLUSTER}-${SERVICE}" --query 'taskArns' --output text)
+            if [ -n "$TASKS" ] && [ "$TASKS" != "None" ]; then
+              aws ecs describe-tasks --cluster "$CLUSTER" --tasks $TASKS \
+                --query 'tasks[].{task:taskArn,status:lastStatus,health:healthStatus,containers:containers[].{name:name,image:image,digest:imageDigest,status:lastStatus}}'
+            fi
+          done
