@@ -29,6 +29,8 @@ locals {
     "origin-verify",
     "cognito-client-secret",
     "anthropic-api-key",
+    "qiita-oauth-client-id",
+    "qiita-oauth-client-secret",
   ])
 
   # Terraform が値を持つシークレット（anthropic-api-key 以外）
@@ -71,6 +73,18 @@ resource "aws_secretsmanager_secret_version" "generated" {
 # それまでは "unset" が入っている（アプリは未設定として扱う）
 resource "aws_secretsmanager_secret_version" "anthropic_api_key" {
   secret_id     = aws_secretsmanager_secret.this["anthropic-api-key"].id
+  secret_string = "unset"
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
+# Qiita OAuth applicationは運用者がQiita上で登録後に値を設定する。
+resource "aws_secretsmanager_secret_version" "qiita_oauth" {
+  for_each = toset(["qiita-oauth-client-id", "qiita-oauth-client-secret"])
+
+  secret_id     = aws_secretsmanager_secret.this[each.value].id
   secret_string = "unset"
 
   lifecycle {

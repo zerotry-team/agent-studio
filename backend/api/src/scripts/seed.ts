@@ -98,6 +98,100 @@ async function main() {
     data: { connector_id: sampleApiConnector.id },
   });
 
+  // Zenn公式のGitHub連携へ記事Markdownを反映する。GitHub tokenはConnectionとして別途設定する。
+  const zennConnector = await prisma.connectors.upsert({
+    where: { organization_id_key: { organization_id: a.id, key: "zenn-github" } },
+    create: {
+      organization_id: a.id,
+      key: "zenn-github",
+      name: "Zenn（GitHub連携）",
+      description: "Zenn Connectと連携したGitHubリポジトリへ記事を反映し、Zennで公開します",
+      adapter: "http_openapi",
+      base_url: "https://api.github.com",
+      auth_type: "static_bearer",
+    },
+    update: {},
+  });
+  const publishZennArticle = await tool(a.id, "publish_zenn_article", "Zenn記事を公開", {
+    execution_location: "studio_function",
+    description: "タイトルとMarkdown本文をZenn Connect連携リポジトリへ反映し、Zennの記事として公開する",
+    risk: "external_send",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "公開する記事タイトル（70文字以内）" },
+        body: { type: "string", description: "記事本文（Zenn Markdown）" },
+        emoji: { type: "string", description: "アイキャッチ絵文字。省略時は🤖" },
+        type: { type: "string", enum: ["tech", "idea"], description: "記事カテゴリー。通常はtech" },
+        topics: { type: "array", items: { type: "string" }, maxItems: 5, description: "トピック（最大5件）" },
+      },
+      required: ["title", "body"],
+      additionalProperties: false,
+    },
+    studio_function: {
+      handler: "zenn_github_publish",
+      repository_owner: "zerotry-team",
+      repository_name: "agent-studio-zenn-content",
+      zenn_username: "zerotry_iwata",
+      branch: "main",
+    },
+  });
+  await prisma.tools.update({ where: { id: publishZennArticle.id }, data: { connector_id: zennConnector.id } });
+
+  // Qiita公式API v2。利用者がAgent StudioのConnectionへwrite_qiita権限のtokenを設定する。
+  const qiitaConnector = await prisma.connectors.upsert({
+    where: { organization_id_key: { organization_id: a.id, key: "qiita" } },
+    create: {
+      organization_id: a.id,
+      key: "qiita",
+      name: "Qiita",
+      description: "Qiita公式API v2で技術記事を公開します",
+      adapter: "http_openapi",
+      base_url: "https://qiita.com/api/v2",
+      auth_type: "static_bearer",
+    },
+    update: {},
+  });
+  const publishQiitaArticle = await tool(a.id, "publish_qiita_article", "Qiita記事を公開", {
+    execution_location: "studio_function",
+    description: "タイトル、Markdown本文、タグを指定してQiitaへ技術記事を公開する",
+    risk: "external_send",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "公開する記事タイトル" },
+        body: { type: "string", description: "記事本文（Qiita Markdown）" },
+        tags: {
+          type: "array",
+          minItems: 1,
+          maxItems: 5,
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "タグ名" },
+              versions: { type: "array", items: { type: "string" }, description: "関連バージョン。なければ空配列" },
+            },
+            required: ["name", "versions"],
+            additionalProperties: false,
+          },
+        },
+        private: { type: "boolean", description: "限定共有にするか。通常はfalse" },
+        tweet: { type: "boolean", description: "Xにも投稿するか。通常はfalse" },
+        slide: { type: "boolean", description: "スライドモードにするか。通常はfalse" },
+      },
+      required: ["title", "body", "tags"],
+      additionalProperties: false,
+    },
+    studio_function: {
+      handler: "http_api",
+      base_url: "https://qiita.com/api/v2",
+      method: "POST",
+      path: "/items",
+      argument_location: "body",
+    },
+  });
+  await prisma.tools.update({ where: { id: publishQiitaArticle.id }, data: { connector_id: qiitaConnector.id } });
+
   // OpenAI の環境（ツールなしで試せる）
   const openaiProfile = await prisma.runtime_profiles.upsert({
     where: { organization_id_key: { organization_id: a.id, key: "openai-general" } },

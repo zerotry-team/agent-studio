@@ -63,7 +63,12 @@ export function draftFromSpec(spec: ToolVersionSpec): ToolSpecDraft {
   draft.risk = spec.risk;
   switch (spec.execution_location) {
     case "studio_function":
-      draft.webhookUrl = spec.studio_function.handler === "http_webhook" ? spec.studio_function.url : `${spec.studio_function.base_url}${spec.studio_function.path}`;
+      draft.webhookUrl =
+        spec.studio_function.handler === "http_webhook"
+          ? spec.studio_function.url
+          : spec.studio_function.handler === "http_api"
+            ? `${spec.studio_function.base_url}${spec.studio_function.path}`
+            : "";
       draft.webhookConnectionId = spec.studio_function.handler === "http_webhook" ? (spec.studio_function.connection_id ?? "") : "";
       draft.inputSchema = schemaText(spec.input_schema);
       break;

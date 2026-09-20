@@ -57,9 +57,11 @@ locals {
   )
 
   backend_secrets = {
-    DB_APP_PASSWORD      = local.secret_arn["db-app"]
-    RUNTIME_TOKEN_SECRET = local.secret_arn["runtime-token-secret"]
-    ANTHROPIC_API_KEY    = local.secret_arn["anthropic-api-key"]
+    DB_APP_PASSWORD           = local.secret_arn["db-app"]
+    RUNTIME_TOKEN_SECRET      = local.secret_arn["runtime-token-secret"]
+    ANTHROPIC_API_KEY         = local.secret_arn["anthropic-api-key"]
+    QIITA_OAUTH_CLIENT_ID     = local.secret_arn["qiita-oauth-client-id"]
+    QIITA_OAUTH_CLIENT_SECRET = local.secret_arn["qiita-oauth-client-secret"]
   }
 
   # migrate だけが RDS 管理のマスターシークレット（JSON {username,password}）を受け取る
@@ -82,6 +84,7 @@ locals {
   web_secrets = {
     COGNITO_CLIENT_SECRET = local.secret_arn["cognito-client-secret"]
     SESSION_SECRET        = local.secret_arn["web-session-secret"]
+    QIITA_OAUTH_CLIENT_ID = local.secret_arn["qiita-oauth-client-id"]
   }
 
   api_healthcheck_js = "fetch('http://127.0.0.1:3200/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

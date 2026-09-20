@@ -50,10 +50,21 @@ export function ToolSpecDetails({ spec, connections }: ToolSpecDetailsProps) {
           { label: "認証", value: "Agent ProjectのConnectionを実行時に使用" },
           { label: "入力の形式（JSON Schema）", value: <JsonView value={spec.input_schema} maxHeight="20rem" />, wide: true },
         );
-      } else {
+      } else if (spec.studio_function.handler === "http_webhook") {
         items.push(
           { label: "送信先 URL", value: <Mono>{spec.studio_function.url}</Mono>, wide: true },
           { label: "認証に使う接続先", value: <ConnectionName id={spec.studio_function.connection_id} connections={connections} /> },
+          { label: "入力の形式（JSON Schema）", value: <JsonView value={spec.input_schema} maxHeight="20rem" />, wide: true },
+        );
+      } else {
+        items.push(
+          {
+            label: "Zenn Connect repository",
+            value: <Mono>{spec.studio_function.repository_owner}/{spec.studio_function.repository_name}@{spec.studio_function.branch}</Mono>,
+            wide: true,
+          },
+          { label: "Zennアカウント", value: <Mono>{spec.studio_function.zenn_username}</Mono> },
+          { label: "認証", value: "Agent ProjectのGitHub Connectionを実行時に使用" },
           { label: "入力の形式（JSON Schema）", value: <JsonView value={spec.input_schema} maxHeight="20rem" />, wide: true },
         );
       }

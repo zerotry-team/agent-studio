@@ -53,6 +53,10 @@ const envSchema = z
     ANTHROPIC_API_KEY: z.string().optional(),
     MANIFEST_GENERATOR_MODEL: z.string().default("gpt-5.6"),
 
+    // Provider OAuth（tokenは交換後にSecret Storeへ保存し、DBや画面へ返さない）
+    QIITA_OAUTH_CLIENT_ID: z.string().optional(),
+    QIITA_OAUTH_CLIENT_SECRET: z.string().optional(),
+
     // Worker
     WORKER_ID: z.string().default(`${hostname()}-${process.pid}`),
     WORKER_MAX_CONCURRENT_RUNS: z.coerce.number().int().min(1).default(20),

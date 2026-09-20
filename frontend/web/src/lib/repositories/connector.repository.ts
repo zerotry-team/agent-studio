@@ -1,5 +1,5 @@
 import "server-only";
-import type { ConnectorDto, CreateConnectorInput , DiscoverMcpToolsInput, DiscoverMcpToolsResultDto, UpdateConnectorInput } from "@agent-studio/contracts";
+import type { ConnectionDto, ConnectorDto, CreateConnectorInput , DiscoverMcpToolsInput, DiscoverMcpToolsResultDto, UpdateConnectorInput } from "@agent-studio/contracts";
 import { ApiRepository } from "./base";
 
 export class ConnectorRepository extends ApiRepository {
@@ -17,5 +17,9 @@ export class ConnectorRepository extends ApiRepository {
 
   discoverMcpTools(input: DiscoverMcpToolsInput): Promise<DiscoverMcpToolsResultDto> {
     return this.api.post<DiscoverMcpToolsResultDto>("/connectors/discover", input);
+  }
+
+  exchangeQiitaOAuth(id: string, code: string): Promise<ConnectionDto> {
+    return this.api.post<ConnectionDto>(`/connectors/${encodeURIComponent(id)}/qiita-oauth/exchange`, { code });
   }
 }

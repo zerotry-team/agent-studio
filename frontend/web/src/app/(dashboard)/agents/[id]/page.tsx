@@ -64,6 +64,7 @@ export default function AgentProjectPage({ params }: { params: { id: string } })
   const { organization } = useSession();
   const searchParams = useSearchParams();
   const urlTab = parseTab(searchParams.get("tab"));
+  const connectionError = searchParams.get("connection_error");
   const [tab, setTab] = useState<ProjectTab>(urlTab);
   useEffect(() => setTab(urlTab), [urlTab]);
   const project = useActionQuery(() => getAgentProjectAction(params.id), [params.id, organization?.id]);
@@ -101,7 +102,7 @@ export default function AgentProjectPage({ params }: { params: { id: string } })
         tabs={PROJECT_TABS.map((id) => ({ id, label: TAB_LABELS[id] }))}
       />
       <TabPanel id="overview" value={tab} idPrefix="project">
-        <Overview project={data} onChanged={project.reload} onGoTo={changeTab} />
+        <Overview project={data} connectionError={connectionError} onChanged={project.reload} onGoTo={changeTab} />
       </TabPanel>
       <TabPanel id="preview" value={tab} idPrefix="project">
         <Preview project={data} />
@@ -125,7 +126,7 @@ function EnvironmentBadge({ label, deployment }: { label: string; deployment?: D
   return <Badge tone={health === "ready" ? "success" : health === "degraded" || health === "failed" ? "warning" : "neutral"} dot={Boolean(deployment)}>{label} {healthLabel}</Badge>;
 }
 
-function Overview({ project, onChanged, onGoTo }: { project: AgentProjectDto; onChanged: () => Promise<void>; onGoTo: (tab: ProjectTab) => void }) {
+function Overview({ project, connectionError, onChanged, onGoTo }: { project: AgentProjectDto; connectionError: string | null; onChanged: () => Promise<void>; onGoTo: (tab: ProjectTab) => void }) {
   const { organization } = useSession();
   const createPreview = useActionMutation(createPreviewAction, {
     successMessage: "Previewを作成しました",
@@ -144,22 +145,32 @@ function Overview({ project, onChanged, onGoTo }: { project: AgentProjectDto; on
   const usesBrowser = usesBrowserCapability(resolution);
   const browserReady = isBrowserAccessConfigured(project.agent.browser_access, project.agent.browser_allowed_domains);
   // 同じ連携サービスを使う作業は1つにまとめる。接続は連携サービス単位で1回設定すれば、その下の作業すべてに効く
-  const groups = new Map<string, { connectorName: string; requirements: CapabilityRequirementDto[] }>();
+  const groups = new Map<string, { connectorName: string; connectorKey: string | null; requirements: CapabilityRequirementDto[] }>();
   const standalone: CapabilityRequirementDto[] = [];
   for (const requirement of resolution.requirements) {
     if (!requirement.connector_id) {
       standalone.push(requirement);
       continue;
     }
-    const group = groups.get(requirement.connector_id) ?? { connectorName: requirement.connector_name ?? "連携サービス", requirements: [] };
+    const connector = (connectors.data ?? []).find((candidate) => candidate.id === requirement.connector_id);
+    const group = groups.get(requirement.connector_id) ?? {
+      connectorName: requirement.connector_name ?? "連携サービス",
+      connectorKey: connector?.key ?? null,
+      requirements: [],
+    };
     group.requirements.push(requirement);
     groups.set(requirement.connector_id, group);
   }
   return (
     <div className="grid gap-6 lg:grid-cols-[1.3fr_.7fr]">
       <Card>
-        <CardHeader title="Agentを準備しています" description="必要な項目だけを表示しています。" />
+        <CardHeader title="Agent Builder" description="必要な能力と接続を解決し、実行できるPreviewまで準備します。" />
         <CardBody className="space-y-3">
+          {connectionError === "qiita_oauth_not_configured" ? (
+            <Alert tone="warning">Qiita OAuthのアプリ設定がまだありません。Agent Studio運営環境へClient IDとClient Secretを登録すると、ここからQiita認証を再開できます。</Alert>
+          ) : connectionError ? (
+            <Alert tone="danger">Qiitaとの接続を完了できませんでした。もう一度認証してください。</Alert>
+          ) : null}
           {resolution.requirements.map((requirement, index) => (
             <RequirementRow
               key={`${requirement.requirement}-${index}`}
@@ -177,6 +188,7 @@ function Overview({ project, onChanged, onGoTo }: { project: AgentProjectDto; on
               agentId={project.agent.id}
               connectorId={connectorId}
               connectorName={group.connectorName}
+              connectorKey={group.connectorKey}
               connected={group.requirements.every((requirement) => requirement.state === "resolved")}
               capabilities={[...new Set(group.requirements.flatMap((requirement) => requirement.tool_names))]}
               connections={(connections.data ?? []).filter(
@@ -380,6 +392,7 @@ function ConnectorSetup({
   agentId,
   connectorId,
   connectorName,
+  connectorKey,
   connected,
   capabilities,
   connections,
@@ -388,6 +401,7 @@ function ConnectorSetup({
   agentId: string;
   connectorId: string;
   connectorName: string;
+  connectorKey: string | null;
   connected: boolean;
   capabilities: string[];
   connections: ConnectionDto[];
@@ -409,7 +423,14 @@ function ConnectorSetup({
       <div className="rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-3">
         <p className="text-sm font-medium text-gray-900">{connectorName}に接続してください</p>
         <p className="mt-0.5 text-xs text-gray-600">{connectorName}の認証情報がまだ登録されていません。</p>
-        <ButtonLink href="/integrations" size="sm" variant="secondary" className="mt-2.5">連携サービスを開く</ButtonLink>
+        <ButtonLink
+          href={connectorKey === "qiita" ? `/integrations/qiita/oauth/start?connector=${encodeURIComponent(connectorId)}&agent=${encodeURIComponent(agentId)}` : "/integrations"}
+          size="sm"
+          variant="secondary"
+          className="mt-2.5"
+        >
+          {connectorKey === "qiita" ? "Qiitaで認証して続ける" : "連携サービスを開く"}
+        </ButtonLink>
       </div>
     );
   }

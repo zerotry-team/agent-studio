@@ -294,6 +294,10 @@ export const setConnectionSecretSchema = z
   .strict();
 export type SetConnectionSecretInput = z.infer<typeof setConnectionSecretSchema>;
 
+/** Qiita OAuth callbackの認可コード。tokenはAPI側で交換し、レスポンスへ出さない。 */
+export const exchangeQiitaOAuthSchema = z.object({ code: z.string().min(1).max(2000) }).strict();
+export type ExchangeQiitaOAuthInput = z.infer<typeof exchangeQiitaOAuthSchema>;
+
 export interface ConnectionDto {
   id: string;
   name: string;

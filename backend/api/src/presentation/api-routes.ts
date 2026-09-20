@@ -7,6 +7,7 @@ import {
   createConnectionSchema,
   createConnectorSchema,
   discoverMcpToolsSchema,
+  exchangeQiitaOAuthSchema,
   setBrowserAccessSchema,
   updateConnectorSchema,
   createDeploymentSchema,
@@ -119,6 +120,10 @@ export function createApiRoutes(deps: Deps, s: Services) {
 
   org.get("/connections", async (c) => c.json(await s.tools.listConnections(c.get("member"))));
   org.post("/connections", async (c) => c.json(await s.tools.createConnection(c.get("member"), await json(c, createConnectionSchema)), 201));
+  org.post("/connectors/:id/qiita-oauth/exchange", async (c) => {
+    const input = await json(c, exchangeQiitaOAuthSchema);
+    return c.json(await s.tools.exchangeQiitaOAuth(c.get("member"), id(c.req.param("id")), input.code), 201);
+  });
   org.put("/connections/:id/secret", async (c) => {
     await s.tools.setConnectionSecret(c.get("member"), id(c.req.param("id")), await json(c, setConnectionSecretSchema));
     return c.body(null, 204);

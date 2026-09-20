@@ -65,6 +65,16 @@ export const studioFunctionSpecSchema = z.discriminatedUnion("handler", [
       headers: z.record(staticHeaderNameSchema, z.string().min(1).max(200)).optional(),
     })
     .strict(),
+  z
+    .object({
+      handler: z.literal("zenn_github_publish"),
+      /** Zenn Connect と連携した GitHub repository。認証情報は Connection で管理する。 */
+      repository_owner: z.string().regex(/^[A-Za-z0-9_.-]+$/).max(100),
+      repository_name: z.string().regex(/^[A-Za-z0-9_.-]+$/).max(100),
+      zenn_username: z.string().regex(/^[A-Za-z0-9_-]+$/).max(50),
+      branch: z.string().min(1).max(255).default("main"),
+    })
+    .strict(),
 ]);
 
 export const serviceMcpSpecSchema = z

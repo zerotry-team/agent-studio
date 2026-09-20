@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildIdempotencyKey, prepareHttpArguments } from "./studio-functions.js";
+import { buildIdempotencyKey, buildZennArticle, prepareHttpArguments, zennArticleSlug } from "./studio-functions.js";
 
 describe("HTTP Connectorの冪等性", () => {
   it("logical_post_idをIdempotency-Key用に分離し、接続先bodyへ送らない", () => {
@@ -28,5 +28,26 @@ describe("HTTP Connectorの冪等性", () => {
       requestArgs: { logical_post_id: "provider-field" },
       logicalId: "request",
     });
+  });
+});
+
+describe("Zenn GitHub Publisher", () => {
+  it("Zenn frontmatterを安全なscalarで生成する", () => {
+    const article = buildZennArticle({
+      title: 'Agent Studio: "検証"',
+      body: "# 本文\n\n検証しました。",
+      emoji: "🤖",
+      type: "tech",
+      topics: ["AI", "Zenn", "AI"],
+    });
+    expect(article.markdown).toContain('title: "Agent Studio: \\"検証\\""');
+    expect(article.markdown).toContain('topics: ["AI","Zenn"]');
+    expect(article.markdown).toContain("published: true");
+  });
+
+  it("同じRunは同じslugになり、別Runでは変わる", () => {
+    expect(zennArticleSlug("run-1")).toBe(zennArticleSlug("run-1"));
+    expect(zennArticleSlug("run-1")).not.toBe(zennArticleSlug("run-2"));
+    expect(zennArticleSlug("run-1")).toMatch(/^[a-f0-9]{16}$/);
   });
 });

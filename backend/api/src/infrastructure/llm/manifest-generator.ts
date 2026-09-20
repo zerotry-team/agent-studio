@@ -162,6 +162,8 @@ export class TemplateManifestGenerator implements ManifestGenerator {
       list_posts: ["過去投稿", "投稿を分析", "posts"],
       get_post: ["投稿詳細", "投稿内容", "post"],
       publish_post: ["投稿する", "公開", "publish"],
+      publish_qiita_article: ["qiita", "記事を投稿", "技術記事を公開", "qiitaに投稿"],
+      publish_zenn_article: ["zenn", "記事を投稿", "技術記事を公開", "zennに投稿"],
       get_job: ["投稿結果", "成功確認", "job"],
       browser_navigate: ["ベンチマーク", "web", "url", "ページ"],
       browser_snapshot: ["ベンチマーク", "web", "ページ", "分析"],

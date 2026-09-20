@@ -439,6 +439,83 @@ export class ToolService {
     });
   }
 
+  /** Qiita OAuth codeをtokenへ交換し、そのままAgent Studio Connectionとして保存する。 */
+  async exchangeQiitaOAuth(actor: MemberActor, connectorId: string, code: string): Promise<ConnectionDto> {
+    requireRole(actor, "admin");
+    const connector = await this.deps.db.run(scopeOf(actor), (tx) =>
+      tx.connectors.findFirst({ where: { id: connectorId, organization_id: actor.organizationId, key: "qiita" } }),
+    );
+    if (!connector) throw notFound("Qiita連携");
+    const clientId = this.deps.env.QIITA_OAUTH_CLIENT_ID;
+    const clientSecret = this.deps.env.QIITA_OAUTH_CLIENT_SECRET;
+    if (!clientId || !clientSecret || clientId === "unset" || clientSecret === "unset") {
+      throw preconditionFailed("Qiita OAuthがまだAgent Studioに設定されていません");
+    }
+
+    const exchanged = await fetch("https://qiita.com/api/v2/access_tokens", {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json", "user-agent": "agent-studio-qiita-oauth" },
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code }),
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
+    });
+    const tokenBody = (await exchanged.json().catch(() => null)) as { token?: unknown; scopes?: unknown } | null;
+    if (!exchanged.ok || typeof tokenBody?.token !== "string") {
+      throw preconditionFailed(`Qiitaの認証を完了できませんでした（HTTP ${exchanged.status}）`);
+    }
+    const scopes = Array.isArray(tokenBody.scopes) ? tokenBody.scopes.filter((scope): scope is string => typeof scope === "string") : [];
+    if (!scopes.includes("write_qiita")) throw preconditionFailed("Qiitaの記事公開に必要なwrite_qiita権限が許可されていません");
+
+    const me = await fetch("https://qiita.com/api/v2/authenticated_user", {
+      headers: { accept: "application/json", authorization: `Bearer ${tokenBody.token}`, "user-agent": "agent-studio-qiita-oauth" },
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
+    });
+    const user = (await me.json().catch(() => null)) as { id?: unknown } | null;
+    if (!me.ok || typeof user?.id !== "string" || !user.id.trim()) {
+      throw preconditionFailed("Qiitaアカウントを確認できませんでした");
+    }
+    const qiitaUserId = user.id.trim();
+    const description = `qiita-user:${qiitaUserId}`;
+    const connection = await this.deps.db.run(scopeOf(actor), async (tx) => {
+      const existing = await tx.connections.findFirst({
+        where: { organization_id: actor.organizationId, connector_id: connector.id, description },
+      });
+      if (existing) return existing;
+      return tx.connections.create({
+        data: {
+          organization_id: actor.organizationId,
+          connector_id: connector.id,
+          name: `Qiita (${qiitaUserId})`,
+          description,
+          scope: "studio",
+          header_name: "Authorization",
+        },
+      });
+    });
+    const locator = await this.deps.secrets.put(
+      secretNames.connection(this.deps.env.SECRETS_PREFIX, actor.organizationId, connection.id),
+      tokenBody.token,
+      { "agentstudio:organization_id": actor.organizationId },
+    );
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const updated = await tx.connections.update({
+        where: { id: connection.id },
+        data: { secret_locator: locator, status: "connected", last_validated_at: new Date(), expires_at: null, revoked_at: null },
+      });
+      await recordAudit(
+        tx,
+        auditBy(actor, {
+          action: "connection.oauth.connected",
+          targetType: "connection",
+          targetId: connection.id,
+          detail: { connector_id: connector.id, provider: "qiita", qiita_user_id: qiitaUserId, scopes },
+        }),
+      );
+      return toConnectionDto(updated);
+    });
+  }
+
   /** 読み取り専用の代表操作を1回呼び、Connectionが実際に利用できるか確認する。 */
   async validateConnection(actor: MemberActor, id: string): Promise<ConnectionDto> {
     requireRole(actor, "admin");

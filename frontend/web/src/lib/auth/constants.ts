@@ -2,6 +2,8 @@
 export const SESSION_COOKIE = "as_session";
 /** ログイン途中の state / code_verifier（10 分だけ有効） */
 export const OAUTH_COOKIE = "as_oauth";
+/** 外部Connector OAuthの短期state。Agent Studioログイン用OAuthとは分離する。 */
+export const CONNECTOR_OAUTH_COOKIE = "as_connector_oauth";
 /** 操作中の組織（UUID） */
 export const ORG_COOKIE = "as_org";
 

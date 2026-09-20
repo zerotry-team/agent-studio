@@ -7,6 +7,53 @@ import type { SecretStore } from "../infrastructure/secrets/secret-store.js";
 const TIMEOUT_MS = 15_000;
 const MAX_OUTPUT = 20_000;
 
+const ZENN_TITLE_MAX = 70;
+const ZENN_BODY_MAX = 100_000;
+
+interface ZennArticleInput {
+  title: string;
+  body: string;
+  emoji: string;
+  topics: string[];
+  type: "tech" | "idea";
+}
+
+function requiredText(value: unknown, label: string, max: number): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label}を入力してください`);
+  const result = value.trim();
+  if (result.length > max) throw new Error(`${label}は${max}文字以内にしてください`);
+  return result;
+}
+
+/** Zenn CLI と同じ frontmatter を、YAML injection が起きない JSON scalar で生成する。 */
+export function buildZennArticle(args: Record<string, unknown>): ZennArticleInput & { markdown: string } {
+  const title = requiredText(args.title, "タイトル", ZENN_TITLE_MAX);
+  const body = requiredText(args.body, "本文", ZENN_BODY_MAX);
+  const emoji = typeof args.emoji === "string" && args.emoji.trim() ? args.emoji.trim() : "🤖";
+  const type = args.type === "idea" ? "idea" : "tech";
+  const topics = Array.isArray(args.topics)
+    ? [...new Set(args.topics.filter((value): value is string => typeof value === "string").map((value) => value.trim()).filter(Boolean))].slice(0, 5)
+    : [];
+  const markdown = [
+    "---",
+    `title: ${JSON.stringify(title)}`,
+    `emoji: ${JSON.stringify(emoji)}`,
+    `type: ${JSON.stringify(type)}`,
+    `topics: ${JSON.stringify(topics)}`,
+    "published: true",
+    "---",
+    "",
+    body,
+    "",
+  ].join("\n");
+  return { title, body, emoji, topics, type, markdown };
+}
+
+/** 同じ Run の再試行は同じ記事を更新し、二重投稿を作らない。 */
+export function zennArticleSlug(runId: string): string {
+  return createHash("sha256").update(`agent-studio-zenn:${runId}`).digest("hex").slice(0, 16);
+}
+
 export function prepareHttpArguments(
   method: string,
   args: Record<string, unknown>,
@@ -47,7 +94,109 @@ export class StudioFunctionExecutor {
       case "http_api":
         if (!context) throw new Error("実行コンテキストがありません");
         return this.httpApi(organizationId, tool, args, context);
+      case "zenn_github_publish":
+        if (!context) throw new Error("実行コンテキストがありません");
+        return this.zennGithubPublish(organizationId, tool, args, context);
     }
+  }
+
+  private async linkedSecret(
+    organizationId: string,
+    tool: CompiledFunctionTool,
+    context: { agentId: string; stage: "staging" | "production"; runId: string },
+  ): Promise<{ connectionId: string; value: string }> {
+    if (!tool.connector_id) throw new Error("連携サービスの設定が不完全です");
+    const link = await this.db.org(organizationId, (tx) =>
+      tx.agent_connection_links.findFirst({
+        where: {
+          organization_id: organizationId,
+          agent_id: context.agentId,
+          connector_id: tool.connector_id!,
+          stage: context.stage,
+        },
+        include: { connection: true },
+      }),
+    );
+    if (!link) throw new Error(`${context.stage === "staging" ? "Preview" : "Production"}のConnectionが許可されていません`);
+    if (!(link.allowed_capabilities as string[]).includes(tool.name)) throw new Error(`${tool.name} はこのAgentに許可されていません`);
+    if (link.connection.connector_id !== tool.connector_id || link.connection.status !== "connected" || !link.connection.secret_locator) {
+      throw new Error("Connectionが利用できません");
+    }
+    const value = await this.secrets.get(link.connection.secret_locator);
+    if (!value) throw new Error("Connectionの認証情報を読み込めませんでした");
+    return { connectionId: link.connection.id, value };
+  }
+
+  private async zennGithubPublish(
+    organizationId: string,
+    tool: CompiledFunctionTool,
+    args: Record<string, unknown>,
+    context: { agentId: string; stage: "staging" | "production"; runId: string },
+  ): Promise<string> {
+    if (tool.spec.handler !== "zenn_github_publish") throw new Error("Zenn連携の設定が不完全です");
+    const article = buildZennArticle(args);
+    const slug = zennArticleSlug(context.runId);
+    const path = `articles/${slug}.md`;
+    const repository = `${tool.spec.repository_owner}/${tool.spec.repository_name}`;
+    const apiUrl = await assertPublicUrl(`https://api.github.com/repos/${repository}/contents/${path}`);
+    const secret = await this.linkedSecret(organizationId, tool, context);
+    const headers = {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${secret.value.trim()}`,
+      "content-type": "application/json",
+      "user-agent": "agent-studio-zenn-publisher",
+      "x-github-api-version": "2022-11-28",
+    };
+
+    let sha: string | undefined;
+    const existing = await fetch(`${apiUrl.toString()}?ref=${encodeURIComponent(tool.spec.branch)}`, {
+      method: "GET",
+      headers,
+      redirect: "error",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (existing.ok) {
+      const value = (await existing.json()) as { sha?: unknown };
+      if (typeof value.sha === "string") sha = value.sha;
+    } else if (existing.status !== 404) {
+      throw new Error(`GitHubで記事の既存状態を確認できませんでした（HTTP ${existing.status}）`);
+    }
+
+    const response = await fetch(apiUrl, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        message: `${sha ? "update" : "publish"}: ${article.title}`,
+        content: Buffer.from(article.markdown, "utf8").toString("base64"),
+        branch: tool.spec.branch,
+        ...(sha ? { sha } : {}),
+      }),
+      redirect: "error",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    const responseText = (await response.text()).slice(0, MAX_OUTPUT);
+    await this.db.org(organizationId, (tx) =>
+      tx.audit_logs.create({
+        data: {
+          organization_id: organizationId,
+          actor_type: "system",
+          actor_id: context.runId,
+          action: "credential.use",
+          target_type: "connection",
+          target_id: secret.connectionId,
+          result: response.ok ? "success" : "failure",
+          detail: { connector_id: tool.connector_id, tool: tool.name, stage: context.stage, status: response.status, article_slug: slug },
+        },
+      }),
+    );
+    if (!response.ok) throw new Error(`GitHubへの記事反映に失敗しました（HTTP ${response.status}）: ${responseText.slice(0, 500)}`);
+    return JSON.stringify({
+      status: sha ? "updated" : "published",
+      slug,
+      article_url: `https://zenn.dev/${tool.spec.zenn_username}/articles/${slug}`,
+      repository,
+      path,
+    });
   }
 
   private async httpApi(

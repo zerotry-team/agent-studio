@@ -1,4 +1,4 @@
-# 実装状況（2026-09-20 時点）
+# 実装状況（2026-09-21 時点）
 
 要件定義書（docs/requirements.md）の §15 のフェーズごとに、実装したもの・確認したこと・残っていることをまとめる。
 「確認済み」は、ローカルでは Docker の PostgreSQL と擬似 OpenAI を使った自動テスト・画面操作まで。
@@ -14,6 +14,22 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 - 投稿境界Run `e25d54ad-9420-4dbd-a0b7-1055a9e3c476` はApproval `82e1fcb9-c732-40e9-816b-6748f74c8916` で停止し、承認後に1回だけSocial Routerを呼んだ。内部用`logical_post_id`をbodyへ残したためHTTP 400となり、SNS投稿はない。このpayload不具合は修正済みだが、明示確認前のため再実投稿していない。
 - Preview Deployment `f63d805f-8611-4941-a9b0-8aad637da7de` とProduction Deployment `3a6e3a9e-f677-443f-8ec0-0f0ce7d2d14e` は同じBuild `df669335-f921-4bd3-9ffd-2ee659ad9194` を参照する。
 - 実投稿は対象アカウントと最終本文の明示確認後に限る。現在の対象アカウントはSocial Router側で再認証が必要で、作成したConnection用API Keyも読み取り専用・短期有効である。
+
+### Zenn公開E2E（2026-09-21）
+
+- Zenn公式のGitHub連携を使う `Zenn（GitHub連携）` Connectorと、`publish_zenn_article` Studio Functionを追加した。GitHub tokenはAgent StudioのConnectionに保存し、BuildやManifestには含めない。
+- 実画面から `Zenn技術記事ライター` Agent（`c625e10b-9680-469a-b99c-037d6f224d51`）を作成し、Preview Run `6c9f5797-8010-48e9-8cb7-0dcc90077b08` を実行した。
+- Agent Studioのツール実行が `zerotry-team/agent-studio-zenn-content` の `articles/5bb2b20d9fc62079.md` を作成し、Zenn Connect経由で [記事](https://zenn.dev/zerotry_iwata/articles/5bb2b20d9fc62079) が公開された。ログアウト状態の実ブラウザでタイトル、本文、トピック、公開日を確認済み。
+- Runは `completed / succeeded`、ツール呼び出しは1回。Run IDから決定的なslugを生成するため、同じRunの再試行では新規記事を増やさず同じファイルを更新する。
+- 今回のBuildには承認ポリシーを設定していないため承認レコードは0件。`external_send` はリスク分類であり、現行要件では未信頼コンテンツを読むAgent（POL-07）や明示ポリシーなどの場合に承認を強制する。
+- ただし、このE2EではZenn Connect用GitHub repositoryとAgent Studio Connectionを開発者が先に準備した。したがって「自然言語だけでAgent Studioが外部認証を含めてAgentを構築した」証拠にはしない。
+
+### Agent Builder / Qiita（2026-09-21）
+
+- 「Qiitaに技術記事を投稿するAgentを作って」という自然言語だけで、Agent Studioが記事生成とQiita公開の2要件へ分解し、`publish_qiita_article` を選択するところまで実ブラウザで確認した。Agent IDは `bb9f6eb1-ae86-44c3-aedd-c36fcd905e76`。
+- 一発のManifest生成画面を `Agent Builder` として拡張し、Qiita Connectionがなければ同じ画面からOAuthを開始できるようにした。認可後はtokenをAPI側で交換してSecret Storeへ保存し、Previewへ権限を結び、既存の自動Preview作成へ戻る。
+- Qiita Connectorは公式API v2の `POST /api/v2/items` を使用する。記事本文・タイトル・1〜5件のタグを入力とし、リスクは `external_send`。
+- 現在の実ブラウザでは、Qiita OAuth applicationのClient ID / Client Secretが未設定であることをAgent Builder自身が検出して停止するところまで確認済み。QiitaアカウントとOAuth applicationの登録後に、実認可・Preview Run・公開記事確認を行う必要がある。
 
 今回追加済み:
 
