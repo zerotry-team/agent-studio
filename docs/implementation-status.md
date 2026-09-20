@@ -103,8 +103,8 @@ SDK（`openai` 7.x）の型を調べた結果（docs/reference/openai-agents-sdk
 
 | 対象 | 方法 | 結果 |
 |---|---|---|
-| 型・単体テスト | `yarn type-check` / `yarn test`（全ワークスペース） | 型検査成功、250 件すべて成功 |
-| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration`（PostgreSQL） | 24 件すべて成功 |
+| 型・単体テスト | `yarn type-check` / `yarn test`（全ワークスペース） | 型検査成功、278 件すべて成功 |
+| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration`（PostgreSQL） | 28 件すべて成功 |
 | ビルド | `yarn build`、`docker build`（api / web / runtime の全イメージ） | 成功 |
 | Terraform | `fmt` / `validate`（5 つのルートモジュール）、モックのプロバイダーでの apply | 成功 |
 | ワークフロー | actionlint | 指摘なし |
@@ -114,7 +114,6 @@ SDK（`openai` 7.x）の型を調べた結果（docs/reference/openai-agents-sdk
 
 ## 気づいている改善点
 
-- 実行の詳細の「実行した人」が利用者 ID で表示される（メールアドレスの表示にする）
 - 承認依頼の通知がない（画面のみ）
 - API の `/runs/:id/events` はポーリング（2 秒ごと）。多数の利用者が同時に見る場合は SSE などを検討する
 

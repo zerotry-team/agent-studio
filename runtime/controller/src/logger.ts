@@ -1,8 +1,9 @@
 import pino from "pino";
+import { redactLogText, redactLogValue } from "@agent-studio/contracts";
 
 export type Logger = pino.Logger;
 
-export function createLogger(level: string, name = "runtime-controller"): Logger {
+export function createLogger(level: string, name = "runtime-controller", destination?: pino.DestinationStream): Logger {
   return pino({
     level,
     // トークン・鍵をログに出さない（念のため。ログに渡す値そのものにも含めないこと）
@@ -24,10 +25,15 @@ export function createLogger(level: string, name = "runtime-controller"): Logger
       ],
       censor: "[REDACTED]",
     },
+    hooks: {
+      logMethod(args, method) {
+        method.apply(this, args.map((value) => redactLogValue(value)) as Parameters<typeof method>);
+      },
+    },
     base: { service: name },
     timestamp: pino.stdTimeFunctions.isoTime,
     formatters: { level: (label) => ({ level: label }) },
-  });
+  }, destination);
 }
 
 /** エラーをログ用の安全な形にする（スタックは debug のときだけ見る想定） */
@@ -35,11 +41,11 @@ export function errorInfo(err: unknown): { message: string; name?: string; code?
   if (err instanceof Error) {
     const e = err as Error & { code?: unknown; status?: unknown };
     return {
-      message: e.message,
+      message: redactLogText(e.message),
       name: e.name,
       ...(typeof e.code === "string" ? { code: e.code } : {}),
       ...(typeof e.status === "number" ? { status: e.status } : {}),
     };
   }
-  return { message: String(err) };
+  return { message: redactLogText(String(err)) };
 }

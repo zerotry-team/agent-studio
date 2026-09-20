@@ -806,7 +806,7 @@ Runtime           Sample A production
 - [x] `CBR-014` ChromiumのQUICを無効化する。
 - [x] `CBR-015` Browser Taskをread-only root filesystem、権限なしで実行する。
 - [ ] `CBR-016` Upload / Downloadの検証と上限を実装する。
-- [ ] `CBR-017` Secret、Cookie、Header、Screenshot Base64のログRedactionを追加する。
+- [x] `CBR-017` Secret、Cookie、Header、Screenshot Base64のログRedactionを追加する。
 - [x] `CBR-018` Browser Toolの承認ルールを追加する。
 
 ### Phase 3: Browser Profile / Human Login

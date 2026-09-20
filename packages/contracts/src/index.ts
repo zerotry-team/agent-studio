@@ -5,3 +5,4 @@ export * from "./manifest.js";
 export * from "./runtime-protocol.js";
 export * from "./runtime-config.js";
 export * from "./api.js";
+export * from "./log-redaction.js";

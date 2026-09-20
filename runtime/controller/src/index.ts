@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { redactLogText } from "@agent-studio/contracts";
 import { ECSClient } from "@aws-sdk/client-ecs";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ConfigError, loadConfig, type ControllerConfig } from "./config.js";
@@ -72,7 +73,7 @@ async function main(): Promise<void> {
     config = loadConfig();
   } catch (err) {
     if (err instanceof ConfigError) {
-      console.error(`[runtime-controller] ${err.message}`);
+      console.error(`[runtime-controller] ${redactLogText(err.message)}`);
       process.exit(1);
     }
     throw err;
@@ -132,6 +133,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[runtime-controller] 起動に失敗しました:", err instanceof Error ? err.message : err);
+  console.error("[runtime-controller] 起動に失敗しました:", redactLogText(err instanceof Error ? err.message : String(err)));
   process.exit(1);
 });

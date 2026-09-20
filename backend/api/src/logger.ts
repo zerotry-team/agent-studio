@@ -1,8 +1,9 @@
 import pino from "pino";
+import { redactLogValue } from "@agent-studio/contracts";
 
 export type Logger = pino.Logger;
 
-export function createLogger(level: string, name: string): Logger {
+export function createLogger(level: string, name: string, destination?: pino.DestinationStream): Logger {
   return pino({
     name,
     level,
@@ -24,7 +25,12 @@ export function createLogger(level: string, name: string): Logger {
       ],
       censor: "[REDACTED]",
     },
+    hooks: {
+      logMethod(args, method) {
+        method.apply(this, args.map((value) => redactLogValue(value)) as Parameters<typeof method>);
+      },
+    },
     base: { service: name },
     timestamp: pino.stdTimeFunctions.isoTime,
-  });
+  }, destination);
 }

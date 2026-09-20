@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
+import { redactLogText } from "@agent-studio/contracts";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { ControllerAuditSink } from "./audit.js";
@@ -41,7 +42,7 @@ async function main(): Promise<void> {
     config = loadConfig();
   } catch (err) {
     if (err instanceof ConfigError) {
-      console.error(`[tool-gateway] ${err.message}`);
+      console.error(`[tool-gateway] ${redactLogText(err.message)}`);
       process.exit(1);
     }
     throw err;
@@ -130,6 +131,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[tool-gateway] 起動に失敗しました:", err instanceof Error ? err.message : err);
+  console.error("[tool-gateway] 起動に失敗しました:", redactLogText(err instanceof Error ? err.message : String(err)));
   process.exit(1);
 });

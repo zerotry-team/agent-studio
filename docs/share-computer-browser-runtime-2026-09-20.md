@@ -190,7 +190,7 @@ Egress ProxyにはTerraformから`ALLOWED_DOMAINS`を渡す。Browser Workerに�
 未完了:
 
 - `CBR-016`: Upload/Downloadの保存先、サイズ上限、成果物化
-- `CBR-017`: 全ログ経路を対象としたSecret/Cookie/Header/Screenshot Base64 redactionと検証
+- `CBR-017`: 完了。Control Plane API、Runtime Controller、Tool Gatewayの構造化ログと例外文字列へ共通redactionを適用し、Secret/Cookie/Header/Screenshot Base64/JWT/URL queryを実ログテストで検証
 - `CBR-019`〜`CBR-025`: Browser Profile、暗号化Store、Human Login Relay/UI
 - `CBR-030`〜`CBR-031`: Connection/許可ドメイン確認とRun画面のBrowser状態表示
 - `CBR-033`〜`CBR-038`: Computer Adapterと座標ベース操作
