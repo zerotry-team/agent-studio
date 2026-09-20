@@ -17,6 +17,7 @@ __metadata:
     "@aws-sdk/s3-request-presigner": "npm:^3.900.0"
     "@hono/node-server": "npm:^1.19.17"
     "@hono/zod-validator": "npm:^0.9.1"
+    "@modelcontextprotocol/sdk": "npm:^1.30.0"
     "@prisma/adapter-pg": "npm:^7.0.0"
     "@prisma/client": "npm:^7.0.0"
     "@types/node": "npm:^22.10.0"
@@ -60,6 +61,21 @@ __metadata:
     vitest: "npm:^3.2.7"
     yaml: "npm:^2.8.1"
     zod: "npm:^4.3.6"
+  languageName: unknown
+  linkType: soft
+
+"@agent-studio/demo-factoring-api@workspace:runtime/demo-factoring-api":
+  version: 0.0.0-use.local
+  resolution: "@agent-studio/demo-factoring-api@workspace:runtime/demo-factoring-api"
+  dependencies:
+    "@hono/node-server": "npm:^1.19.17"
+    "@types/node": "npm:^22.10.0"
+    "@types/pg": "npm:^8.23.1"
+    hono: "npm:^4.13.8"
+    pg: "npm:^8.23.0"
+    tsx: "npm:^4.23.13"
+    typescript: "npm:5.9.3"
+    vitest: "npm:^3.2.7"
   languageName: unknown
   linkType: soft
 

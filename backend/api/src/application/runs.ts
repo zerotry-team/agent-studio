@@ -135,7 +135,9 @@ export class RunService {
       if (TERMINAL_RUN_STATUSES.includes(run.status as RunStatus)) throw preconditionFailed("終了した実行には指示を送れません");
       await tx.run_inputs.create({ data: { organization_id: actor.organizationId, run_id: id, kind: "user", input, created_by: actor.userId } });
       await appendRunEvent(tx, run, "message", "追加の指示を受け付けました", { role: "user", text: input });
-      if (run.status === "waiting_approval") await setRunStatus(tx, run, "running", {}, "追加の指示");
+      if (run.status === "waiting_approval" || run.status === "waiting_input") {
+        await setRunStatus(tx, run, "running", {}, "追加の指示");
+      }
       await recordAudit(tx, auditBy(actor, { action: "run.message", targetType: "run", targetId: id }));
     });
   }

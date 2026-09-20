@@ -36,7 +36,7 @@ export class BrowserSession {
     try {
       const requested = route.request().url();
       if (!requested.startsWith("data:") && !requested.startsWith("blob:")) {
-        assertUrlAllowed(requested, this.config.allowedDomains);
+        assertUrlAllowed(requested, this.config.allowedDomains, this.config.allowPublicWeb);
       }
       await route.continue();
     } catch {

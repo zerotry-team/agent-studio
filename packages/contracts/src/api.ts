@@ -4,7 +4,7 @@ import type { AgentManifest } from "./manifest.js";
 import { policySchema, type Policy } from "./policy.js";
 import type { ApprovalStatus } from "./runtime-protocol.js";
 import type { ToolExecutionLocation, ToolRisk, ToolVersionSpec } from "./tools.js";
-import { toolVersionSpecSchema } from "./tools.js";
+import { staticHeaderNameSchema, toolVersionSpecSchema } from "./tools.js";
 
 /**
  * フロントエンド ↔ Agent Studio API の契約。
@@ -150,6 +150,11 @@ export const createConnectorSchema = z
     adapter: connectorAdapterSchema.default("http_openapi"),
     base_url: z.url().refine((u) => u.startsWith("https://"), "https の URL を指定してください").optional(),
     auth_type: connectorAuthTypeSchema.default("none"),
+    /** すべての操作に付ける固定ヘッダ（例: Notion-Version）。認証情報は入れない */
+    default_headers: z
+      .record(staticHeaderNameSchema, z.string().min(1).max(200))
+      .refine((headers) => Object.keys(headers).length <= 10, "固定ヘッダは10個までです")
+      .optional(),
     operations: z.array(connectorOperationSchema).min(1).max(100),
   })
   .strict()
@@ -164,8 +169,67 @@ export const createConnectorSchema = z
   .refine((v) => v.adapter !== "http_openapi" || v.operations.every((o) => o.method && o.path), {
     message: "HTTP連携の各操作にはmethodとpathが必要です",
     path: ["operations"],
+  })
+  // MCP は接続先のサーバーが操作の一覧と入力の形式を持つため、method / path は使わない。
+  .refine((v) => v.adapter !== "mcp" || Boolean(v.base_url), {
+    message: "MCP連携にはサーバーのURLが必要です",
+    path: ["base_url"],
+  })
+  .refine((v) => v.adapter !== "mcp" || v.operations.every((o) => !o.method && !o.path), {
+    message: "MCP連携の操作にmethodとpathは指定できません",
+    path: ["operations"],
+  })
+  .refine((v) => v.adapter === "http_openapi" || !v.default_headers, {
+    message: "固定ヘッダはHTTP連携でだけ指定できます",
+    path: ["default_headers"],
   });
 export type CreateConnectorInput = z.input<typeof createConnectorSchema>;
+
+/**
+ * 連携サービスの編集。operations は編集後の全体を渡す（載っていない操作は削除）。
+ * 振る舞いが変わる変更はツールの新しいバージョンになり、公開済みの Build には影響しない。
+ */
+export const updateConnectorSchema = z
+  .object({
+    name: z.string().trim().min(1).max(100),
+    description: z.string().trim().min(1).max(1000),
+    base_url: z.url().refine((u) => u.startsWith("https://"), "https の URL を指定してください").optional(),
+    default_headers: z
+      .record(staticHeaderNameSchema, z.string().min(1).max(200))
+      .refine((headers) => Object.keys(headers).length <= 10, "固定ヘッダは10個までです")
+      .optional(),
+    operations: z.array(connectorOperationSchema).min(1).max(100),
+  })
+  .strict()
+  .refine((v) => new Set(v.operations.map((o) => o.name)).size === v.operations.length, {
+    message: "操作名が重複しています",
+    path: ["operations"],
+  });
+export type UpdateConnectorInput = z.input<typeof updateConnectorSchema>;
+
+export const discoverMcpToolsSchema = z
+  .object({
+    server_url: z.url().refine((u) => u.startsWith("https://"), "https の URL を指定してください"),
+  })
+  .strict();
+export type DiscoverMcpToolsInput = z.infer<typeof discoverMcpToolsSchema>;
+
+/**
+ * MCP サーバーが申告した操作。
+ * 何をする操作かは接続先の実装で決まり、Agent Studio 側では変えられない。
+ * annotations は任意項目なので、申告がない場合は null（不明）にする。
+ */
+export interface DiscoveredMcpToolDto {
+  name: string;
+  description: string;
+  /** true: 読み取り専用 / false: 書き換えあり / null: サーバーが申告していない */
+  read_only: boolean | null;
+  /** true: 取り消せない操作だと申告している */
+  destructive: boolean;
+}
+export interface DiscoverMcpToolsResultDto {
+  tools: DiscoveredMcpToolDto[];
+}
 
 export interface ConnectorDto {
   id: string;
@@ -301,6 +365,9 @@ export interface AgentDto {
   description: string | null;
   project_brief: string | null;
   capability_resolution: CapabilityResolutionDto;
+  /** ブラウザで接続してよい範囲。ブラウザを使わない Agent では使われない */
+  browser_access: BrowserAccess;
+  browser_allowed_domains: string[];
   latest_version: number;
   published_version: number | null;
   created_at: string;
@@ -308,8 +375,32 @@ export interface AgentDto {
   versions?: AgentVersionDto[];
 }
 
+export const browserAccessSchema = z.enum(["restricted", "public"]);
+export type BrowserAccess = z.infer<typeof browserAccessSchema>;
+
+/** ブラウザで接続してよい範囲の設定。安全の境界なので、業務の設定値とは分けて持つ */
+export const setBrowserAccessSchema = z
+  .object({
+    access: browserAccessSchema,
+    allowed_domains: z.array(z.string().trim().min(1).max(253)).max(100).default([]),
+  })
+  .strict()
+  .refine((v) => v.access !== "restricted" || v.allowed_domains.length > 0, {
+    message: "接続を許すドメインを1つ以上入力してください",
+    path: ["allowed_domains"],
+  });
+export type SetBrowserAccessInput = z.input<typeof setBrowserAccessSchema>;
+
 export const capabilityStateSchema = z.enum(["resolved", "needs_connection", "missing", "ambiguous"]);
 export type CapabilityState = z.infer<typeof capabilityStateSchema>;
+/** 能力ごとに利用者へ尋ねる設定値。name は指示文への差し込み用で、画面には label を出す。 */
+export interface CapabilityVariableDto {
+  name: string;
+  label: string;
+  description: string;
+  example: string | null;
+  required: boolean;
+}
 export interface CapabilityRequirementDto {
   requirement: string;
   state: CapabilityState;
@@ -318,10 +409,13 @@ export interface CapabilityRequirementDto {
   tool_names: string[];
   confidence: number;
   reason: string;
+  /** この能力を使うために利用者が入力する値。能力に紐づかない設定値は作らない。 */
+  variables: CapabilityVariableDto[];
 }
 export interface CapabilityResolutionDto {
   requirements: CapabilityRequirementDto[];
   selected_tools: string[];
+  /** requirements の required な variables から導出する。Build の前提条件の判定に使う。 */
   missing_variables: string[];
   ready: boolean;
 }
@@ -550,6 +644,8 @@ export const runStatusSchema = z.enum([
   "provisioning",
   "running",
   "waiting_approval",
+  /** Agent が利用者へ質問して返答を待っている。終端ではない */
+  "waiting_input",
   "requires_action",
   "completed",
   "failed",

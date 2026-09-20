@@ -1,5 +1,5 @@
 import "server-only";
-import type { ConnectorDto, CreateConnectorInput } from "@agent-studio/contracts";
+import type { ConnectorDto, CreateConnectorInput , DiscoverMcpToolsInput, DiscoverMcpToolsResultDto, UpdateConnectorInput } from "@agent-studio/contracts";
 import { ApiRepository } from "./base";
 
 export class ConnectorRepository extends ApiRepository {
@@ -9,5 +9,13 @@ export class ConnectorRepository extends ApiRepository {
 
   create(input: CreateConnectorInput): Promise<ConnectorDto> {
     return this.api.post<ConnectorDto>("/connectors", input);
+  }
+
+  update(id: string, input: UpdateConnectorInput): Promise<ConnectorDto> {
+    return this.api.patch<ConnectorDto>(`/connectors/${id}`, input);
+  }
+
+  discoverMcpTools(input: DiscoverMcpToolsInput): Promise<DiscoverMcpToolsResultDto> {
+    return this.api.post<DiscoverMcpToolsResultDto>("/connectors/discover", input);
   }
 }

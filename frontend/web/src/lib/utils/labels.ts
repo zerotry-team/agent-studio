@@ -58,6 +58,7 @@ export const RUN_STATUS: Record<RunStatus, LabelWithTone> = {
   provisioning: { label: "準備中", tone: "info" },
   running: { label: "実行中", tone: "info" },
   waiting_approval: { label: "承認待ち", tone: "warning" },
+  waiting_input: { label: "返答待ち", tone: "warning" },
   requires_action: { label: "処理待ち", tone: "warning" },
   completed: { label: "完了", tone: "success" },
   failed: { label: "失敗", tone: "danger" },

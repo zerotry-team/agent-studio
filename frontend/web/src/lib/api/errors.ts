@@ -33,6 +33,7 @@ const CODE_BY_STATUS: Record<number, ApiErrorCode> = {
 
 export const SERVER_ERROR_MESSAGE = "サーバーでエラーが発生しました。時間をおいて、もう一度お試しください";
 export const UNAVAILABLE_MESSAGE = "サーバーに接続できませんでした。時間をおいて、もう一度お試しください";
+export const TIMEOUT_MESSAGE = "時間内に応答がありませんでした。処理が続いている場合もあるので、画面を開き直して確認してください";
 
 /** Agent Studio API のエラー。message は利用者にそのまま見せてよい日本語 */
 export class ApiError extends Error {
@@ -76,8 +77,13 @@ export function toApiError(status: number, body: unknown): ApiError {
   return new ApiError(defaultMessageForStatus(status), status, CODE_BY_STATUS[status] ?? "internal");
 }
 
+/** 待ち時間切れか、そもそも繋がらなかったかで文面を分ける */
+function isTimeout(cause: unknown): boolean {
+  return cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError");
+}
+
 export function unavailableError(cause?: unknown): ApiError {
-  const err = new ApiError(UNAVAILABLE_MESSAGE, 0, "unavailable");
+  const err = new ApiError(isTimeout(cause) ? TIMEOUT_MESSAGE : UNAVAILABLE_MESSAGE, 0, "unavailable");
   if (cause !== undefined) (err as { cause?: unknown }).cause = cause;
   return err;
 }

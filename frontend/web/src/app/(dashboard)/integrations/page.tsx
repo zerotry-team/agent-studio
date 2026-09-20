@@ -1,7 +1,7 @@
 "use client";
 
 import type { ConnectionDto, ConnectorDto } from "@agent-studio/contracts";
-import { Check, ChevronDown, ChevronUp, Link2, Plus, RefreshCw, ShieldCheck, ShieldOff } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Link2, Pencil, Plus, RefreshCw, ShieldCheck, ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { listConnectionsAction, revokeConnectionAction, validateConnectionAction } from "@/actions/connections";
 import { createConnectorAction, listConnectorsAction } from "@/actions/connectors";
@@ -9,6 +9,7 @@ import { listRuntimesAction } from "@/actions/runtimes";
 import { PageHeader } from "@/components/common/page-header";
 import { ToolRiskBadge } from "@/components/common/status-badges";
 import { CreateConnectionDialog } from "@/components/connections/create-connection-dialog";
+import { CreateConnectorDialog } from "@/components/connectors/create-connector-dialog";
 import { SetConnectionSecretDialog } from "@/components/connections/set-connection-secret-dialog";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -161,6 +162,8 @@ export default function IntegrationsPage() {
   const runtimes = useActionQuery(() => listRuntimesAction(), [organization?.id]);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [connectorDialogOpen, setConnectorDialogOpen] = useState(false);
+  const [editingConnector, setEditingConnector] = useState<ConnectorDto | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<ConnectionDto | null>(null);
   const validateConnection = useActionMutation(validateConnectionAction, {
     successMessage: (connection) => connection.status === "connected" ? "Connectionを確認しました" : "Connectionに問題が見つかりました",
@@ -188,7 +191,8 @@ export default function IntegrationsPage() {
         description="Agentが業務で使うサービスを接続します。認証情報は組織で一度だけ設定し、Agentごと・環境ごとに利用を許可します。"
         actions={can("tool.edit") ? <div className="flex flex-wrap gap-2">
           {!browserExists ? <Button variant="secondary" onClick={() => void addBrowser.mutate(BROWSER_PRESET)} loading={addBrowser.pending}>ブラウザ操作を有効化</Button> : null}
-          {!socialRouterExists ? <Button onClick={() => void addSocialRouter.mutate(SOCIAL_ROUTER_PRESET)} loading={addSocialRouter.pending} icon={<Plus className="h-4 w-4" aria-hidden="true" />}>Social Routerを追加</Button> : null}
+          {!socialRouterExists ? <Button variant="secondary" onClick={() => void addSocialRouter.mutate(SOCIAL_ROUTER_PRESET)} loading={addSocialRouter.pending}>Social Routerを追加</Button> : null}
+          <Button onClick={() => setConnectorDialogOpen(true)} icon={<Plus className="h-4 w-4" aria-hidden="true" />}>連携サービスを登録</Button>
         </div> : null}
       />
 
@@ -204,7 +208,7 @@ export default function IntegrationsPage() {
           <EmptyState
             icon={Link2}
             title="連携サービスはまだありません"
-            description="Social Routerなどのサービスを追加すると、Agent作成時に必要な能力を自動で選べます。"
+            description="サービスを登録すると、Agent作成時に必要な能力として選べるようになります。"
           />
         </Card>
       ) : (
@@ -262,6 +266,11 @@ export default function IntegrationsPage() {
                     <Button variant="ghost" size="sm" onClick={() => setExpanded(open ? null : connector.id)} icon={open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}>
                       許可できる操作
                     </Button>
+                    {can("tool.edit") && (connector.adapter === "http_openapi" || connector.adapter === "mcp") ? (
+                      <Button variant="ghost" size="sm" onClick={() => setEditingConnector(connector)} icon={<Pencil className="h-4 w-4" aria-hidden="true" />}>
+                        編集
+                      </Button>
+                    ) : null}
                   </div>
                   {open ? (
                     <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
@@ -283,6 +292,21 @@ export default function IntegrationsPage() {
       <div className="mt-6 text-sm text-gray-500">
         詳細な接続方式や個別操作を管理する場合は <ButtonLink href="/tools" variant="ghost" size="sm">Advanced</ButtonLink> を利用できます。
       </div>
+
+      {connectorDialogOpen || editingConnector ? (
+        <CreateConnectorDialog
+          connector={editingConnector ?? undefined}
+          onClose={() => {
+            setConnectorDialogOpen(false);
+            setEditingConnector(null);
+          }}
+          onCreated={() => {
+            setConnectorDialogOpen(false);
+            setEditingConnector(null);
+            void connectors.reload();
+          }}
+        />
+      ) : null}
 
       {dialog?.kind === "connection" ? (
         <CreateConnectionDialog

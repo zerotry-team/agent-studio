@@ -1,6 +1,6 @@
 "use server";
 
-import type { CreateConnectorInput } from "@agent-studio/contracts";
+import type { CreateConnectorInput, DiscoverMcpToolsInput, UpdateConnectorInput } from "@agent-studio/contracts";
 import { runAction } from "@/lib/api/run-action";
 import { ConnectorRepository } from "@/lib/repositories";
 
@@ -10,4 +10,12 @@ export async function listConnectorsAction() {
 
 export async function createConnectorAction(input: CreateConnectorInput) {
   return runAction(() => new ConnectorRepository().create(input), "連携サービスを追加できませんでした");
+}
+
+export async function updateConnectorAction(id: string, input: UpdateConnectorInput) {
+  return runAction(() => new ConnectorRepository().update(id, input), "連携サービスを更新できませんでした");
+}
+
+export async function discoverMcpToolsAction(input: DiscoverMcpToolsInput) {
+  return runAction(() => new ConnectorRepository().discoverMcpTools(input), "MCPサーバーの操作を取得できませんでした");
 }

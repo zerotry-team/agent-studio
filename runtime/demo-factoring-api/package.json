@@ -1,0 +1,30 @@
+{
+  "name": "@agent-studio/demo-factoring-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ファクタリング審査シナリオ用の基幹システムモック（申込者・請求書・入金実績）",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "type-check": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist",
+    "db:load": "tsx src/load.ts",
+    "db:load:seed-only": "tsx src/load.ts --seed-only"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.17",
+    "hono": "^4.13.8",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.13",
+    "typescript": "5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

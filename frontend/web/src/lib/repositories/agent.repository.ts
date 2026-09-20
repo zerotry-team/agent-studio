@@ -8,11 +8,13 @@ import type {
   SetAgentEnvironmentInput,
   CreateAgentProjectResultDto,
   ManifestValidationDto,
+  SetBrowserAccessInput,
 } from "@agent-studio/contracts";
 import { ApiRepository } from "./base";
 
 /** 生成 AI を呼ぶため長めに待つ */
-const GENERATE_TIMEOUT_MS = 120_000;
+/** 能力の解決は Agent の複雑さで伸びる。連携サービスが増えるほど長くなるので余裕を持たせる */
+const GENERATE_TIMEOUT_MS = 300_000;
 
 export class AgentRepository extends ApiRepository {
   list(): Promise<AgentDto[]> {
@@ -41,6 +43,10 @@ export class AgentRepository extends ApiRepository {
 
   createPreview(id: string): Promise<import("@agent-studio/contracts").DeploymentDto> {
     return this.api.post(`/agents/${encodeURIComponent(id)}/preview`);
+  }
+
+  setBrowserAccess(id: string, input: SetBrowserAccessInput): Promise<AgentDto> {
+    return this.api.put<AgentDto>(`/agents/${id}/browser-access`, input);
   }
 
   create(input: { manifest: string }): Promise<AgentDto> {

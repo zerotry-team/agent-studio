@@ -93,6 +93,8 @@ export const browserSessionConfigSchema = z
     enabled: z.boolean(),
     mode: browserModeSchema,
     profile_id: z.uuid().optional(),
+    /** 公開Webサイト全般を許可する。IP 直指定と private アドレスは、この場合も常に拒否する */
+    allow_public_web: z.boolean().default(false),
     allowed_domains: z.array(z.string().min(1).max(253)).max(100),
     code_execution_enabled: z.boolean(),
     computer_actions_enabled: z.boolean(),
@@ -114,6 +116,7 @@ export const browserSessionGrantSchema = z
   .object({
     endpoint: z.url().refine((url) => /^https?:\/\//.test(url), "Browser endpoint は http または https にしてください"),
     mode: browserModeSchema,
+    allow_public_web: z.boolean().default(false),
     allowed_domains: z.array(z.string().min(1).max(253)).max(100),
   })
   .strict();

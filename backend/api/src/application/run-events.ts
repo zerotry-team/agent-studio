@@ -35,6 +35,7 @@ export const RUN_STATUS_LABELS: Record<RunStatus, string> = {
   provisioning: "実行環境を準備中",
   running: "実行中",
   waiting_approval: "承認待ち",
+  waiting_input: "返答を待っています",
   requires_action: "処理待ち",
   completed: "完了",
   failed: "失敗",

@@ -1,4 +1,4 @@
-import type { CapabilityRequirementDto, CapabilityResolutionDto } from "@agent-studio/contracts";
+import type { CapabilityRequirementDto, CapabilityResolutionDto, CapabilityVariableDto } from "@agent-studio/contracts";
 import type { GeneratedAgent, GeneratorToolInfo } from "../infrastructure/llm/manifest-generator.js";
 
 export interface ResolverTool extends GeneratorToolInfo {
@@ -6,6 +6,29 @@ export interface ResolverTool extends GeneratorToolInfo {
 }
 
 const AUTO_SELECT_CONFIDENCE = 0.75;
+const VARIABLE_NAME = /^[A-Z][A-Z0-9_]*$/;
+
+/** 宣言された設定値を画面に出せる形へ整える。名前が識別子として使えないものは捨てる。 */
+function normalizeVariables(raw: unknown): CapabilityVariableDto[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const variables: CapabilityVariableDto[] = [];
+  for (const item of raw) {
+    const name = typeof item?.name === "string" ? item.name.trim() : "";
+    if (!VARIABLE_NAME.test(name) || seen.has(name)) continue;
+    seen.add(name);
+    const label = typeof item?.label === "string" && item.label.trim() ? item.label.trim() : name;
+    const example = typeof item?.example === "string" && item.example.trim() ? item.example.trim() : null;
+    variables.push({
+      name,
+      label,
+      description: typeof item?.description === "string" ? item.description.trim() : "",
+      example,
+      required: item?.required !== false,
+    });
+  }
+  return variables;
+}
 const BROWSER_CAPABILITIES = new Set([
   "browser_navigate",
   "browser_snapshot",
@@ -31,19 +54,15 @@ export function resolveCapabilities(
   installedConnectorIds: Set<string>,
 ): CapabilityResolutionDto {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
-  const generatedRequirements = generated.requirements ?? [];
-  const rawRequirements =
-    generatedRequirements.length > 0
-      ? generatedRequirements
-      : (generated.tools ?? []).map((name) => ({
-          description: byName.get(name)?.description ?? name,
-          candidate_tools: [name],
-          confidence: 1,
-          reason: "生成結果で明示された能力です",
-          kind: "tool" as const,
-        }));
+  const rawRequirements = generated.requirements ?? [];
 
+  // 設定値はトップレベルの宣言が正。要件からは名前で引き、参照されないものは捨てる
+  const declared = new Map(normalizeVariables((generated as { variables?: unknown }).variables).map((variable) => [variable.name, variable]));
   const requirements: CapabilityRequirementDto[] = rawRequirements.map((requirement) => {
+    const names = (requirement as { uses_variables?: unknown }).uses_variables;
+    const variables = (Array.isArray(names) ? names : [])
+      .map((name) => (typeof name === "string" ? declared.get(name) : undefined))
+      .filter((variable): variable is CapabilityVariableDto => Boolean(variable));
     const candidates = [...new Set(requirement.candidate_tools)].map((name) => byName.get(name)).filter((v): v is ResolverTool => Boolean(v));
     if (requirement.kind === "model" && candidates.length === 0) {
       return {
@@ -54,6 +73,7 @@ export function resolveCapabilities(
         tool_names: [],
         confidence: requirement.confidence,
         reason: requirement.reason || "Agent自身が実行します",
+        variables,
       };
     }
     if (candidates.length === 0) {
@@ -65,6 +85,7 @@ export function resolveCapabilities(
         tool_names: [],
         confidence: requirement.confidence,
         reason: requirement.reason || "一致する連携サービスがありません",
+        variables,
       };
     }
     const connectorIds = new Set(candidates.map((candidate) => candidate.connector_id ?? `tool:${candidate.name}`));
@@ -77,6 +98,7 @@ export function resolveCapabilities(
         tool_names: [],
         confidence: requirement.confidence,
         reason: requirement.confidence < AUTO_SELECT_CONFIDENCE ? "候補の確信度が低いため確認が必要です" : "複数の連携サービス候補があります",
+        variables,
       };
     }
     const first = candidates[0]!;
@@ -95,13 +117,16 @@ export function resolveCapabilities(
       tool_names: selectedCandidates.map((candidate) => candidate.name),
       confidence: requirement.confidence,
       reason: needsConnection ? `${first.connector_name ?? "連携サービス"}への接続が必要です` : requirement.reason,
+      variables,
     };
   });
 
   const selectedTools = requirements.flatMap((requirement) =>
     requirement.state === "resolved" || requirement.state === "needs_connection" ? requirement.tool_names : [],
   );
-  const missingVariables = [...new Set(generated.missing_variables ?? [])];
+  const missingVariables = [
+    ...new Set(requirements.flatMap((requirement) => requirement.variables.filter((v) => v.required).map((v) => v.name))),
+  ];
   return {
     requirements,
     selected_tools: [...new Set(selectedTools)],

@@ -9,12 +9,13 @@ import { PageHeader } from "@/components/common/page-header";
 import { RunStatusBadge, StageBadge } from "@/components/common/status-badges";
 import { TimeAgo } from "@/components/common/time-ago";
 import { LiveIndicator } from "@/components/runs/live-indicator";
-import { RunApprovals } from "@/components/runs/run-approvals";
+import { listApprovalsAction } from "@/actions/approvals";
 import { RunArtifacts } from "@/components/runs/run-artifacts";
 import { RunEventTimeline } from "@/components/runs/run-event-timeline";
 import { RunMessageForm } from "@/components/runs/run-message-form";
 import { RunInfoCard, RunOutputPlaceholder, RunTextPanel } from "@/components/runs/run-panels";
 import { isTerminalRunStatus, useRunStream } from "@/components/runs/use-run-stream";
+import { useActionQuery } from "@/hooks/use-action-query";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -46,7 +47,7 @@ function RunDetailSkeleton() {
 
 export default function RunDetailPage({ params }: { params: { id: string } }) {
   const runId = params.id;
-  const { can } = useSession();
+  const { can, organization } = useSession();
   const stream = useRunStream(runId);
   const { run, events, resume, setRun } = stream;
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -58,6 +59,14 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
       // 中止までの最後の経過を受け取る
       resume();
     },
+  });
+
+  const approvalRevision = events.filter((e) => e.type === "approval.requested" || e.type === "approval.decided").map((e) => e.seq).join(",");
+  const hasApprovalRequests = events.some((e) => e.type === "approval.requested");
+  // 経過の中で承認できるようにするため、この実行ぶんの依頼をここで読む（フックは早期 return より前に置く）
+  const approvals = useActionQuery(() => listApprovalsAction({ status: "pending" }), [organization?.id, runId, run?.status, approvalRevision], {
+    enabled: run?.status === "waiting_approval" || hasApprovalRequests,
+    refetchInterval: () => (run && !isTerminalRunStatus(run.status) ? 3_000 : false),
   });
 
   if (!run) {
@@ -76,7 +85,6 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
   const canStart = can("run.start");
   const canCancel = canStart && !terminal;
   const canMessage = canStart && run.status !== "cancelled" && run.status !== "failed";
-  const hasApprovalRequests = events.some((e) => e.type === "approval.requested");
   const activeExternalJobs = run.external_jobs.filter((job) => job.status === "pending" || job.status === "processing");
 
   return (
@@ -154,8 +162,6 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
             </Alert>
           ) : null}
 
-          <RunApprovals runId={run.id} status={run.status} hasRequests={hasApprovalRequests} onDecided={resume} />
-
           <RunTextPanel title="指示" text={run.input} placeholder="—" />
 
           <RunTextPanel
@@ -167,7 +173,17 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
 
           <RunArtifacts runId={run.id} finished={terminal} />
 
-          <RunEventTimeline events={events} finished={terminal} />
+          {approvals.error ? <Alert tone="warning" title="承認依頼を取得できませんでした"><p>{approvals.error.message}</p><Button variant="secondary" size="sm" onClick={() => void approvals.reload()}>再取得</Button></Alert> : null}
+          <RunEventTimeline
+            events={events}
+            finished={terminal}
+            running={run.status === "running" || run.status === "provisioning" || run.status === "queued"}
+            approvals={(approvals.data ?? []).filter((approval) => approval.run_id === run.id)}
+            onApprovalDecided={() => {
+              void approvals.reload();
+              resume();
+            }}
+          />
 
           {canMessage ? <RunMessageForm runId={run.id} onSent={resume} /> : null}
         </div>

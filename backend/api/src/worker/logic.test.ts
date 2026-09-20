@@ -36,13 +36,18 @@ describe("toManifestDraft（日本語 → Manifest）", () => {
         name: "価格変更",
         description: "価格を変える",
         instructions: "価格を変更する",
-        tools: ["get_product", "update_price", "unknown_tool"],
-        approval_rules: [{ tool: "update_price", field: "price_change", op: ">", value: 500, abs: true, reason: "金額が大きい" }],
-        environment_profile: "sample-a-production",
-        notes: [],
+        conditional_approvals: [{ tool: "update_price", field: "price_change", op: ">", value: 500, abs: true, reason: "金額が大きい" }],
       },
       new Set(["get_product", "update_price"]),
       new Set(["sample-a-production"]),
+      // 使う能力はリゾルバの結果から決まる
+      {
+        requirements: [],
+        selected_tools: ["get_product", "update_price", "unknown_tool"],
+        missing_variables: [],
+        ready: true,
+      },
+      "sample-a-production",
     );
     expect(draft.manifest_yaml).toContain("update_price");
     expect(draft.manifest_yaml).not.toContain("unknown_tool");
@@ -52,7 +57,7 @@ describe("toManifestDraft（日本語 → Manifest）", () => {
 
   it("キーの形式が正しくなければ置き換える", () => {
     const draft = toManifestDraft(
-      { key: "Pricing Agent!", name: "", description: "", instructions: "x", tools: [], approval_rules: [], environment_profile: null, notes: [] },
+      { key: "Pricing Agent!", name: "", description: "", instructions: "x", conditional_approvals: [] },
       new Set(),
       new Set(),
     );

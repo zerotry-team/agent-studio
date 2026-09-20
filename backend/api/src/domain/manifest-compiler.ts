@@ -69,7 +69,10 @@ export interface CompiledServiceMcpTool {
   server_label: string;
   server_url: string;
   allowed_tools: string[] | null;
+  /** ツールに直接指定された接続先。未指定なら connector_id から実行時に解決する */
   connection_id: string | null;
+  /** 連携サービス単位で登録した MCP。Stage ごとの Connection を実行時に引くために使う */
+  connector_id: string | null;
   tool_version_id: string;
 }
 
@@ -82,6 +85,8 @@ export interface CompiledAgentConfig {
   environment: CompiledEnvironment;
   function_tools: CompiledFunctionTool[];
   service_mcp_tools: CompiledServiceMcpTool[];
+  /** ブラウザで接続してよい範囲。ブラウザを使う Agent だけ意味を持つ */
+  browser_access?: { access: "restricted" | "public"; allowed_domains: string[] };
   /** Tool Gateway 経由で使う Runtime のツール */
   runtime_tools: string[];
   /** 組織 + Manifest + 暗黙のポリシーを連結したもの（評価は最も厳しい結果になる） */
@@ -134,6 +139,7 @@ export function compileAgent(input: {
           server_url: t.spec.service_mcp.server_url,
           allowed_tools: t.spec.service_mcp.allowed_tools ?? null,
           connection_id: t.spec.service_mcp.connection_id ?? null,
+          connector_id: t.connector_id ?? null,
           tool_version_id: t.tool_version_id,
         });
         break;

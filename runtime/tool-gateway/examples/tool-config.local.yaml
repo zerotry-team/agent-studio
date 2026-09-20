@@ -58,15 +58,202 @@ tools:
         when: { field: price_change, op: ">", value: 10000, abs: true }
         reason: "1 回の価格変更は ±10,000 円までです（Runtime 側の制限）"
 
-# Browser Worker（runtime/browser-worker）を手元で動かす場合はコメントを外す
-upstream_mcp: []
-# upstream_mcp:
-#   - name: browser
-#     url: "http://localhost:8931/mcp"
-#     tools:
-#       - { name: browser_navigate, risk: read, reads_untrusted_content: true }
-#       - { name: browser_snapshot, risk: read, reads_untrusted_content: true }
-#       - { name: browser_click, risk: write }
-#       - { name: browser_type, risk: write }
+  # --- ファクタリング審査シナリオ（demo-factoring-api / factoring_demo DB） ---
+  # 認証情報は CONNECTION_SECRET_FACTORING_DEMO_API から読む（値は FACTORING_API_TOKEN と同じにする）。
+  - name: list_applications
+    description: "審査待ちの買取申込の一覧（申込 ID・申込者・売掛先・請求額・支払期日）を取得します。"
+    risk: read
+    input_schema:
+      type: object
+      properties:
+        status: { type: string, description: "申込中 / 買取済 / 取下げ。省略時は申込中" }
+      additionalProperties: false
+    http:
+      method: GET
+      url: "http://localhost:8091/applications"
+      auth: { type: bearer, secret: factoring-demo-api }
+      timeout_ms: 5000
+
+  - name: get_application
+    description: "買取申込 1 件の審査材料（申込者、売掛先、請求書、売掛先からの入金実績、同じ請求書番号の過去の申込、過去の審査結果）を取得します。"
+    risk: read
+    input_schema:
+      type: object
+      properties:
+        invoice_id: { type: string, description: "申込 ID（例: INV-2026-0101）" }
+      required: [invoice_id]
+      additionalProperties: false
+    http:
+      method: GET
+      url: "http://localhost:8091/applications/{invoice_id}"
+      auth: { type: bearer, secret: factoring-demo-api }
+      timeout_ms: 5000
+
+  - name: list_counterparty_payments
+    description: "売掛先ごとの入金実績を、申込をまたいで取得します。支払いの遅れ方を見るのに使います。"
+    risk: read
+    input_schema:
+      type: object
+      properties:
+        counterparty_id: { type: string, description: "売掛先 ID（例: C-001）" }
+      required: [counterparty_id]
+      additionalProperties: false
+    http:
+      method: GET
+      url: "http://localhost:8091/counterparties/{counterparty_id}/payments"
+      auth: { type: bearer, secret: factoring-demo-api }
+      timeout_ms: 5000
+
+  - name: record_screening
+    description: "審査結果を基幹システムに記録します。判定と理由は必須、掛目と手数料率は 0〜1 の割合で指定します。"
+    risk: write
+    input_schema:
+      type: object
+      properties:
+        invoice_id: { type: string, description: "申込 ID" }
+        decision: { type: string, enum: ["可", "否", "保留"], description: "買取の判定" }
+        reason: { type: string, description: "その判定にした理由（根拠にした事実を含める）" }
+        advance_rate: { type: number, description: "掛目。0.85 なら請求額の 85%" }
+        fee_rate: { type: number, description: "手数料率。0.03 なら 3%" }
+        verified_corporate_number: { type: string, description: "実在確認で確認できた売掛先の法人番号（13 桁）" }
+      required: [invoice_id, decision, reason]
+      additionalProperties: false
+    http:
+      method: POST
+      url: "http://localhost:8091/screenings"
+      auth: { type: bearer, secret: factoring-demo-api }
+      timeout_ms: 5000
+
+# Browser（runtime/browser-session-worker）。Run ごとに Controller が起動した Worker へ中継する。
+# dynamic_session_endpoint: browser のとき url は使わず、Session Grant の browser.endpoint へ繋ぐ。
+# Run の前に一覧を取りに行けないため、description と input_schema はここで固定する
+# （runtime/browser-session-worker/src/actions.ts の BROWSER_TOOLS と合わせること）。
+upstream_mcp:
+  - name: browser
+    url: "http://127.0.0.1:8931/mcp"
+    dynamic_session_endpoint: browser
+    tools:
+      - name: browser_navigate
+        risk: read
+        reads_untrusted_content: true
+        description: "許可されたURLを開きます"
+        input_schema:
+          type: object
+          properties:
+            url: { type: string }
+          required: [url]
+          additionalProperties: false
+      - name: browser_snapshot
+        risk: read
+        reads_untrusted_content: true
+        description: "現在ページのURL、title、アクセシビリティ表現を取得します"
+        input_schema: { type: object, properties: {}, additionalProperties: false }
+      - name: browser_screenshot
+        risk: read
+        reads_untrusted_content: true
+        description: "現在画面を元解像度のPNGで取得します"
+        input_schema:
+          type: object
+          properties:
+            full_page: { type: boolean }
+          additionalProperties: false
+      - name: browser_wait_for
+        risk: read
+        reads_untrusted_content: true
+        description: "文字列、selector、または時間を待ちます"
+        input_schema:
+          type: object
+          properties:
+            text: { type: string }
+            selector: { type: string }
+            timeout_ms: { type: number }
+          additionalProperties: false
+      - name: browser_tabs
+        risk: write
+        description: "タブを一覧・選択・閉じます"
+        input_schema:
+          type: object
+          properties:
+            action: { type: string, enum: [list, select, close] }
+            index: { type: number }
+          required: [action]
+          additionalProperties: false
+      - name: browser_click
+        risk: write
+        reads_untrusted_content: true
+        description: "要素をクリックします"
+        input_schema:
+          type: object
+          properties:
+            selector: { type: string }
+            text: { type: string }
+          additionalProperties: false
+      - name: browser_type
+        risk: write
+        reads_untrusted_content: true
+        description: "入力欄へ文字列を入力します"
+        input_schema:
+          type: object
+          properties:
+            selector: { type: string }
+            text_locator: { type: string }
+            value: { type: string }
+            submit: { type: boolean }
+          required: [value]
+          additionalProperties: false
+      - name: browser_press_key
+        risk: write
+        reads_untrusted_content: true
+        description: "キーを入力します"
+        input_schema:
+          type: object
+          properties:
+            key: { type: string }
+          required: [key]
+          additionalProperties: false
+      - name: browser_select_option
+        risk: write
+        reads_untrusted_content: true
+        description: "select要素の値を変更します"
+        input_schema:
+          type: object
+          properties:
+            selector: { type: string }
+            value: { type: string }
+          required: [selector, value]
+          additionalProperties: false
+      - name: browser_hover
+        risk: write
+        reads_untrusted_content: true
+        description: "要素へホバーします"
+        input_schema:
+          type: object
+          properties:
+            selector: { type: string }
+            text: { type: string }
+          additionalProperties: false
+      - name: browser_drag
+        risk: write
+        reads_untrusted_content: true
+        description: "要素間をドラッグします"
+        input_schema:
+          type: object
+          properties:
+            source_selector: { type: string }
+            target_selector: { type: string }
+          required: [source_selector, target_selector]
+          additionalProperties: false
+      - name: browser_exec_js
+        risk: write
+        reads_untrusted_content: true
+        description: "公開ページを制限付きPlaywrightコードで操作します"
+        input_schema:
+          type: object
+          properties:
+            code: { type: string }
+            timeout_ms: { type: number }
+            expects: { type: string }
+          required: [code]
+          additionalProperties: false
 
 policies: []

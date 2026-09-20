@@ -24,7 +24,9 @@ export function buildSessionCreateParams(config: CompiledAgentConfig, opts: Sess
 
   const vaultIds = new Set<string>();
   for (const s of config.service_mcp_tools) {
-    const vault = s.connection_id ? opts.vaults.get(s.connection_id) : undefined;
+    // ツール直指定の Connection を優先し、無ければ連携サービス単位の紐付けを使う
+    const vaultKey = s.connection_id ?? s.connector_id;
+    const vault = vaultKey ? opts.vaults.get(vaultKey) : undefined;
     if (vault) vaultIds.add(vault.vaultId);
     tools.push({
       type: "mcp",

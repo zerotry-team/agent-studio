@@ -93,6 +93,7 @@ export class EcsBrowserLauncher implements BrowserLauncher {
                 { name: "BROWSER_SESSION_TOKEN", value: accessToken },
                 { name: "BROWSER_MODE", value: req.config.mode },
                 { name: "BROWSER_ALLOWED_DOMAINS", value: req.config.allowed_domains.join(",") },
+                { name: "BROWSER_ALLOW_PUBLIC_WEB", value: String(req.config.allow_public_web ?? false) },
                 { name: "BROWSER_CODE_EXECUTION_ENABLED", value: String(req.config.code_execution_enabled) },
                 { name: "BROWSER_COMPUTER_ACTIONS_ENABLED", value: String(req.config.computer_actions_enabled) },
                 { name: "BROWSER_VIEWPORT_WIDTH", value: String(req.config.viewport.width) },
@@ -167,9 +168,27 @@ const defaultExec: ExecFileLike = (file, args, options) =>
     });
   });
 
+/** docker inspect から取り出す、endpoint の解決に必要な情報 */
+interface DockerContainerInfo {
+  /** `--network` を使うときの宛先ホスト名 */
+  name?: string;
+  /** ローカル開発で host 側から届くように公開したポート */
+  hostPort?: number;
+}
+
+/** docker inspect の Ports から 8931/tcp の host 側ポートを取り出す */
+function publishedPort(ports: Record<string, { HostIp?: string; HostPort?: string }[] | null> | null | undefined): number | undefined {
+  const bindings = ports?.[`${BROWSER_PORT}/tcp`];
+  for (const binding of bindings ?? []) {
+    const port = Number(binding.HostPort);
+    if (Number.isInteger(port) && port > 0) return port;
+  }
+  return undefined;
+}
+
 export class DockerBrowserLauncher implements BrowserLauncher {
   readonly kind = "docker";
-  private readonly tokens = new Map<string, string>();
+  private readonly containers = new Map<string, DockerContainerInfo>();
 
   constructor(
     private readonly cfg: Extract<BrowserLauncherConfig, { type: "docker" }>,
@@ -183,11 +202,13 @@ export class DockerBrowserLauncher implements BrowserLauncher {
     const args = [
       "run", "--rm", "-d", "--name", name,
       "--label", `agentstudio.browser_session_id=${req.sessionId}`,
-      "-e", "BROWSER_SESSION_TOKEN", "-e", "BROWSER_MODE", "-e", "BROWSER_ALLOWED_DOMAINS",
+      "-e", "BROWSER_SESSION_TOKEN", "-e", "BROWSER_MODE", "-e", "BROWSER_ALLOWED_DOMAINS", "-e", "BROWSER_ALLOW_PUBLIC_WEB",
       "-e", "BROWSER_CODE_EXECUTION_ENABLED", "-e", "BROWSER_COMPUTER_ACTIONS_ENABLED",
       "-e", "BROWSER_VIEWPORT_WIDTH", "-e", "BROWSER_VIEWPORT_HEIGHT",
     ];
     if (this.cfg.network) args.push("--network", this.cfg.network);
+    // ローカル開発では Tool Gateway が host 側にいるため、loopback にだけポートを公開する（番号は docker に選ばせる）
+    args.push("-p", `127.0.0.1:0:${BROWSER_PORT}`);
     args.push(this.cfg.image);
     const { stdout } = await this.exec("docker", args, {
       env: {
@@ -195,6 +216,7 @@ export class DockerBrowserLauncher implements BrowserLauncher {
         BROWSER_SESSION_TOKEN: accessToken,
         BROWSER_MODE: req.config.mode,
         BROWSER_ALLOWED_DOMAINS: req.config.allowed_domains.join(","),
+        BROWSER_ALLOW_PUBLIC_WEB: String(req.config.allow_public_web ?? false),
         BROWSER_CODE_EXECUTION_ENABLED: String(req.config.code_execution_enabled),
         BROWSER_COMPUTER_ACTIONS_ENABLED: String(req.config.computer_actions_enabled),
         BROWSER_VIEWPORT_WIDTH: String(req.config.viewport.width),
@@ -203,18 +225,36 @@ export class DockerBrowserLauncher implements BrowserLauncher {
     });
     const taskArn = stdout.trim().split("\n").pop()?.trim();
     if (!taskArn) throw new Error("docker run が Browser container ID を返しませんでした");
-    this.tokens.set(taskArn, name);
-    this.logger.info({ session_id: req.sessionId, container_id: taskArn.slice(0, 12) }, "Browser Session Worker を起動しました");
+    this.containers.set(taskArn, { name });
+    // 公開ポートは起動直後に確定する。取れなくても describe で拾い直せるため、ここでは失敗させない
+    await this.describe([taskArn]).catch(() => undefined);
+    this.logger.info(
+      { session_id: req.sessionId, container_id: taskArn.slice(0, 12), host_port: this.containers.get(taskArn)?.hostPort },
+      "Browser Session Worker を起動しました",
+    );
     return { taskArn, accessToken };
   }
+
+  /** Controller を再起動しても endpoint を解決できるよう、State と一緒に名前・公開ポートも取り出す */
+  private static readonly INSPECT_FORMAT =
+    '{"state":{{json .State}},"name":{{json .Name}},"ports":{{json .NetworkSettings.Ports}}}';
 
   async describe(taskArns: string[]): Promise<Map<string, WorkerTaskState | null>> {
     const result = new Map<string, WorkerTaskState | null>();
     for (const id of taskArns) {
       try {
-        const { stdout } = await this.exec("docker", ["inspect", "--format", "{{json .State}}", id], {});
-        const state = JSON.parse(stdout) as { Status?: string; ExitCode?: number; StartedAt?: string; Error?: string };
+        const { stdout } = await this.exec("docker", ["inspect", "--format", DockerBrowserLauncher.INSPECT_FORMAT, id], {});
+        const inspected = JSON.parse(stdout) as {
+          state?: { Status?: string; ExitCode?: number; StartedAt?: string; Error?: string };
+          name?: string;
+          ports?: Record<string, { HostIp?: string; HostPort?: string }[] | null> | null;
+        };
+        const state = inspected.state ?? {};
         const running = state.Status === "running";
+        this.containers.set(id, {
+          name: inspected.name?.replace(/^\//, "") || this.containers.get(id)?.name,
+          hostPort: publishedPort(inspected.ports) ?? this.containers.get(id)?.hostPort,
+        });
         result.set(id, {
           taskArn: id,
           lastStatus: running ? "RUNNING" : state.Status === "exited" || state.Status === "dead" ? "STOPPED" : "PENDING",
@@ -229,9 +269,14 @@ export class DockerBrowserLauncher implements BrowserLauncher {
     return result;
   }
 
+  /**
+   * `--network` があるときは同じ network にいる Tool Gateway からコンテナ名で届く。
+   * 無いとき（Tool Gateway が host 側のローカル開発）は loopback に公開したポートを使う。
+   */
   endpoint(state: WorkerTaskState, accessToken: string): string | null {
-    const name = this.tokens.get(state.taskArn);
-    return name ? `http://${name}:${BROWSER_PORT}/mcp/${accessToken}` : null;
+    const container = this.containers.get(state.taskArn);
+    if (this.cfg.network) return container?.name ? `http://${container.name}:${BROWSER_PORT}/mcp/${accessToken}` : null;
+    return container?.hostPort ? `http://127.0.0.1:${container.hostPort}/mcp/${accessToken}` : null;
   }
 
   async stop(taskArn: string): Promise<void> {
@@ -240,7 +285,7 @@ export class DockerBrowserLauncher implements BrowserLauncher {
     } catch (error) {
       if (!/no such container/i.test(String((error as { stderr?: string }).stderr ?? ""))) throw error;
     } finally {
-      this.tokens.delete(taskArn);
+      this.containers.delete(taskArn);
     }
   }
 

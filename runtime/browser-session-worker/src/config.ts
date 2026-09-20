@@ -5,6 +5,7 @@ const envSchema = z.object({
   BROWSER_SESSION_TOKEN: z.string().min(16),
   BROWSER_MODE: z.enum(["public_ephemeral", "authenticated_restricted"]).default("public_ephemeral"),
   BROWSER_ALLOWED_DOMAINS: z.string().default(""),
+  BROWSER_ALLOW_PUBLIC_WEB: z.string().default("false"),
   BROWSER_CODE_EXECUTION_ENABLED: z.enum(["true", "false"]).default("false"),
   BROWSER_COMPUTER_ACTIONS_ENABLED: z.enum(["true", "false"]).default("false"),
   BROWSER_VIEWPORT_WIDTH: z.coerce.number().int().min(320).max(3840).default(1440),
@@ -21,6 +22,7 @@ export interface BrowserWorkerConfig {
   sessionToken: string;
   mode: "public_ephemeral" | "authenticated_restricted";
   allowedDomains: string[];
+  allowPublicWeb: boolean;
   codeExecutionEnabled: boolean;
   computerActionsEnabled: boolean;
   viewport: { width: number; height: number };
@@ -42,6 +44,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): BrowserWork
     sessionToken: env.BROWSER_SESSION_TOKEN,
     mode: env.BROWSER_MODE,
     allowedDomains: [...new Set(env.BROWSER_ALLOWED_DOMAINS.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))],
+    allowPublicWeb: env.BROWSER_ALLOW_PUBLIC_WEB === "true",
     codeExecutionEnabled,
     computerActionsEnabled: env.BROWSER_COMPUTER_ACTIONS_ENABLED === "true",
     viewport: { width: env.BROWSER_VIEWPORT_WIDTH, height: env.BROWSER_VIEWPORT_HEIGHT },

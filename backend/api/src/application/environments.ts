@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import {
   createRuntimeProfileSchema,
   type AgentManifest,
+  parseToolRef,
   type BootstrapTokenDto,
   type CapabilityResolutionDto,
   type CreateDeploymentInput,
@@ -228,8 +229,11 @@ export class EnvironmentService {
       if (!profile) throw preconditionFailed("Previewを動かす環境がありません。SettingsでEnvironmentを設定してください");
 
       const resolution = agent.capability_resolution as unknown as CapabilityResolutionDto;
-      const variables = await this.assertProjectDependencies(tx, actor.organizationId, agentId, "staging", resolution);
-      const { config, warnings } = await this.compile(tx, actor.organizationId, manifest, profile);
+      const { variables, allowedTools } = await this.assertProjectDependencies(tx, actor.organizationId, agentId, "staging", resolution);
+      const { config, warnings } = await this.compile(tx, actor.organizationId, manifest, profile, allowedTools, {
+        access: agent.browser_access === "public" ? "public" : "restricted",
+        allowed_domains: Array.isArray(agent.browser_allowed_domains) ? (agent.browser_allowed_domains as string[]) : [],
+      });
       const latestBuild = await tx.agent_builds.findFirst({ where: { agent_id: agentId }, orderBy: { build_number: "desc" } });
       const build = await tx.agent_builds.create({
         data: {
@@ -289,7 +293,7 @@ export class EnvironmentService {
       });
       if (!preview?.build) throw preconditionFailed("Buildを持つPreview DeploymentだけProductionへ公開できます");
       if (preview.health_status !== "ready") throw preconditionFailed("PreviewがReadyではないため公開できません");
-      const variables = await this.assertProjectDependencies(
+      const { variables } = await this.assertProjectDependencies(
         tx,
         actor.organizationId,
         preview.agent_id,
@@ -337,7 +341,7 @@ export class EnvironmentService {
         include: { build: true, agent: true, agent_version: true, runtime_profile: true },
       });
       if (!target?.build) throw preconditionFailed("RollbackできるBuildがありません");
-      const variables = await this.assertProjectDependencies(
+      const { variables } = await this.assertProjectDependencies(
         tx,
         actor.organizationId,
         target.agent_id,
@@ -375,13 +379,17 @@ export class EnvironmentService {
     });
   }
 
+  /**
+   * Build の前提条件を確認し、この環境で実際に使える能力を返す。
+   * 利用者が Connection で許可しなかった操作は、エラーにせず Build から外す（使わない、という選択）。
+   */
   private async assertProjectDependencies(
     tx: Prisma.TransactionClient,
     organizationId: string,
     agentId: string,
     stage: "staging" | "production",
     resolution: CapabilityResolutionDto,
-  ): Promise<Record<string, string>> {
+  ): Promise<{ variables: Record<string, string>; allowedTools: Set<string> }> {
     const unresolved = resolution.requirements.find((requirement) => requirement.state === "missing" || requirement.state === "ambiguous");
     if (unresolved) throw preconditionFailed(`必要な能力「${unresolved.requirement}」を解決できていません`);
 
@@ -394,26 +402,39 @@ export class EnvironmentService {
       }),
       tx.agent_environment_configs.findUnique({ where: { agent_id_stage: { agent_id: agentId, stage } } }),
     ]);
+
+    const allowedTools = new Set<string>();
+    let hasConnectorRequirement = false;
     for (const requirement of resolution.requirements) {
-      if (!requirement.connector_id) continue;
+      if (!requirement.connector_id) {
+        for (const tool of requirement.tool_names) allowedTools.add(tool);
+        continue;
+      }
+      hasConnectorRequirement = true;
       const connector = connectors.find((candidate) => candidate.id === requirement.connector_id);
       if (!connector) throw preconditionFailed(`連携サービス「${requirement.connector_name ?? requirement.requirement}」が見つかりません`);
-      if (connector.auth_type === "none") continue;
-      const link = links.find((candidate) => candidate.connector_id === connector.id);
-      if (!link) throw preconditionFailed(`${stage === "staging" ? "Preview" : "Production"}の${connector.name} Connectionを設定してください`);
-      const allowed = new Set(link.allowed_capabilities as string[]);
-      if (requirement.tool_names.some((tool) => !allowed.has(tool))) {
-        throw preconditionFailed(`${connector.name}で必要な操作が許可されていません`);
+      if (connector.auth_type === "none") {
+        for (const tool of requirement.tool_names) allowedTools.add(tool);
+        continue;
       }
+      const link = links.find((candidate) => candidate.connector_id === connector.id);
+      // 接続を設定していない連携サービスは、この環境では使わないものとして扱う
+      if (!link) continue;
       if (link.connection.status !== "connected") throw preconditionFailed(`${connector.name} Connectionは${link.connection.status}です`);
       if (link.connection.scope !== "runtime" && !link.connection.secret_locator) {
         throw preconditionFailed(`${connector.name} Connectionの認証情報が未設定です`);
       }
+      const allowed = new Set(link.allowed_capabilities as string[]);
+      for (const tool of requirement.tool_names) if (allowed.has(tool)) allowedTools.add(tool);
     }
+    if (hasConnectorRequirement && allowedTools.size === 0) {
+      throw preconditionFailed("このAgentで使う作業を1つ以上選んでください");
+    }
+
     const variables = (environment?.variables ?? {}) as Record<string, string>;
     const missingVariable = resolution.missing_variables.find((name) => !variables[name]);
     if (missingVariable) throw preconditionFailed(`Variable ${missingVariable} を設定してください`);
-    return variables;
+    return { variables, allowedTools };
   }
 
   private async compile(
@@ -433,8 +454,12 @@ export class EnvironmentService {
         tool_catalog: Prisma.JsonValue;
       } | null;
     },
+    allowedTools: Set<string>,
+    browserAccess?: { access: "restricted" | "public"; allowed_domains: string[] },
   ) {
-    const { tools, errors: toolErrors } = await resolveTools(tx, organizationId, manifest.tools);
+    // 利用者が許可した能力だけを Build に含める
+    const selected = manifest.tools.filter((ref) => allowedTools.has(parseToolRef(ref).name));
+    const { tools, errors: toolErrors } = await resolveTools(tx, organizationId, selected);
     if (toolErrors.length > 0) throw preconditionFailed(toolErrors[0]!, { errors: toolErrors });
     const orgPolicies = (await tx.policies.findMany({ where: { organization_id: organizationId, enabled: true } })).map(
       (policy) => policy.rule as unknown as Policy,
@@ -456,7 +481,8 @@ export class EnvironmentService {
     };
     const result = compileAgent({ manifest, tools, profile: compileProfile, orgPolicies, defaultModel: this.deps.env.OPENAI_DEFAULT_MODEL });
     if (!result.ok) throw preconditionFailed(result.errors[0]!, { errors: result.errors, warnings: result.warnings });
-    return { config: result.config, warnings: result.config.warnings };
+    // ブラウザの接続範囲は Build に固定する（公開済みの Agent は作成時の範囲のまま動く）
+    return { config: { ...result.config, ...(browserAccess ? { browser_access: browserAccess } : {}) }, warnings: result.config.warnings };
   }
 
   /**

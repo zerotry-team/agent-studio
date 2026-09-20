@@ -8,7 +8,9 @@ import {
   type AgentDto,
   type AgentProjectDto,
   type AgentManifest,
+  setBrowserAccessSchema,
   type CapabilityResolutionDto,
+  type SetBrowserAccessInput,
   type AgentVersionDto,
   type CreateEvalCaseInput,
   type EvalCaseDto,
@@ -85,6 +87,82 @@ export class AgentService {
         orderBy: { updated_at: "desc" },
       });
       return agents.map((a) => toAgentDto(a));
+    });
+  }
+
+  /** ブラウザで接続してよい範囲を設定する。安全の境界なので業務の設定値とは分けて持つ */
+  async setBrowserAccess(actor: MemberActor, agentId: string, raw: SetBrowserAccessInput): Promise<AgentDto> {
+    requireRole(actor, "builder");
+    const input = setBrowserAccessSchema.parse(raw);
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const agent = await tx.agents.findFirst({ where: { id: agentId, organization_id: actor.organizationId } });
+      if (!agent) throw notFound("エージェント");
+      const domains = input.access === "public" ? [] : [...new Set(input.allowed_domains.map((d) => d.trim().toLowerCase()))];
+      const updated = await tx.agents.update({
+        where: { id: agentId },
+        data: { browser_access: input.access, browser_allowed_domains: domains },
+        include: { versions: true },
+      });
+      // 保存と実行設定の更新を同じトランザクションで行う。既存Runのスナップショットは変更しない。
+      const deployments = await tx.deployments.findMany({
+        where: { organization_id: actor.organizationId, agent_id: agentId, status: "active" },
+        include: { build: true },
+      });
+      if (deployments.some((deployment) => deployment.stage === "production")) requireRole(actor, "admin");
+      const browserAccess = { access: input.access, allowed_domains: domains };
+      const latestBuild = await tx.agent_builds.findFirst({ where: { agent_id: agentId }, orderBy: { build_number: "desc" } });
+      let buildNumber = latestBuild?.build_number ?? 0;
+      const replacementBuilds = new Map<string, string>();
+      for (const deployment of deployments) {
+        const config = deployment.compiled_config as Record<string, unknown>;
+        if (JSON.stringify(config.browser_access) === JSON.stringify(browserAccess)) continue;
+        let buildId = deployment.build_id;
+        if (deployment.build) {
+          buildId = replacementBuilds.get(deployment.build.id) ?? null;
+          if (!buildId) {
+            const build = await tx.agent_builds.create({
+              data: {
+                organization_id: actor.organizationId,
+                agent_id: agentId,
+                agent_version_id: deployment.agent_version_id,
+                runtime_profile_id: deployment.runtime_profile_id,
+                build_number: ++buildNumber,
+                status: deployment.build.status,
+                resolution: deployment.build.resolution as Prisma.InputJsonValue,
+                compiled_config: { ...(deployment.build.compiled_config as Record<string, unknown>), browser_access: browserAccess } as Prisma.InputJsonValue,
+                build_log: [{ type: "success", message: "保存したブラウザ接続範囲を反映しました" }],
+                created_by: actor.userId,
+              },
+            });
+            buildId = build.id;
+            replacementBuilds.set(deployment.build.id, buildId);
+          }
+        }
+        await tx.deployments.update({ where: { id: deployment.id }, data: { status: "superseded" } });
+        const replacement = await tx.deployments.create({
+          data: {
+            organization_id: actor.organizationId,
+            agent_id: agentId,
+            agent_version_id: deployment.agent_version_id,
+            runtime_profile_id: deployment.runtime_profile_id,
+            build_id: buildId,
+            promoted_from_id: deployment.id,
+            stage: deployment.stage,
+            health_status: deployment.health_status,
+            compiled_config: { ...config, browser_access: browserAccess } as Prisma.InputJsonValue,
+            created_by: actor.userId,
+          },
+        });
+        await recordAudit(tx, auditBy(actor, {
+          action: "deployment.browser_access.update", targetType: "deployment", targetId: replacement.id,
+          detail: { previous_deployment_id: deployment.id, stage: deployment.stage, access: input.access, domains },
+        }));
+      }
+      await recordAudit(
+        tx,
+        auditBy(actor, { action: "agent.browser_access", targetType: "agent", targetId: agentId, detail: { access: input.access, domains } }),
+      );
+      return toAgentDto(updated, true);
     });
   }
 
@@ -418,10 +496,11 @@ export class AgentService {
     const requiredProfileType = selectedLocations.has("runtime_mcp") ? "self_hosted" : undefined;
     const chosenProfile = requiredProfileType ? profiles.find((profile) => profile.type === requiredProfileType) : undefined;
     return toManifestDraft(
-      chosenProfile ? { ...generated, environment_profile: chosenProfile.key } : generated,
+      generated,
       new Set(tools.map((t) => t.name)),
       new Set(profiles.map((p) => p.key)),
       resolution,
+      (chosenProfile ?? profiles.find((profile) => profile.type === "openai_hosted") ?? profiles[0])?.key,
     );
   }
 
@@ -500,31 +579,36 @@ export class AgentService {
   }
 }
 
-/** 生成結果を Manifest の YAML にする。存在しないツール・実行環境は外して notes で伝える */
+/**
+ * 生成結果を Manifest の YAML にする。
+ * 使う能力・実行環境・risk による承認はコード側で決め、モデルには書かせない。
+ */
 export function toManifestDraft(
   g: GeneratedAgent,
   toolNames: Set<string>,
   profileKeys: Set<string>,
   resolution?: CapabilityResolutionDto,
+  /** runtime_mcp を含むなら self_hosted になる。呼び出し側が算出して渡す */
+  environmentProfile?: string,
 ): GenerateManifestResultDto {
-  const notes = [...(g.notes ?? [])];
-  const requestedTools = resolution?.selected_tools ?? g.tools ?? [];
-  const tools = [...new Set(requestedTools)].filter((t) => {
+  const notes: string[] = [];
+  const tools = [...new Set(resolution?.selected_tools ?? [])].filter((t) => {
     if (toolNames.has(t)) return true;
     notes.push(`ツール ${t} は登録されていないため外しました`);
     return false;
   });
 
+  // しきい値つきの承認だけモデルが出す。それ以外の承認は Build 時に risk から付く
   const policies: Policy[] = [];
-  for (const r of g.approval_rules ?? []) {
+  for (const r of g.conditional_approvals ?? []) {
     if (!tools.includes(r.tool)) continue;
-    const when = r.field && r.op && r.value !== null ? { field: r.field, op: r.op, value: r.value, ...(r.abs ? { abs: true } : {}) } : undefined;
-    const parsed = policySchema.safeParse({ type: "approval", tool: r.tool, ...(when ? { when } : {}), reason: r.reason });
+    const when = { field: r.field, op: r.op, value: r.value, ...(r.abs ? { abs: true } : {}) };
+    const parsed = policySchema.safeParse({ type: "approval", tool: r.tool, when, reason: r.reason });
     if (parsed.success) policies.push(parsed.data);
   }
 
   const key = /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(g.key) && g.key.length >= 2 ? g.key.slice(0, 63) : "new-agent";
-  const profile = g.environment_profile && profileKeys.has(g.environment_profile) ? g.environment_profile : undefined;
+  const profile = environmentProfile && profileKeys.has(environmentProfile) ? environmentProfile : undefined;
 
   const manifest: AgentManifest = {
     schema_version: 1,
@@ -546,9 +630,10 @@ export function toManifestDraft(
       tool_names: [tool],
       confidence: 1,
       reason: "生成結果で選択されました",
+      variables: [],
     })),
     selected_tools: tools,
-    missing_variables: g.missing_variables ?? [],
+    missing_variables: [],
     ready: true,
   };
   return { manifest_yaml: stringifyManifest(manifest), notes, resolution: fallbackResolution };

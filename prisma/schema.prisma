@@ -100,6 +100,10 @@ model agents {
   project_brief         String?
   /// Capability Resolver の直近結果。Secret は含めない
   capability_resolution Json     @default("{}")
+  /// ブラウザで接続してよい範囲。"restricted"（許可したドメインだけ）か "public"（公開Web全般）
+  browser_access        String   @default("restricted")
+  /// restricted のときに接続を許すドメイン
+  browser_allowed_domains Json   @default("[]")
   latest_version        Int      @default(0)
   created_by            String?  @db.Uuid
   created_at            DateTime @default(now()) @db.Timestamptz(6)

@@ -1,6 +1,16 @@
 "use client";
 
-import type { AgentProjectDto, ConnectionDto, ConnectorDto, DeploymentDto, Stage } from "@agent-studio/contracts";
+import type {
+  AgentProjectDto,
+  BrowserAccess,
+  CapabilityRequirementDto,
+  CapabilityVariableDto,
+  ConnectionDto,
+  ConnectorDto,
+  DeploymentDto,
+  Stage,
+  ToolDto,
+} from "@agent-studio/contracts";
 import { CalendarClock, Check, CircleAlert, CloudUpload, History, Link2, MessageSquare, Rocket, RotateCcw, Settings, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -10,6 +20,7 @@ import {
   getAgentProjectAction,
   linkAgentConnectionAction,
   setAgentEnvironmentAction,
+  setBrowserAccessAction,
 } from "@/actions/agents";
 import { listConnectionsAction } from "@/actions/connections";
 import { listConnectorsAction } from "@/actions/connectors";
@@ -18,7 +29,7 @@ import { createScheduleAction, deleteScheduleAction, listSchedulesAction, update
 import { AgentRun } from "@/components/agents/agent-run";
 import { ErrorState } from "@/components/common/error-state";
 import { PageHeader } from "@/components/common/page-header";
-import { StageBadge } from "@/components/common/status-badges";
+import { StageBadge, ToolRiskBadge } from "@/components/common/status-badges";
 import { TimeAgo } from "@/components/common/time-ago";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -26,11 +37,12 @@ import { Button, ButtonLink } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Field } from "@/components/ui/field";
-import { Input, Select } from "@/components/ui/input";
+import { Input, Select, Textarea } from "@/components/ui/input";
 import { Skeleton, SkeletonText } from "@/components/ui/skeleton";
 import { TabPanel, Tabs } from "@/components/ui/tabs";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { useActionQuery } from "@/hooks/use-action-query";
+import { cn } from "@/lib/utils/cn";
 import { useSession } from "@/hooks/use-session";
 
 const PROJECT_TABS = ["overview", "preview", "deployments", "runs", "settings"] as const;
@@ -113,36 +125,108 @@ function EnvironmentBadge({ label, deployment }: { label: string; deployment?: D
 }
 
 function Overview({ project, onChanged, onGoTo }: { project: AgentProjectDto; onChanged: () => Promise<void>; onGoTo: (tab: ProjectTab) => void }) {
-  const createPreview = useActionMutation(createPreviewAction, { successMessage: "Previewを作成しました", onSuccess: onChanged });
+  const { organization } = useSession();
+  const createPreview = useActionMutation(createPreviewAction, {
+    successMessage: "Previewを作成しました",
+    // 作ったらそのまま試せるところまで運ぶ
+    onSuccess: async () => {
+      await onChanged();
+      onGoTo("preview");
+    },
+  });
+  const connections = useActionQuery(() => listConnectionsAction(), [organization?.id]);
+  const connectors = useActionQuery(() => listConnectorsAction(), [organization?.id]);
   const resolution = project.agent.capability_resolution;
+  // 操作の識別子だけでは何をするか分からないので、連携サービスの定義から表示名と影響を引く
+  const operations = new Map((connectors.data ?? []).flatMap((connector) => connector.tools.map((tool) => [tool.name, tool] as const)));
+  // ブラウザを使うなら、接続してよい範囲を決めるまで動かせない（未設定はどこにも行けない）
+  const usesBrowser = resolution.selected_tools.some((name) => name.startsWith("browser_") || name === "computer_action");
+  const browserReady = project.agent.browser_access === "public" || project.agent.browser_allowed_domains.length > 0;
+  // 同じ連携サービスを使う作業は1つにまとめる。接続は連携サービス単位で1回設定すれば、その下の作業すべてに効く
+  const groups = new Map<string, { connectorName: string; requirements: CapabilityRequirementDto[] }>();
+  const standalone: CapabilityRequirementDto[] = [];
+  for (const requirement of resolution.requirements) {
+    if (!requirement.connector_id) {
+      standalone.push(requirement);
+      continue;
+    }
+    const group = groups.get(requirement.connector_id) ?? { connectorName: requirement.connector_name ?? "連携サービス", requirements: [] };
+    group.requirements.push(requirement);
+    groups.set(requirement.connector_id, group);
+  }
   return (
     <div className="grid gap-6 lg:grid-cols-[1.3fr_.7fr]">
       <Card>
         <CardHeader title="Agentを準備しています" description="必要な項目だけを表示しています。" />
         <CardBody className="space-y-3">
           {resolution.requirements.map((requirement, index) => (
-            <div key={`${requirement.requirement}-${index}`} className="flex items-start justify-between gap-4 rounded-lg border border-gray-100 px-3 py-3">
-              <div className="flex min-w-0 items-start gap-2.5">
-                {requirement.state === "resolved" ? <Check className="mt-0.5 h-4 w-4 text-emerald-600" /> : <CircleAlert className="mt-0.5 h-4 w-4 text-amber-600" />}
-                <div><p className="text-sm font-medium text-gray-900">{requirement.requirement}</p><p className="mt-0.5 text-xs text-gray-500">{requirement.connector_name ?? requirement.reason}</p></div>
-              </div>
-              <Badge tone={requirement.state === "resolved" ? "success" : "warning"}>{requirement.state === "resolved" ? "準備済み" : requirement.state === "needs_connection" ? "Connectionが必要" : "確認が必要"}</Badge>
-            </div>
+            <RequirementRow
+              key={`${requirement.requirement}-${index}`}
+              index={index + 1}
+              requirement={requirement}
+              operations={requirement.tool_names.map((name) => operations.get(name)).filter((tool): tool is ToolDto => Boolean(tool))}
+            />
           ))}
-          {resolution.missing_variables.map((name) => (
-            <div key={name} className="flex items-center justify-between rounded-lg border border-amber-100 bg-amber-50/50 px-3 py-3 text-sm"><span>{name}を設定してください</span><Badge tone="warning">Variableが必要</Badge></div>
+
+          {[...groups.entries()]
+            .filter(([connectorId]) => (connectors.data ?? []).find((c) => c.id === connectorId)?.auth_type !== "none")
+            .map(([connectorId, group]) => (
+            <ConnectorSetup
+              key={connectorId}
+              agentId={project.agent.id}
+              connectorId={connectorId}
+              connectorName={group.connectorName}
+              connected={group.requirements.every((requirement) => requirement.state === "resolved")}
+              capabilities={[...new Set(group.requirements.flatMap((requirement) => requirement.tool_names))]}
+              connections={(connections.data ?? []).filter(
+                (connection) => connection.connector_id === connectorId && connection.has_secret,
+              )}
+              onChanged={async () => {
+                await connections.reload();
+                await onChanged();
+              }}
+            />
           ))}
-          {resolution.requirements.length === 0 && resolution.missing_variables.length === 0 ? <Alert tone="info">外部連携なしで実行できるAgentです。</Alert> : null}
+          {usesBrowser ? (
+            <BrowserAccessSetup
+              agentId={project.agent.id}
+              access={project.agent.browser_access}
+              domains={project.agent.browser_allowed_domains}
+              onChanged={onChanged}
+            />
+          ) : null}
+          {resolution.requirements.length === 0 ? <Alert tone="info">外部連携なしで実行できるAgentです。</Alert> : null}
+
           {createPreview.error ? <Alert tone="danger">{createPreview.error.message}</Alert> : null}
           <div className="flex flex-wrap gap-2 pt-2">
-            {resolution.ready ? (
+            {resolution.ready && (!usesBrowser || browserReady) ? (
               <Button onClick={() => void createPreview.mutate(project.agent.id)} loading={createPreview.pending} icon={<CloudUpload className="h-4 w-4" />}>Previewを作成</Button>
             ) : (
-              <Button onClick={() => onGoTo("settings")} icon={<Settings className="h-4 w-4" />}>不足項目を設定</Button>
+              // 割り当てはこの画面で済ませられるので、詳細を見たい人だけ Settings へ
+              <Button variant="secondary" onClick={() => onGoTo("settings")} icon={<Settings className="h-4 w-4" />}>設定を開く</Button>
             )}
           </div>
         </CardBody>
       </Card>
+      <div className="space-y-6">
+      {project.agent.project_brief ? (
+        <Card>
+          <CardHeader title="この Agent の元になった説明" description="入力した文章と、AIがそれをどう読み取ったかを並べています。" />
+          <CardBody className="space-y-3 text-sm">
+            <div>
+              <p className="text-xs font-medium text-gray-500">あなたの入力</p>
+              <p className="mt-1 whitespace-pre-wrap text-gray-900">{project.agent.project_brief}</p>
+            </div>
+            {project.agent.description ? (
+              <div className="border-t border-gray-100 pt-3">
+                <p className="text-xs font-medium text-gray-500">AIの読み取り</p>
+                <p className="mt-1 whitespace-pre-wrap text-gray-700">{project.agent.description}</p>
+                <p className="mt-2 text-xs text-gray-500">入力にない条件が足されていないか確認してください。違っていれば作り直せます。</p>
+              </div>
+            ) : null}
+          </CardBody>
+        </Card>
+      ) : null}
       <Card>
         <CardHeader title="概要" />
         <CardBody className="space-y-4 text-sm">
@@ -153,6 +237,204 @@ function Overview({ project, onChanged, onGoTo }: { project: AgentProjectDto; on
           {project.preview_api_url ? <div className="space-y-1 border-t border-gray-100 pt-3"><p className="text-xs text-gray-500">Preview API</p><code className="block overflow-x-auto rounded-md bg-gray-50 px-2 py-1.5 text-xs text-gray-700">POST {project.preview_api_url}</code></div> : null}
         </CardBody>
       </Card>
+      </div>
+    </div>
+  );
+}
+
+/** 業務の流れの1ステップ。このステップで実際に何をするのかを見せる */
+function RequirementRow({
+  index,
+  requirement,
+  operations,
+}: {
+  index: number;
+  requirement: CapabilityRequirementDto;
+  operations: ToolDto[];
+}) {
+  const ready = requirement.state === "resolved";
+  const label = ready ? "準備済み" : requirement.state === "needs_connection" ? "未接続" : "確認が必要";
+  return (
+    <div className="rounded-lg border border-gray-100 px-3 py-3">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-gray-100 text-xs font-medium text-gray-600">{index}</span>
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-gray-900">{requirement.requirement}</p>
+            {operations.length === 0 ? <p className="mt-0.5 text-xs text-gray-500">{requirement.reason}</p> : null}
+          </div>
+        </div>
+        <Badge tone={ready ? "success" : "warning"}>{label}</Badge>
+      </div>
+      {operations.length > 0 ? (
+        <ul className="mt-2.5 space-y-1.5 border-l-2 border-gray-100 pl-3">
+          {operations.map((operation) => (
+            <li key={operation.id} className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-gray-500">{requirement.connector_name}の</span>
+              <span className="font-medium text-gray-800">{operation.display_name}</span>
+              <ToolRiskBadge risk={operation.risk} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {requirement.variables.length > 0 ? (
+        <ul className="mt-2.5 space-y-1.5 border-l-2 border-gray-100 pl-3">
+          {requirement.variables.map((variable) => (
+            <li key={variable.name} className="text-xs">
+              <span className="font-medium text-gray-800">{variable.label}</span>
+              <span className="ml-1.5 text-gray-400">{variable.required ? "必須" : "任意"}</span>
+              {variable.description ? <p className="mt-0.5 text-gray-500">{variable.description}</p> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {requirement.state === "missing" ? (
+        <div className="mt-2.5 pl-3"><ButtonLink href="/integrations" size="sm" variant="secondary">連携サービスを追加</ButtonLink></div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * ブラウザで接続してよい範囲。業務の設定値ではなく安全の境界なので、ここで別に決める。
+ * 決めるまで Preview を作れない（未設定のままだとどこにも接続できない）。
+ */
+function BrowserAccessSetup({
+  agentId,
+  access,
+  domains,
+  onChanged,
+}: {
+  agentId: string;
+  access: BrowserAccess;
+  domains: string[];
+  onChanged: () => Promise<void>;
+}) {
+  const configured = access === "public" || domains.length > 0;
+  const [choice, setChoice] = useState<BrowserAccess>(access);
+  const [text, setText] = useState(domains.join("\n"));
+  const save = useActionMutation(setBrowserAccessAction, { successMessage: "接続範囲を保存し、稼働中の環境に反映しました", onSuccess: onChanged });
+
+  const submit = () =>
+    save.mutate(agentId, {
+      access: choice,
+      allowed_domains: choice === "public" ? [] : text.split("\n").map((line) => line.trim()).filter(Boolean),
+    });
+
+  return (
+    <div className={cn("rounded-lg border px-3 py-3", configured ? "border-gray-100" : "border-amber-200 bg-amber-50/60")}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-medium text-gray-900">ブラウザで接続できる範囲</p>
+          <p className="mt-0.5 text-xs text-gray-600">
+            {configured ? "保存するとPreviewと公開済みのProductionに反映され、次回実行から使われます。Production公開後の変更には管理者権限が必要です。" : "このAgentはWebページを開きます。どこまで接続してよいかを決めてください。"}
+          </p>
+        </div>
+        {configured ? <Badge tone="success">設定済み</Badge> : <Badge tone="warning">未設定</Badge>}
+      </div>
+
+      <div className="mt-2.5 space-y-2">
+        <label className="flex items-start gap-2 text-sm">
+          <input type="radio" className="mt-1" checked={choice === "public"} onChange={() => setChoice("public")} />
+          <span>
+            <span className="font-medium text-gray-900">公開Webサイト全般</span>
+            <span className="mt-0.5 block text-xs text-gray-500">実行のたびに違うURLを渡す使い方はこちらです。</span>
+          </span>
+        </label>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="radio" className="mt-1" checked={choice === "restricted"} onChange={() => setChoice("restricted")} />
+          <span>
+            <span className="font-medium text-gray-900">指定したサイトだけ</span>
+            <span className="mt-0.5 block text-xs text-gray-500">決まった相手とだけやり取りする業務はこちらです。</span>
+          </span>
+        </label>
+        {choice === "restricted" ? (
+          <Textarea
+            rows={3}
+            className="text-xs"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            placeholder={"1行に1つ入力します\nexample.com\ndocs.example.jp"}
+          />
+        ) : null}
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="secondary" loading={save.pending} onClick={() => void submit()}>
+            保存
+          </Button>
+          {save.error ? <p className="text-xs text-red-600">{save.error.message}</p> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 連携サービス1つぶんの接続。上で「使う」にした作業だけを許可して、PreviewとProductionへまとめて設定する */
+function ConnectorSetup({
+  agentId,
+  connectorId,
+  connectorName,
+  connected,
+  capabilities,
+  connections,
+  onChanged,
+}: {
+  agentId: string;
+  connectorId: string;
+  connectorName: string;
+  connected: boolean;
+  capabilities: string[];
+  connections: ConnectionDto[];
+  onChanged: () => Promise<void>;
+}) {
+  const [selected, setSelected] = useState("");
+  const link = useActionMutation(linkAgentConnectionAction, { successMessage: `${connectorName}を設定しました`, onSuccess: onChanged });
+  const connectionId = connections.length === 1 ? connections[0]!.id : selected;
+
+  const apply = async () => {
+    if (!connectionId) return;
+    for (const stage of ["staging", "production"] as Stage[]) {
+      await link.mutate(agentId, { stage, connector_id: connectorId, connection_id: connectionId, allowed_capabilities: capabilities });
+    }
+  };
+
+  if (connections.length === 0) {
+    return (
+      <div className="rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-3">
+        <p className="text-sm font-medium text-gray-900">{connectorName}に接続してください</p>
+        <p className="mt-0.5 text-xs text-gray-600">{connectorName}の認証情報がまだ登録されていません。</p>
+        <ButtonLink href="/integrations" size="sm" variant="secondary" className="mt-2.5">連携サービスを開く</ButtonLink>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-indigo-100 bg-indigo-50/50 px-3 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-medium text-gray-900">{connectorName}の接続</p>
+          <p className="mt-0.5 text-xs text-gray-600">
+            {connected
+              ? `設定済みです。${capabilities.length}個の操作を許可しています。`
+              : `1回の設定で、上のすべての作業に反映されます。${capabilities.length}個の操作を許可します。`}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {connections.length > 1 ? (
+            <Select className="w-48" value={selected} onChange={(event) => setSelected(event.target.value)}>
+              <option value="">接続を選ぶ</option>
+              {connections.map((connection) => (
+                <option key={connection.id} value={connection.id}>{connection.name}</option>
+              ))}
+            </Select>
+          ) : (
+            <span className="text-xs text-gray-600">{connections[0]!.name}</span>
+          )}
+          <Button size="sm" loading={link.pending} disabled={!connectionId} onClick={() => void apply()} icon={<Link2 className="h-4 w-4" />}>
+            {connected ? "更新" : "接続"}
+          </Button>
+        </div>
+      </div>
+      {link.error ? <p className="mt-2 text-xs text-red-600">{link.error.message}</p> : null}
     </div>
   );
 }
@@ -163,7 +445,7 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
 
 function Preview({ project }: { project: AgentProjectDto }) {
   const { organization } = useSession();
-  const deployments = useActionQuery(() => listDeploymentsAction({ agent_id: project.agent.id }), [project.agent.id, organization?.id]);
+  const deployments = useActionQuery(() => listDeploymentsAction({ agent_id: project.agent.id }), [project.agent.id, organization?.id, project.deployments.map((deployment) => `${deployment.id}:${deployment.status}`).join(",")]);
   const preview = project.deployments.find((deployment) => deployment.stage === "staging" && deployment.status === "active");
   if (!preview) return <Card><CardBody><Alert tone="info" title="Previewはまだありません">Overviewで不足項目を設定し、Previewを作成してください。</Alert></CardBody></Card>;
   return (
@@ -323,13 +605,17 @@ function ConnectionLinkForm({ agentId, stage, connector, connections, selected, 
 }
 
 function VariableSettings({ project, onChanged }: { project: AgentProjectDto; onChanged: () => Promise<void> }) {
-  const required = project.agent.capability_resolution.missing_variables;
-  return <Card><CardHeader title="Variables" description="環境ごとの設定値です。認証情報はここに入力せずConnectionsで管理します。" /><CardBody className="grid gap-5 lg:grid-cols-2">{(["staging", "production"] as Stage[]).map((stage) => <VariableForm key={stage} stage={stage} agentId={project.agent.id} names={required.length ? required : ["BENCHMARK_URL", "ACCOUNT_ID", "BRAND_TONE"]} initial={project.environments.find((environment) => environment.stage === stage)?.variables ?? {}} onChanged={onChanged} />)}</CardBody></Card>;
+  const seen = new Set<string>();
+  const variables = project.agent.capability_resolution.requirements
+    .flatMap((requirement) => requirement.variables)
+    .filter((variable) => (seen.has(variable.name) ? false : seen.add(variable.name)));
+  if (variables.length === 0) return null;
+  return <Card><CardHeader title="設定値" description="PreviewとProductionで別々に持てます。パスワードやAPIキーはここではなくConnectionsで管理します。" /><CardBody className="grid gap-5 lg:grid-cols-2">{(["staging", "production"] as Stage[]).map((stage) => <VariableForm key={stage} stage={stage} agentId={project.agent.id} variables={variables} initial={project.environments.find((environment) => environment.stage === stage)?.variables ?? {}} onChanged={onChanged} />)}</CardBody></Card>;
 }
 
-function VariableForm({ stage, agentId, names, initial, onChanged }: { stage: Stage; agentId: string; names: string[]; initial: Record<string, string>; onChanged: () => Promise<void> }) {
+function VariableForm({ stage, agentId, variables, initial, onChanged }: { stage: Stage; agentId: string; variables: CapabilityVariableDto[]; initial: Record<string, string>; onChanged: () => Promise<void> }) {
   const [values, setValues] = useState<Record<string, string>>(initial);
-  const save = useActionMutation(setAgentEnvironmentAction, { successMessage: `${stage === "staging" ? "Preview" : "Production"} Variablesを保存しました`, onSuccess: onChanged });
+  const save = useActionMutation(setAgentEnvironmentAction, { successMessage: `${stage === "staging" ? "Preview" : "Production"}の設定値を保存しました`, onSuccess: onChanged });
   const submit = (event: FormEvent) => { event.preventDefault(); void save.mutate(agentId, { stage, variables: values }); };
-  return <form onSubmit={submit} className="space-y-3 rounded-xl border border-gray-200 p-4"><h3 className="text-sm font-semibold text-gray-900">{stage === "staging" ? "Preview" : "Production"}</h3>{names.map((name) => <Field key={name} label={name}><Input value={values[name] ?? ""} onChange={(event) => setValues((current) => ({ ...current, [name]: event.target.value }))} placeholder={name === "BENCHMARK_URL" ? "https://..." : ""} /></Field>)}<Button type="submit" size="sm" variant="secondary" loading={save.pending}>保存</Button>{save.error ? <p className="text-xs text-red-600">{save.error.message}</p> : null}</form>;
+  return <form onSubmit={submit} className="space-y-3 rounded-xl border border-gray-200 p-4"><h3 className="text-sm font-semibold text-gray-900">{stage === "staging" ? "Preview" : "Production"}</h3>{variables.map((variable) => <Field key={variable.name} label={`${variable.label}${variable.required ? "" : "（任意）"}`} hint={variable.description || undefined}><Input value={values[variable.name] ?? ""} onChange={(event) => setValues((current) => ({ ...current, [variable.name]: event.target.value }))} placeholder={variable.example ?? ""} /></Field>)}<Button type="submit" size="sm" variant="secondary" loading={save.pending}>保存</Button>{save.error ? <p className="text-xs text-red-600">{save.error.message}</p> : null}</form>;
 }

@@ -32,6 +32,13 @@ const EMPTY_INPUT_SCHEMA: ToolInputSchema = { type: "object", properties: {}, ad
 /** Agent Studio が実行する function tool の実装種別 */
 const httpsUrl = z.url().refine((u) => u.startsWith("https://"), "https の URL を指定してください");
 
+/** 固定ヘッダに使える名前。認証や本文の指定は Agent Studio 側が決めるので上書きさせない */
+const RESERVED_HEADERS = ["authorization", "content-type", "accept", "user-agent", "idempotency-key", "cookie", "host"];
+export const staticHeaderNameSchema = z
+  .string()
+  .regex(/^[A-Za-z][A-Za-z0-9-]{0,63}$/, "ヘッダ名は半角英数字とハイフンで指定してください")
+  .refine((name) => !RESERVED_HEADERS.includes(name.toLowerCase()), "このヘッダは指定できません");
+
 export const studioFunctionSpecSchema = z.discriminatedUnion("handler", [
   z
     .object({
@@ -54,6 +61,8 @@ export const studioFunctionSpecSchema = z.discriminatedUnion("handler", [
       argument_location: z.enum(["query", "body"]).optional(),
       /** Agent Studio内だけで冪等性キー生成に使い、接続先へは送らない入力フィールド */
       idempotency_key_field: toolNameSchema.optional(),
+      /** API が必須とする固定ヘッダ（例: Notion-Version）。認証情報は入れず Connection で管理する */
+      headers: z.record(staticHeaderNameSchema, z.string().min(1).max(200)).optional(),
     })
     .strict(),
 ]);

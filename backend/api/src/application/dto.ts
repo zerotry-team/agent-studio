@@ -90,6 +90,18 @@ export const toAgentVersionDto = (v: agent_versions): AgentVersionDto => ({
   published_at: iso(v.published_at),
 });
 
+/** 設定値を能力へ紐づける前に保存された解決結果にも variables を持たせる。 */
+const toCapabilityResolution = (raw: unknown): AgentDto["capability_resolution"] => {
+  const resolution = (raw ?? {}) as AgentDto["capability_resolution"];
+  return {
+    ...resolution,
+    requirements: (resolution.requirements ?? []).map((requirement) => ({ ...requirement, variables: requirement.variables ?? [] })),
+    selected_tools: resolution.selected_tools ?? [],
+    missing_variables: resolution.missing_variables ?? [],
+    ready: resolution.ready ?? false,
+  };
+};
+
 export const toAgentDto = (
   a: agents & { versions?: agent_versions[] | Pick<agent_versions, "status" | "version">[] },
   includeVersions = false,
@@ -101,7 +113,9 @@ export const toAgentDto = (
     name: a.name,
     description: a.description,
     project_brief: a.project_brief,
-    capability_resolution: a.capability_resolution as unknown as AgentDto["capability_resolution"],
+    capability_resolution: toCapabilityResolution(a.capability_resolution),
+    browser_access: (a.browser_access === "public" ? "public" : "restricted") as AgentDto["browser_access"],
+    browser_allowed_domains: Array.isArray(a.browser_allowed_domains) ? (a.browser_allowed_domains as string[]) : [],
     latest_version: a.latest_version,
     published_version: published.length > 0 ? Math.max(...published) : null,
     created_at: a.created_at.toISOString(),

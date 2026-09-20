@@ -1,8 +1,13 @@
 import { isIP } from "node:net";
 
-export function hostnameAllowed(hostname: string, allowedDomains: string[]): boolean {
+/**
+ * 接続先のホスト名が許されるか。
+ * allowPublicWeb でも IP 直指定は拒否する（private アドレスの判定は addressIsPublic が行う）。
+ */
+export function hostnameAllowed(hostname: string, allowedDomains: string[], allowPublicWeb = false): boolean {
   const host = hostname.toLowerCase().replace(/\.$/, "");
   if (isIP(host)) return false;
+  if (allowPublicWeb) return true;
   return allowedDomains.some((entry) => {
     const domain = entry.toLowerCase().replace(/^\*\./, "").replace(/\.$/, "");
     return host === domain || host.endsWith(`.${domain}`);

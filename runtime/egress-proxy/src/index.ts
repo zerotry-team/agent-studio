@@ -5,10 +5,14 @@ import { addressIsPublic, hostnameAllowed, parseConnectTarget } from "./policy.j
 
 const port = Number(process.env.PORT ?? 3128);
 const allowedDomains = [...new Set((process.env.ALLOWED_DOMAINS ?? "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))];
-if (allowedDomains.length === 0) throw new Error("ALLOWED_DOMAINSが空です。deny-allではなく設定不備として起動を停止します");
+/** 公開Webサイト全般を許可する設定。IP 直指定と private アドレスは、この場合も拒否する */
+const allowPublicWeb = process.env.ALLOW_PUBLIC_WEB === "true";
+if (!allowPublicWeb && allowedDomains.length === 0) {
+  throw new Error("ALLOWED_DOMAINSが空です。deny-allではなく設定不備として起動を停止します");
+}
 
 async function resolveAllowed(hostname: string): Promise<{ address: string; family: number }> {
-  if (!hostnameAllowed(hostname, allowedDomains)) throw new Error("domain_not_allowed");
+  if (!hostnameAllowed(hostname, allowedDomains, allowPublicWeb)) throw new Error("domain_not_allowed");
   const addresses = await lookup(hostname, { all: true, verbatim: true });
   if (addresses.length === 0 || addresses.some((item) => !addressIsPublic(item.address))) throw new Error("address_not_allowed");
   return addresses[0]!;
@@ -73,7 +77,7 @@ server.on("connect", async (req, client, head) => {
   }
 });
 
-server.listen(port, "0.0.0.0", () => console.log(JSON.stringify({ level: "info", message: "Egress Proxy started", port, allowed_domains: allowedDomains })));
+server.listen(port, "0.0.0.0", () => console.log(JSON.stringify({ level: "info", message: "Egress Proxy started", port, allowed_domains: allowedDomains, allow_public_web: allowPublicWeb })));
 const shutdown = () => server.close(() => process.exit(0));
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);

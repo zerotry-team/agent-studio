@@ -16,7 +16,7 @@ export function domainAllowed(hostname: string, allowedDomains: string[]): boole
   });
 }
 
-export function assertUrlAllowed(raw: string, allowedDomains: string[]): URL {
+export function assertUrlAllowed(raw: string, allowedDomains: string[], allowPublicWeb = false): URL {
   let url: URL;
   try {
     url = new URL(raw);
@@ -26,7 +26,8 @@ export function assertUrlAllowed(raw: string, allowedDomains: string[]): URL {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("http / https 以外のURLは開けません");
   const host = url.hostname.toLowerCase();
   if (BLOCKED_HOSTS.has(host) || blockedIp(host)) throw new Error("Private IP、Link-local、Metadata endpoint、直接IPへの接続は許可されていません");
-  if (!domainAllowed(host, allowedDomains)) throw new Error(`許可されていないドメインです: ${host}`);
+  // 公開Web全般を許可する設定でも、上の IP / metadata の拒否は必ず通す
+  if (!allowPublicWeb && !domainAllowed(host, allowedDomains)) throw new Error(`許可されていないドメインです: ${host}`);
   url.username = "";
   url.password = "";
   return url;

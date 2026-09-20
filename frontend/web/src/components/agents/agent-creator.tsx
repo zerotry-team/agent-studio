@@ -103,6 +103,11 @@ export function AgentCreator() {
               <div>
                 <p className="font-medium">Agentを準備しています</p>
                 <p className="mt-0.5 text-accent-800">必要な能力、Connection、承認ルールを確認しています（{elapsed}秒）</p>
+                {elapsed >= 45 ? (
+                  <p className="mt-1 text-xs text-accent-800">
+                    連携サービスや業務の手順が多いほど時間がかかります。数分かかることがあるので、このままお待ちください。
+                  </p>
+                ) : null}
               </div>
             </div>
           ) : null}

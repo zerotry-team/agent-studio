@@ -84,6 +84,8 @@ export class StudioFunctionExecutor {
     });
     const url = await assertPublicUrl(`${tool.spec.base_url}${path}`);
     const headers: Record<string, string> = { accept: "application/json", "user-agent": "agent-studio" };
+    // API が必須とする固定ヘッダ。認証・本文の指定より先に入れ、あとから上書きされるようにする
+    for (const [name, value] of Object.entries(tool.spec.headers ?? {})) headers[name.toLowerCase()] = value;
     if (link.connector.auth_type !== "none") {
       if (!link.connection.secret_locator) throw new Error("Connectionの認証情報が未設定です");
       const secret = await this.secrets.get(link.connection.secret_locator);

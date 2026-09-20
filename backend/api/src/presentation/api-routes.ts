@@ -6,6 +6,9 @@ import {
   createAgentVersionSchema,
   createConnectionSchema,
   createConnectorSchema,
+  discoverMcpToolsSchema,
+  setBrowserAccessSchema,
+  updateConnectorSchema,
   createDeploymentSchema,
   createEvalCaseSchema,
   createOrganizationSchema,
@@ -98,6 +101,10 @@ export function createApiRoutes(deps: Deps, s: Services) {
 
   org.get("/connectors", async (c) => c.json(await s.tools.listConnectors(c.get("member"))));
   org.post("/connectors", async (c) => c.json(await s.tools.createConnector(c.get("member"), await json(c, createConnectorSchema)), 201));
+  org.post("/connectors/discover", async (c) => c.json(await s.tools.discoverMcpTools(c.get("member"), await json(c, discoverMcpToolsSchema))));
+  org.patch("/connectors/:id", async (c) =>
+    c.json(await s.tools.updateConnector(c.get("member"), id(c.req.param("id")), await json(c, updateConnectorSchema))),
+  );
   org.get("/connectors/:id", async (c) => c.json(await s.tools.getConnector(c.get("member"), id(c.req.param("id")))));
 
   org.get("/connections", async (c) => c.json(await s.tools.listConnections(c.get("member"))));
@@ -150,6 +157,9 @@ export function createApiRoutes(deps: Deps, s: Services) {
   );
   org.post("/agents/validate", async (c) => c.json(await s.agents.validate(c.get("member"), (await json(c, createAgentSchema)).manifest)));
   org.get("/agents/:id", async (c) => c.json(await s.agents.get(c.get("member"), id(c.req.param("id")))));
+  org.put("/agents/:id/browser-access", async (c) =>
+    c.json(await s.agents.setBrowserAccess(c.get("member"), id(c.req.param("id")), await json(c, setBrowserAccessSchema))),
+  );
   org.get("/agents/:id/project", async (c) => c.json(await s.agents.getProject(c.get("member"), id(c.req.param("id")))));
   org.put("/agents/:id/connections", async (c) => {
     const actor = c.get("member");

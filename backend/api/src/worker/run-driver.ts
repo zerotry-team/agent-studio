@@ -25,6 +25,7 @@ import type {
 } from "../infrastructure/openai/agents-api.js";
 import type { Logger } from "../logger.js";
 import type { StudioFunctionExecutor } from "./studio-functions.js";
+import { apiErrorDiagnostic } from "./api-error-diagnostic.js";
 import { parseExternalJobResponse } from "./external-jobs.js";
 
 type Outcome = "continue" | "done" | "released";
@@ -43,20 +44,13 @@ export function browserConfigForRun(config: CompiledAgentConfig): StartSessionJo
   const browserTools = config.runtime_tools.filter((name) => name.startsWith(BROWSER_TOOL_PREFIX) || name === "computer_action");
   if (browserTools.length === 0) return undefined;
 
-  const explicit = config.variables?.BROWSER_ALLOWED_DOMAINS?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
-  const fromUrls = Object.values(config.variables ?? {}).flatMap((value) => {
-    try {
-      const url = new URL(value);
-      return url.protocol === "http:" || url.protocol === "https:" ? [url.hostname.toLowerCase()] : [];
-    } catch {
-      return [];
-    }
-  });
-  const allowedDomains = [...new Set([...explicit, ...fromUrls].map((domain) => domain.toLowerCase()))];
+  // 接続してよい範囲は Agent の設定で決める。業務の設定値からは推測しない
+  const access = config.browser_access ?? { access: "restricted" as const, allowed_domains: [] };
   return {
     enabled: true,
     mode: "public_ephemeral",
-    allowed_domains: allowedDomains,
+    allow_public_web: access.access === "public",
+    allowed_domains: access.access === "public" ? [] : [...new Set(access.allowed_domains.map((domain) => domain.toLowerCase()))],
     code_execution_enabled: browserTools.includes("browser_exec_js"),
     computer_actions_enabled: browserTools.includes("computer_action"),
     viewport: { width: 1440, height: 900 },
@@ -85,6 +79,10 @@ interface DriverState {
   lastTurnError: string | null;
   rootTurnIds: Set<string>;
   handledCalls: Set<string>;
+  /** 今のターンで何か操作をしたか。何もせず終わったら利用者への質問とみなす */
+  turnDidWork: boolean;
+  /** 入力を送ったあとターンが始まったか。始まる前の idle で打ち切らないため */
+  turnStarted: boolean;
   callCounts: Map<string, number>;
 }
 
@@ -115,6 +113,13 @@ export class RunDriver {
     try {
       const state = await this.prepare();
       if (!state) return;
+      const settings = await this.deps.db.org(this.organizationId, (tx) =>
+        tx.organization_openai_settings.findUnique({ where: { organization_id: this.organizationId } }),
+      );
+      this.log.info({ phase: "session.prepared", session_id: state.openaiSessionId, model: state.config.model,
+        openai_project_id: settings?.openai_project_id ?? null, environment_type: state.environmentType,
+        browser_access: state.config.browser_access, runtime_tool_count: state.config.runtime_tools.length,
+      }, "実行の診断情報");
       await this.loop(state);
     } catch (e) {
       this.log.error({ err: e }, "実行を進められませんでした");
@@ -157,6 +162,8 @@ export class RunDriver {
       lastTurnError: null,
       rootTurnIds: new Set<string>(),
       handledCalls: new Set<string>(),
+      turnDidWork: false,
+      turnStarted: false,
       callCounts: new Map<string, number>(),
     };
 
@@ -171,10 +178,10 @@ export class RunDriver {
         connected: loaded.session.status === "connected",
       };
     }
-    return { ...base, ...(await this.createSession(config)) };
+    return { ...base, ...(await this.createSession(config, base.run)) };
   }
 
-  private async createSession(config: CompiledAgentConfig) {
+  private async createSession(config: CompiledAgentConfig, runContext: { agent_id: string; stage: "staging" | "production" }) {
     const env = config.environment;
     const { env: appEnv } = this.deps;
     let gateway: { url: string; sessionToken: string } | undefined;
@@ -205,6 +212,26 @@ export class RunDriver {
           if (!c.secret_locator) continue;
           const [vaultId, credentialId] = c.secret_locator.split(":");
           if (vaultId) vaults.set(c.id, { vaultId, credentialId: credentialId ?? null });
+        }
+      }
+      // 連携サービスとして登録した MCP は、この Stage に紐づけた Connection から認証情報を引く。
+      const mcpConnectorIds = config.service_mcp_tools
+        .filter((s) => !s.connection_id && s.connector_id)
+        .map((s) => s.connector_id!);
+      if (mcpConnectorIds.length > 0) {
+        const links = await tx.agent_connection_links.findMany({
+          where: {
+            organization_id: this.organizationId,
+            agent_id: runContext.agent_id,
+            stage: runContext.stage,
+            connector_id: { in: [...new Set(mcpConnectorIds)] },
+          },
+          include: { connection: true },
+        });
+        for (const link of links) {
+          if (link.connection.status !== "connected" || !link.connection.secret_locator) continue;
+          const [vaultId, credentialId] = link.connection.secret_locator.split(":");
+          if (vaultId) vaults.set(link.connector_id, { vaultId, credentialId: credentialId ?? null });
         }
       }
 
@@ -326,17 +353,22 @@ export class RunDriver {
               controller.abort();
             }
           })
-          .catch((e) => this.log.warn({ err: e }, "状態の確認に失敗しました"));
+          .catch((e) => this.log.warn({ ...apiErrorDiagnostic(e), phase: "watchdog", session_id: state.openaiSessionId }, "状態の確認に失敗しました"));
       }, WATCHDOG_MS);
 
+      let phase = "stream.open";
+      const attemptStarted = Date.now();
+      this.log.info({ phase, attempt, session_id: state.openaiSessionId }, "イベント接続を開始します");
       try {
         // ストリームを開いてから状態を合わせる（開く前に起きたことを取りこぼさないため）
         const stream = await this.api.streamEvents(state.openaiSessionId, controller.signal);
+        phase = "session.reconcile";
         const initial = await this.reconcile(state);
         if (initial !== "continue") {
           decided = initial;
           return;
         }
+        phase = "stream.receive";
         for await (const event of stream) {
           const outcome = await this.handleEvent(state, event);
           if (outcome !== "continue") {
@@ -346,7 +378,15 @@ export class RunDriver {
         }
       } catch (e) {
         if (decided || this.shutdown.aborted) return;
-        this.log.warn({ err: e, attempt }, "イベントの受信が途切れました。つなぎ直します");
+        const diagnostic = { ...apiErrorDiagnostic(e), phase, attempt, elapsed_ms: Date.now() - attemptStarted,
+          session_id: state.openaiSessionId, model: state.config.model,
+          connected: state.connected, turn_started: state.turnStarted, turn_did_work: state.turnDidWork,
+        };
+        this.log.error(diagnostic, "OpenAIの処理でエラーが発生しました");
+        await this.deps.db.org(this.organizationId, (tx) => appendRunEvent(tx, state.run, "error",
+          `OpenAIエラー [${diagnostic.code ?? "unknown"}] ${diagnostic.message}${diagnostic.request_id ? `（Request ID: ${diagnostic.request_id}）` : ""}`,
+          diagnostic,
+        ));
         await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** attempt, 15_000)));
       } finally {
         clearInterval(watchdog);
@@ -361,6 +401,9 @@ export class RunDriver {
   /** つなぎ直したときに、現在の状態を取り込む */
   private async reconcile(state: DriverState): Promise<Outcome> {
     const session = await this.api.retrieveSession(state.openaiSessionId);
+    this.log.info({ phase: "session.reconcile", session_id: state.openaiSessionId, api_status: session.status,
+      has_error: Boolean(session.error), turn_started: state.turnStarted, turn_did_work: state.turnDidWork,
+    }, "再接続時のセッション状態");
     if (!state.connected && state.environmentId && state.environmentType !== "none") {
       const status = await this.api.retrieveEnvironmentStatus(state.environmentId).catch(() => "pending");
       if (status === "connected") await this.onEnvironment(state, "connected", null);
@@ -384,6 +427,9 @@ export class RunDriver {
   }
 
   private async handleEvent(state: DriverState, event: AgentSessionEvent): Promise<Outcome> {
+    if (!event.type.includes("delta")) {
+      this.log.info({ phase: "session.event", session_id: state.openaiSessionId, event_type: event.type }, "OpenAIイベントを受信しました");
+    }
     switch (event.type) {
       case "agent.session.environment.pending":
       case "agent.session.environment.ready":
@@ -396,6 +442,8 @@ export class RunDriver {
         if (event.turn.subagent_id === null) {
           state.rootTurnIds.add(event.turn_id);
           state.rootTurnActive = true;
+          state.turnDidWork = false;
+          state.turnStarted = true;
           state.idle = false;
           if (state.run.status !== "running") await this.setStatus(state, "running");
         }
@@ -407,6 +455,7 @@ export class RunDriver {
 
       case "agent.session.requires_action":
         state.idle = false;
+        state.turnDidWork = true;
         return this.handleRequiredActions(state, event.session.required_actions);
 
       case "agent.session.turn.completed":
@@ -467,6 +516,7 @@ export class RunDriver {
           }
           break;
         case "mcp_call": {
+          state.turnDidWork = true;
           const failed = item.status !== "completed" || Boolean(item.error);
           if (failed) {
             await tx.runs.updateMany({ where: { id: this.runId, outcome: "pending" }, data: { outcome: "completed_with_errors" } });
@@ -481,6 +531,7 @@ export class RunDriver {
           break;
         }
         case "command_execution":
+          state.turnDidWork = true;
           await appendRunEvent(tx, state.run, "tool.call", `コマンドを実行しました: ${item.command.slice(0, 120)}`, {
             kind: "command",
             command: item.command.slice(0, 2000),
@@ -489,6 +540,7 @@ export class RunDriver {
           });
           break;
         case "web_search_call":
+          state.turnDidWork = true;
           await appendRunEvent(tx, state.run, "tool.call", "Web を検索しました", { kind: "web_search", action: item.action });
           break;
         default:
@@ -513,11 +565,15 @@ export class RunDriver {
         },
       ];
       // 同じ入力を二重に送らないよう、入力の ID から冪等キーを作る
+      const inputStarted = Date.now();
+      this.log.info({ phase: "input.send.start", session_id: state.openaiSessionId, input_count: pending.length }, "指示の送信を開始します");
       await this.api.sendEvents(state.openaiSessionId, events, `run-input-${pending.map((p) => p.id).join(",")}`.slice(0, 250));
+      this.log.info({ phase: "input.send.done", session_id: state.openaiSessionId, elapsed_ms: Date.now() - inputStarted }, "指示の送信が完了しました");
       await this.deps.db.org(this.organizationId, (tx) =>
         tx.run_inputs.updateMany({ where: { id: { in: pending.map((p) => p.id) } }, data: { status: "sent", sent_at: new Date() } }),
       );
       state.idle = false;
+      state.turnStarted = false;
       state.lastTurnError = null;
       return "continue";
     }
@@ -532,6 +588,20 @@ export class RunDriver {
     );
     if (pendingApprovals > 0) {
       await this.setStatus(state, "waiting_approval");
+      return "released";
+    }
+
+    // 入力を送ったあとターンが始まる前の idle では何も判断しない（開始を待つ）
+    if (!state.turnStarted) return "continue";
+
+    // 何も操作せずにターンが終わったのは、Agent が利用者へ聞き返したとき。
+    // ここで終わらせると返答できなくなるので、返答待ちにして再開できる状態で離す。
+    if (!state.turnDidWork) {
+      this.log.warn({ phase: "idle.waiting_input", session_id: state.openaiSessionId, turn_started: state.turnStarted,
+        turn_did_work: state.turnDidWork, has_turn_error: Boolean(state.lastTurnError),
+      }, "操作実績のないターンを返答待ちにします");
+      await this.saveArtifacts(state);
+      await this.setStatus(state, "waiting_input");
       return "released";
     }
 

@@ -40,6 +40,7 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 | `egress-proxy/` | `@agent-studio/egress-proxy` / `agent-studio/egress-proxy` | Browser専用のInternet出口。FQDN allowlist、IP literal、private/link-local address拒否を強制 |
 | `browser-worker/` | 旧 `agent-studio/browser-worker` | 移行前の常駐Playwright MCP。新規デプロイでは使用しない |
 | `demo-internal-api/` | `@agent-studio/demo-internal-api` / `agent-studio/demo-internal-api` | 受け入れシナリオ用の社内 API モック（商品と価格） |
+| `demo-factoring-api/` | `@agent-studio/demo-factoring-api` | ファクタリング審査シナリオ用の基幹システムモック（申込者・請求書・入金実績）。データは PostgreSQL の `factoring_demo` データベース。ローカル専用でイメージは作らない。データの中身と投入手順は [demo-factoring-api/README.md](demo-factoring-api/README.md) |
 
 ## Runtime Controller
 
@@ -91,6 +92,7 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 | `ENVIRONMENT_KEY_STORE` | `secrets-manager` | `memory` にすると Secrets Manager を使わない |
 | `SESSION_LAUNCHER` | `ecs` | `docker`（`docker run --rm -d` で手元に Worker を起動）/ `noop`（起動したものとして扱う） |
 | `SESSION_WORKER_IMAGE` / `SESSION_WORKER_DOCKER_NETWORK` | | docker のときのイメージ・ネットワーク |
+| `BROWSER_WORKER_IMAGE` / `BROWSER_WORKER_DOCKER_NETWORK` | | `BROWSER_LAUNCHER=docker` のときのイメージ・ネットワーク。ネットワークを指定すると Tool Gateway から見た宛先はコンテナ名（`as-browser-<session_id>:8931`）、指定しないと `127.0.0.1:<公開ポート>` になる（Tool Gateway を手元で動かすとき用に、コンテナの 8931 を loopback へ公開する） |
 
 ## Tool Gateway
 
@@ -150,18 +152,51 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 | `POST /products/:id/price` | `{ "price_change": 数値 }` だけ価格を変える（0 円未満にはしない）。`{ product_id, before, after }` を返す |
 | `GET /health` | |
 
+## ファクタリング基幹システムモック（demo-factoring-api）
+
+審査シナリオ用。業務データは Agent Studio の DB には置かず、PostgreSQL の別データベース `factoring_demo` に置く（CLAUDE.md「組織の分離」）。
+`Authorization: Bearer ${FACTORING_API_TOKEN}` が必要（`/health` を除く）。ローカルで未設定のときは `local-factoring-token` を使う。
+
+| メソッド・パス | 内容 |
+|---|---|
+| `GET /applications?status=申込中` | 審査待ちの買取申込の一覧 |
+| `GET /applications/:invoice_id` | 申込 1 件の審査材料（申込者・売掛先・請求書・入金実績・同じ請求書番号の過去の申込・過去の審査結果） |
+| `GET /counterparties/:id/payments` | 売掛先の入金実績（申込をまたいで見る） |
+| `POST /screenings` | 審査結果の記録（`invoice_id` / `decision`（可・否・保留）/ `reason` は必須、`advance_rate` と `fee_rate` は 0〜1） |
+| `GET /health` | |
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `PORT` | `8091` | |
+| `FACTORING_API_TOKEN` | （本番は必須） | Tool Gateway が Bearer で付ける値 |
+| `FACTORING_DATABASE_URL` | `postgresql://postgres:postgres@localhost:5434/factoring_demo` | |
+
+DB の作り直しとデータの投入（`db/schema.sql` は既存テーブルを落として作り直す）。
+
+```bash
+docker exec agent-studio-postgres-1 createdb -U postgres factoring_demo   # 初回だけ
+yarn workspace @agent-studio/demo-factoring-api db:load                   # データだけなら db:load:seed-only
+```
+
+データはすべて架空。金額や入金の遅れ方を変えて試すときは `db/seed.sql` を直して入れ直す。
+データの中身、4 件の申込がそれぞれ別の結論になる理由、本番の DB へ入れるときの手順は
+[demo-factoring-api/README.md](demo-factoring-api/README.md) にまとめてある。
+
 ## ローカルで動かす
 
 前提: Docker、Node 22、`yarn install` 済み、Agent Studio の API がローカル（`http://localhost:3200`）で `RUNTIME_IDENTITY_MODE=dev` で動いていること（API の `RUNTIME_SERVER_ID` の既定は `agent-studio-local`）。
 
 1. Agent Studio で Runtime を用意し、Bootstrap Token を発行する。シードではアカウント ID `111111111111`、ロール名 `as-sample-a-dev-runtime` の Runtime が作られる。
 
-2. パッケージをビルドし、Session Worker のイメージを作る。
+2. パッケージをビルドし、Worker のイメージを作る。Browser を使わないなら 2 つ目は不要。
 
    ```bash
    yarn workspace @agent-studio/contracts build
    docker build --platform linux/amd64 -f runtime/session-worker/Dockerfile -t agent-studio/session-worker:local .
+   docker build -f runtime/browser-session-worker/Dockerfile -t agent-studio/browser-worker:local .
    ```
+
+   Browser Worker は動かす機械と同じ CPU 向けに作る（`--platform` を付けない）。Apple Silicon で amd64 にすると Chromium がエミュレーションになり、実用にならない。
 
 3. 社内 API モック（ターミナル 1）
 
@@ -169,16 +204,23 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
    DEMO_API_TOKEN=local-demo-token yarn workspace @agent-studio/demo-internal-api dev
    ```
 
-4. Tool Gateway（ターミナル 2）。パスは `runtime/tool-gateway` からの相対パス。
+4. ファクタリング基幹システムモック（ターミナル 2）。審査シナリオを試すときだけ。
+
+   ```bash
+   yarn workspace @agent-studio/demo-factoring-api dev
+   ```
+
+5. Tool Gateway（ターミナル 3）。パスは `runtime/tool-gateway` からの相対パス。
 
    ```bash
    TOOL_CONFIG_PATH=examples/tool-config.local.yaml \
    CONNECTION_SECRETS_SOURCE=env \
    CONNECTION_SECRET_DEMO_INTERNAL_API=local-demo-token \
+   CONNECTION_SECRET_FACTORING_DEMO_API=local-factoring-token \
    yarn workspace @agent-studio/tool-gateway dev
    ```
 
-5. Runtime Controller（ターミナル 3）
+6. Runtime Controller（ターミナル 4）
 
    ```bash
    AGENT_STUDIO_URL=http://localhost:3200 \
@@ -187,6 +229,7 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
    BOOTSTRAP_TOKEN=<手順 1 のトークン> \
    ENVIRONMENT_KEY_STORE=memory \
    SESSION_LAUNCHER=docker SESSION_WORKER_IMAGE=agent-studio/session-worker:local \
+   BROWSER_LAUNCHER=docker BROWSER_WORKER_IMAGE=agent-studio/browser-worker:local \
    GATEWAY_PUBLIC_URL=http://host.docker.internal:8080/mcp \
    yarn workspace @agent-studio/runtime-controller dev
    ```
@@ -194,16 +237,31 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
    - 登録後は Bootstrap Token が無くても `token` で認証できる（dev の身元で Runtime を特定するため）。
    - `ENVIRONMENT_KEY_STORE=memory` で再起動した場合、docker の Worker を起動するときに環境キーを Agent Studio（`/runtime/v1/environment-key`）から取り直す。
    - Worker を起動せずに Controller と Tool Gateway だけを試すときは `SESSION_LAUNCHER=noop`。
+   - `BROWSER_LAUNCHER=docker` のとき、Browser Task は Run に Browser ツールが含まれるときだけ起動する。`BROWSER_WORKER_DOCKER_NETWORK` を指定しなければコンテナの 8931 が loopback の空きポートへ公開され、手元の Tool Gateway から `127.0.0.1:<公開ポート>` で届く。Tool Gateway も docker で動かすなら、同じネットワーク名を両方に指定する。
+   - 開けるサイトは Run ごとの allowlist で決まる。Agent の Variables に `BROWSER_ALLOWED_DOMAINS`（カンマ区切り）を入れるか、`https://...` 形式の Variable を置く（ホスト名が自動で allowlist に入る）。
    - Agent Studio 側が `AGENTS_API_MODE=fake` のときは `remote_url` が実在しないため、docker の Worker は接続できずに終了する（`worker_failed` になる）。
 
-6. 動作確認
+7. 動作確認
 
    ```bash
    curl -s localhost:8081/internal/health        # Controller（auth_state が active になる）
    curl -s localhost:8082/internal/catalog       # Tool Gateway のカタログ
+   curl -s localhost:8091/health                 # ファクタリング基幹システムモック
    ```
 
    Session Worker の代わりに MCP クライアント（`@modelcontextprotocol/sdk`）で `http://localhost:8080/mcp` に `Authorization: Bearer <セッション用トークン>` を付けて `tools/list` / `tools/call` を呼べる。
+
+   Browser ツールだけを試すなら、Controller も Tool Gateway も要らない。Worker を単体で起動して MCP を直接叩く（Playwright の Chromium が手元にあれば docker も要らない）。
+
+   ```bash
+   docker run --rm -p 127.0.0.1:8931:8931 \
+     -e BROWSER_SESSION_TOKEN=local-browser-token \
+     -e BROWSER_ALLOWED_DOMAINS=example.com \
+     agent-studio/browser-worker:local
+   curl -s localhost:8931/health
+   ```
+
+   エンドポイントは `http://127.0.0.1:8931/mcp/local-browser-token`。`initialize` のあと `tools/call` で `browser_navigate` を呼ぶ。
 
 ## テスト・ビルド
 
@@ -211,6 +269,7 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 yarn workspace @agent-studio/runtime-controller type-check && yarn workspace @agent-studio/runtime-controller test && yarn workspace @agent-studio/runtime-controller build
 yarn workspace @agent-studio/tool-gateway type-check && yarn workspace @agent-studio/tool-gateway test && yarn workspace @agent-studio/tool-gateway build
 yarn workspace @agent-studio/demo-internal-api type-check && yarn workspace @agent-studio/demo-internal-api test && yarn workspace @agent-studio/demo-internal-api build
+yarn workspace @agent-studio/demo-factoring-api type-check && yarn workspace @agent-studio/demo-factoring-api test && yarn workspace @agent-studio/demo-factoring-api build
 yarn workspace @agent-studio/browser-session-worker type-check && yarn workspace @agent-studio/browser-session-worker test && yarn workspace @agent-studio/browser-session-worker build
 yarn workspace @agent-studio/egress-proxy type-check && yarn workspace @agent-studio/egress-proxy test && yarn workspace @agent-studio/egress-proxy build
 ```

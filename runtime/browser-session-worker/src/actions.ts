@@ -55,7 +55,7 @@ export async function callBrowserTool(session: BrowserSession, name: string, arg
   try {
     switch (name) {
       case "browser_navigate": {
-        const url = assertUrlAllowed(String(args.url ?? ""), session.config.allowedDomains);
+        const url = assertUrlAllowed(String(args.url ?? ""), session.config.allowedDomains, session.config.allowPublicWeb);
         await page.goto(url.toString(), { waitUntil: "domcontentloaded" });
         return afterAction(session, `opened ${page.url()}`);
       }

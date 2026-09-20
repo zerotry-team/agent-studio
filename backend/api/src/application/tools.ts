@@ -2,8 +2,14 @@ import type { Prisma } from "@prisma/client";
 import {
   createToolInputSchema,
   createConnectorSchema,
+  updateConnectorSchema,
+  discoverMcpToolsSchema,
   toolVersionSpecSchema,
   type ConnectorDto,
+  type ConnectorOperationInput,
+  type DiscoverMcpToolsInput,
+  type UpdateConnectorInput,
+  type DiscoverMcpToolsResultDto,
   type ConnectionDto,
   type CreateConnectionInput,
   type CreateConnectorInput,
@@ -16,10 +22,74 @@ import {
 import { conflict, notFound, preconditionFailed, validationError } from "../domain/errors.js";
 import { recordAudit } from "../infrastructure/audit.js";
 import { assertPublicUrl } from "../infrastructure/http/public-url.js";
+import { discoverMcpTools } from "../infrastructure/mcp/discover.js";
 import { secretNames } from "../infrastructure/secrets/secret-store.js";
 import { auditBy, requireRole, scopeOf, type MemberActor } from "./context.js";
 import type { Deps } from "./deps.js";
 import { toConnectionDto, toConnectorDto, toToolDto, toToolVersionDto } from "./dto.js";
+
+/** jsonb はキーの順序を保たないので、順序に依存しない形にしてから比べる */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** 連携サービスの1操作から、ツールの spec を組み立てる（登録と編集で同じ形にする） */
+function buildConnectorToolSpec(
+  adapter: string,
+  baseUrl: string | null,
+  defaultHeaders: Record<string, string> | undefined,
+  operation: ConnectorOperationInput,
+): { executionLocation: string; spec: Prisma.InputJsonValue } {
+  if (adapter === "runtime") {
+    return {
+      executionLocation: "runtime_mcp",
+      spec: {
+        execution_location: "runtime_mcp",
+        description: operation.description,
+        input_schema: operation.input_schema,
+        risk: operation.risk,
+        reads_untrusted_content: true,
+      } as Prisma.InputJsonValue,
+    };
+  }
+  if (adapter === "mcp") {
+    return {
+      executionLocation: "openai_service_mcp",
+      spec: {
+        execution_location: "openai_service_mcp",
+        description: operation.description,
+        risk: operation.risk,
+        // 接続先のMCPサーバーが持つ同名の操作だけを許可する。認証はConnectionから実行時に解決する。
+        service_mcp: { server_url: baseUrl!, allowed_tools: [operation.name] },
+      } as Prisma.InputJsonValue,
+    };
+  }
+  return {
+    executionLocation: "studio_function",
+    spec: {
+      execution_location: "studio_function",
+      description: operation.description,
+      input_schema: operation.input_schema,
+      risk: operation.risk,
+      studio_function: {
+        handler: "http_api",
+        base_url: baseUrl!,
+        method: operation.method!,
+        path: operation.path!,
+        argument_location: operation.method === "GET" || operation.method === "DELETE" ? "query" : "body",
+        ...(defaultHeaders && Object.keys(defaultHeaders).length > 0 ? { headers: defaultHeaders } : {}),
+        ...(operation.idempotency_key_field ? { idempotency_key_field: operation.idempotency_key_field } : {}),
+      },
+    } as Prisma.InputJsonValue,
+  };
+}
 
 export class ToolService {
   constructor(private readonly deps: Deps) {}
@@ -53,14 +123,22 @@ export class ToolService {
     });
   }
 
+  /** 登録前に MCP サーバーへ接続し、申告されている操作の一覧を返す（入力補助）。 */
+  async discoverMcpTools(actor: MemberActor, raw: DiscoverMcpToolsInput): Promise<DiscoverMcpToolsResultDto> {
+    requireRole(actor, "builder");
+    const input = discoverMcpToolsSchema.parse(raw);
+    return { tools: await discoverMcpTools(input.server_url) };
+  }
+
   /** 1サービスの複数能力を1トランザクションで登録する（AV-022）。 */
   async createConnector(actor: MemberActor, raw: CreateConnectorInput): Promise<ConnectorDto> {
     requireRole(actor, "builder");
     const input = createConnectorSchema.parse(raw);
-    if (!(["http_openapi", "runtime"] as const).includes(input.adapter as "http_openapi" | "runtime")) {
-      throw validationError("MVPではHTTP連携とBrowser連携の一括登録に対応しています");
+    if (!(["http_openapi", "runtime", "mcp"] as const).includes(input.adapter as "http_openapi" | "runtime" | "mcp")) {
+      throw validationError("HTTP連携、MCP連携、Browser連携の一括登録に対応しています");
     }
     const runtime = input.adapter === "runtime";
+    const mcp = input.adapter === "mcp";
     const baseUrl = input.base_url?.replace(/\/$/, "") ?? null;
     return this.deps.db.run(scopeOf(actor), async (tx) => {
       const duplicate = await tx.connectors.findUnique({
@@ -77,41 +155,17 @@ export class ToolService {
           base_url: baseUrl,
           auth_type: input.auth_type,
           tools: {
-            create: input.operations.map((operation) => ({
-              name: operation.name,
-              display_name: operation.display_name,
-              execution_location: runtime ? "runtime_mcp" : "studio_function",
-              risk: operation.risk,
-              latest_version: 1,
-              versions: {
-                create: {
-                  version: 1,
-                  created_by: actor.userId,
-                  spec: runtime
-                    ? ({
-                        execution_location: "runtime_mcp",
-                        description: operation.description,
-                        input_schema: operation.input_schema,
-                        risk: operation.risk,
-                        reads_untrusted_content: true,
-                      } as Prisma.InputJsonValue)
-                    : ({
-                    execution_location: "studio_function",
-                    description: operation.description,
-                    input_schema: operation.input_schema,
-                    risk: operation.risk,
-                    studio_function: {
-                      handler: "http_api",
-                      base_url: baseUrl!,
-                      method: operation.method!,
-                      path: operation.path!,
-                      argument_location: operation.method === "GET" || operation.method === "DELETE" ? "query" : "body",
-                      ...(operation.idempotency_key_field ? { idempotency_key_field: operation.idempotency_key_field } : {}),
-                    },
-                  } as Prisma.InputJsonValue),
-                },
-              },
-            })),
+            create: input.operations.map((operation) => {
+              const built = buildConnectorToolSpec(input.adapter, baseUrl, input.default_headers, operation);
+              return {
+                name: operation.name,
+                display_name: operation.display_name,
+                execution_location: built.executionLocation,
+                risk: operation.risk,
+                latest_version: 1,
+                versions: { create: { version: 1, created_by: actor.userId, spec: built.spec } },
+              };
+            }),
           },
         },
         include: { tools: { include: { versions: true } } },
@@ -126,6 +180,100 @@ export class ToolService {
         }),
       );
       return toConnectorDto(connector);
+    });
+  }
+
+  /**
+   * 連携サービスを編集する。振る舞いが変わる操作はツールの新しいバージョンになる。
+   * 公開済みの Build は作成時の定義を持っているため影響を受けず、次の Build から反映される。
+   */
+  async updateConnector(actor: MemberActor, id: string, raw: UpdateConnectorInput): Promise<ConnectorDto> {
+    requireRole(actor, "builder");
+    const input = updateConnectorSchema.parse(raw);
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const connector = await tx.connectors.findFirst({
+        where: { id, organization_id: actor.organizationId },
+        include: { tools: { include: { versions: { orderBy: { version: "desc" }, take: 1 } } } },
+      });
+      if (!connector) throw notFound("連携サービス");
+      if (connector.adapter === "http_openapi" && !input.base_url) throw validationError("HTTP連携にはbase_urlが必要です");
+      if (connector.adapter === "mcp" && !input.base_url) throw validationError("MCP連携にはサーバーのURLが必要です");
+      if (connector.adapter !== "http_openapi" && input.default_headers) {
+        throw validationError("固定ヘッダはHTTP連携でだけ指定できます");
+      }
+
+      const baseUrl = input.base_url?.replace(/\/$/, "") ?? null;
+      const keep = new Set(input.operations.map((operation) => operation.name));
+      const removed = connector.tools.filter((tool) => !keep.has(tool.name));
+      if (removed.length > 0) {
+        // 使っている Agent がある操作は消させない（Build で参照できなくなるため）
+        const links = await tx.agent_connection_links.findMany({
+          where: { organization_id: actor.organizationId, connector_id: connector.id },
+          select: { allowed_capabilities: true },
+        });
+        const inUse = removed.filter((tool) => links.some((link) => (link.allowed_capabilities as string[]).includes(tool.name)));
+        if (inUse.length > 0) {
+          throw preconditionFailed(`${inUse.map((tool) => tool.display_name).join("、")} はAgentが使っているため削除できません`);
+        }
+        await tx.tool_versions.deleteMany({ where: { tool_id: { in: removed.map((tool) => tool.id) } } });
+        await tx.tools.deleteMany({ where: { id: { in: removed.map((tool) => tool.id) } } });
+      }
+
+      await tx.connectors.update({
+        where: { id: connector.id },
+        data: { name: input.name, description: input.description, base_url: baseUrl },
+      });
+
+      for (const operation of input.operations) {
+        const built = buildConnectorToolSpec(connector.adapter, baseUrl, input.default_headers, operation);
+        const existing = connector.tools.find((tool) => tool.name === operation.name);
+        if (!existing) {
+          await tx.tools.create({
+            data: {
+              organization_id: actor.organizationId,
+              connector_id: connector.id,
+              name: operation.name,
+              display_name: operation.display_name,
+              execution_location: built.executionLocation,
+              risk: operation.risk,
+              latest_version: 1,
+              versions: { create: { version: 1, created_by: actor.userId, spec: built.spec } },
+            },
+          });
+          continue;
+        }
+        // 振る舞いが同じなら新しいバージョンを作らない
+        const current = existing.versions[0]?.spec as unknown;
+        const changed = canonicalJson(current) !== canonicalJson(built.spec);
+        await tx.tools.update({
+          where: { id: existing.id },
+          data: {
+            display_name: operation.display_name,
+            risk: operation.risk,
+            ...(changed
+              ? {
+                  latest_version: existing.latest_version + 1,
+                  versions: { create: { version: existing.latest_version + 1, created_by: actor.userId, spec: built.spec } },
+                }
+              : {}),
+          },
+        });
+      }
+
+      await recordAudit(
+        tx,
+        auditBy(actor, {
+          action: "connector.update",
+          targetType: "connector",
+          targetId: connector.id,
+          detail: { key: connector.key, capabilities: input.operations.map((operation) => operation.name), removed: removed.map((tool) => tool.name) },
+        }),
+      );
+      const updated = await tx.connectors.findFirstOrThrow({
+        where: { id: connector.id, organization_id: actor.organizationId },
+        include: { tools: { include: { versions: true } } },
+      });
+      return toConnectorDto(updated);
     });
   }
 
