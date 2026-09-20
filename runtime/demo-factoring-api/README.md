@@ -144,7 +144,68 @@ aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
 - **踏み台を立てて手で `psql` しない。** 手順が再現できず、誰が何を入れたか残りません
 - **Agent Studio の RDS に入れない。** 業務データを Control Plane に置かない前提が崩れます
 
-## 5. 実データに切り替えるとき
+## 5. データを足す・変えるとき
+
+[db/seed.sql](db/seed.sql) を直して `yarn workspace @agent-studio/demo-factoring-api db:load:seed-only` で入れ直します。
+`TRUNCATE ... RESTART IDENTITY CASCADE` から始まるので、何度流しても同じ状態になります。
+
+### 判定を狙って作る
+
+エージェントの判定は、次の 5 つで決まります。狙った結論を出したいときはここを動かします。
+
+| 動かすもの | どこ | 判定への効き方 |
+|---|---|---|
+| 売掛先の実在確認 | `counterparties.name` / `corporate_number` / `address` | 公表データに無い商号にすると確認できず、保留の方向。実在商号＋正しい法人番号なら可の方向 |
+| 入金の遅れ | `payment_records.due_on` と `paid_on` の差 | 期日どおりが続くと可。数日遅れは可の範囲。数週間遅れや `paid_on` が NULL（未入金）は保留・否の方向 |
+| 支払期日 | `invoices.due_on` | 今日（デモでは 2026-09-20 とする）より前だと期日超過。否の方向に強く効く |
+| 二重譲渡の疑い | 同じ `invoice_number` の `invoices` を複数行 | 否の方向に最も強く効く。過去の行は `status` を `取下げ` か `買取済` にする |
+| 請求額の大きさ | `invoices.amount` と `applicants.annual_revenue` の比 | 年商に対して過大だと保留の方向。目安として年商の 1 割を超えると目立つ |
+
+判定そのものは指示文の書き方でも変わります。**データを変えても思ったとおりにならないときは、まず指示文の判断基準を疑ってください。**
+
+### 申込を 1 件足す
+
+売掛先と申込者が既にあるなら、`invoices` に 1 行、`payment_records` に数行入れるだけです。
+
+```sql
+INSERT INTO invoices (id, applicant_id, counterparty_id, invoice_number, issued_on, due_on, amount, payment_terms, status, note) VALUES
+  ('INV-2026-0105', 'A-002', 'C-001', 'SR-2609-240', '2026-09-15', '2026-11-30', 8800000, '月末締め翌々月末払い', '申込中', NULL);
+
+INSERT INTO payment_records (applicant_id, counterparty_id, invoice_number, due_on, paid_on, amount) VALUES
+  ('A-002', 'C-001', 'SR-2607-228', '2026-08-31', '2026-08-31', 8200000);
+```
+
+守ること：
+
+- **ID の付け方。** 申込は `INV-<西暦>-<連番>`、申込者は `A-00n`、売掛先は `C-00n`。請求書番号（`invoice_number`）は
+  申込者ごとの体系にする（みなと製作所は `MK-`、サンライズ物流は `SR-`、ひばりデザインは `HD-`）
+- **`payment_records` は「申込者 × 売掛先」の組で引かれる。** 組が合っていないと `get_application` の入金実績が空になり、
+  エージェントが「取引実績が確認できない」と判断します
+- **二重申込を作るときは過去の行の `status` を `申込中` 以外にする。** `申込中` のままだと審査待ち一覧に 2 件出て、
+  デモの件数が合わなくなります
+- **日付は 2026-09-20 を「今日」として組む。** 期日超過を作るならそれより前、正常な申込ならそれより後にします
+
+### 売掛先を足す
+
+実在確認の結果を狙って決められます。
+
+- **確認が取れる売掛先にしたい** → 実在する商号を使い、国税庁法人番号公表サイトで前方一致検索して出てきた
+  法人番号と所在地をそのまま `counterparties` に入れる。**サイトに出ている公開データだけを使い、取引の中身は架空にする**
+- **確認が取れない売掛先にしたい** → 架空の商号にする。法人番号を書くなら、実在の番号と当たらないよう
+  チェックディジットが合わない値にする（`9010001000001` がその例）
+- **申込書に法人番号が無い状況にしたい** → `corporate_number` を NULL にする。エージェントは商号だけで引くことになる
+
+### 入れたあとの確認
+
+```bash
+curl -s -H "Authorization: Bearer local-factoring-token" localhost:8091/applications
+curl -s -H "Authorization: Bearer local-factoring-token" localhost:8091/applications/INV-2026-0105
+```
+
+詳細のほうで `payment_records` と `same_invoice_number` が意図どおり入っているかを見ます。
+ここが空なら、エージェントもその材料を使えません。
+
+## 6. 実データに切り替えるとき
 
 顧客の実システムを使うなら、**このデータもこの API も本番には出しません**。
 [tool-config](../tool-gateway/examples/tool-config.local.yaml) のツール定義をコピーして、
