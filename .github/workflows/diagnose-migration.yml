@@ -1,0 +1,31 @@
+name: Diagnose Migration
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 調査する環境
+        type: choice
+        options: [staging, production]
+        required: true
+      task_arn:
+        description: マイグレーションのECSタスクARNまたはID
+        type: string
+        required: true
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  logs:
+    runs-on: ubuntu-24.04
+    environment: agent-studio-${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: タスクの状態とログ（読み取りのみ）
+        env:
+          CLUSTER: as-${{ inputs.environment }}
+          TASK_ARN: ${{ inputs.task_arn }}
+        run: bash .github/scripts/show-migration-logs.sh

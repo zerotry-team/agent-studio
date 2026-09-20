@@ -197,7 +197,9 @@ jobs:
           REASON=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --query 'tasks[0].stoppedReason' --output text)
           echo "exit code: ${EXIT_CODE} / ${REASON}"
           if [ "$EXIT_CODE" != "0" ]; then
-            echo "::error::マイグレーションに失敗しました（CloudWatch Logs を確認してください）"
+            echo "::error::マイグレーションに失敗しました"
+            export CLUSTER TASK_ARN
+            bash .github/scripts/show-migration-logs.sh || true
             exit 1
           fi
 
