@@ -30,9 +30,12 @@ resource "aws_iam_role" "runtime" {
 
 data "aws_iam_policy_document" "runtime" {
   statement {
-    sid       = "RunSessionWorker"
-    actions   = ["ecs:RunTask"]
-    resources = ["arn:${local.partition}:ecs:${var.region}:${local.account_id}:task-definition/${local.prefix}-session-worker:*"]
+    sid     = "RunSessionWorker"
+    actions = ["ecs:RunTask"]
+    resources = concat(
+      ["arn:${local.partition}:ecs:${var.region}:${local.account_id}:task-definition/${local.prefix}-session-worker:*"],
+      local.browser_enabled ? ["arn:${local.partition}:ecs:${var.region}:${local.account_id}:task-definition/${local.prefix}-browser-worker:*"] : [],
+    )
     condition {
       test     = "ArnEquals"
       variable = "ecs:cluster"
@@ -71,9 +74,12 @@ data "aws_iam_policy_document" "runtime" {
   }
 
   statement {
-    sid       = "PassSessionWorkerRoles"
-    actions   = ["iam:PassRole"]
-    resources = [aws_iam_role.session_worker_task.arn, module.exec_session_worker.arn]
+    sid     = "PassSessionWorkerRoles"
+    actions = ["iam:PassRole"]
+    resources = concat(
+      [aws_iam_role.session_worker_task.arn, module.exec_session_worker.arn],
+      local.browser_enabled ? [aws_iam_role.browser_worker_task[0].arn, module.exec_browser_worker[0].arn] : [],
+    )
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
@@ -158,11 +164,37 @@ module "exec_runtime_core" {
 
 module "exec_browser_worker" {
   source = "../ecs-execution-role"
-  count  = var.browser_enabled ? 1 : 0
+  count  = local.browser_enabled ? 1 : 0
 
   name                = "${local.prefix}-browser-exec"
   ecr_repository_arns = [local.ecr_repository_arn["browser-worker"]]
   log_group_arns      = [aws_cloudwatch_log_group.this["browser-worker"].arn]
+}
+
+# Browser Workerはuntrusted。ECS Agentが使うexecution roleと分離し、タスクロールには権限を付けない。
+resource "aws_iam_role" "browser_worker_task" {
+  count = local.browser_enabled ? 1 : 0
+
+  name               = "${local.prefix}-browser-worker-task"
+  description        = "Browser Session Worker (no AWS permissions)"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+resource "aws_iam_role" "egress_proxy_task" {
+  count = local.browser_proxy_enabled ? 1 : 0
+
+  name               = "${local.prefix}-egress-proxy-task"
+  description        = "Browser Egress Proxy (no AWS permissions)"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+module "exec_egress_proxy" {
+  source = "../ecs-execution-role"
+  count  = local.browser_proxy_enabled ? 1 : 0
+
+  name                = "${local.prefix}-egress-proxy-exec"
+  ecr_repository_arns = [local.ecr_repository_arn["egress-proxy"]]
+  log_group_arns      = [aws_cloudwatch_log_group.this["egress-proxy"].arn]
 }
 
 module "exec_demo_internal_api" {

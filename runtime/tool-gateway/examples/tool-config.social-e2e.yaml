@@ -1,0 +1,12 @@
+version: 1
+
+tools: []
+
+upstream_mcp:
+  - name: browser
+    url: "http://localhost:8931/mcp"
+    tools:
+      - { name: browser_navigate, risk: read, reads_untrusted_content: true }
+      - { name: browser_snapshot, risk: read, reads_untrusted_content: true }
+
+policies: []

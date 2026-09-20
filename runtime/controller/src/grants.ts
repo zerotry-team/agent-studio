@@ -1,4 +1,4 @@
-import type { SessionGrant } from "@agent-studio/contracts";
+import type { BrowserSessionConfig, SessionGrant } from "@agent-studio/contracts";
 
 export type WorkerStatus = "starting" | "running" | "stopping";
 
@@ -20,6 +20,8 @@ export interface SessionRecord {
   idleTimeoutMinutes?: number;
   /** Session Worker をこの Controller が管理しているとき */
   worker?: WorkerInfo;
+  /** Run 専用 Browser Session Worker。accessToken は監査・ログへ出さない。 */
+  browser?: WorkerInfo & { accessToken: string; config: BrowserSessionConfig };
 }
 
 /**
@@ -45,7 +47,9 @@ export class GrantStore {
     const existing = this.bySession.get(grant.session_id);
     if (existing) {
       if (existing.grant.token_hash !== grant.token_hash) this.byTokenHash.delete(existing.grant.token_hash);
-      existing.grant = grant;
+      // browser.endpoint はRuntime内で解決するためControl PlaneのactiveSessionsには含まれない。
+      // 許可情報の再同期でRun専用endpointを消さない。
+      existing.grant = existing.grant.browser && !grant.browser ? { ...grant, browser: existing.grant.browser } : grant;
       Object.assign(existing, extra);
       this.byTokenHash.set(grant.token_hash, grant.session_id);
       return existing;

@@ -34,6 +34,7 @@ locals {
       APP_ENV                  = var.environment
       PORT                     = "3200"
       PUBLIC_BASE_URL          = local.public_url
+      PUBLIC_API_BASE_URL      = local.public_url
       DB_HOST                  = aws_db_instance.this.address
       DB_PORT                  = "5432"
       DB_NAME                  = local.db_name

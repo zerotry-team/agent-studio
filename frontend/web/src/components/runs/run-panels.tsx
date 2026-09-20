@@ -67,7 +67,7 @@ export function RunInfoCard({ run }: { run: RunDto }) {
         <DescriptionList
           columns={1}
           items={[
-            { label: "状態", value: <RunStatusBadge status={run.status} /> },
+            { label: "状態", value: <RunStatusBadge status={run.status} outcome={run.outcome} /> },
             {
               label: "実行環境",
               value: (

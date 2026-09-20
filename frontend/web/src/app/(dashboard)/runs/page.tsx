@@ -102,7 +102,7 @@ function RunsTable({ runs }: { runs: RunDto[] }) {
               </span>
             </TD>
             <TD>
-              <RunStatusBadge status={run.status} />
+              <RunStatusBadge status={run.status} outcome={run.outcome} />
             </TD>
             <TD className="hidden sm:table-cell">
               <span className="flex items-center gap-2">

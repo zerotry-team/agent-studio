@@ -19,12 +19,21 @@ resource "aws_security_group" "session_worker" {
 }
 
 resource "aws_security_group" "browser_worker" {
-  count = var.browser_enabled ? 1 : 0
+  count = local.browser_enabled ? 1 : 0
 
   name        = "${local.prefix}-browser-worker"
   description = "Browser Worker (Playwright MCP)"
   vpc_id      = module.network.vpc_id
   tags        = { Name = "${local.prefix}-browser-worker" }
+}
+
+resource "aws_security_group" "egress_proxy" {
+  count = local.browser_proxy_enabled ? 1 : 0
+
+  name        = "${local.prefix}-egress-proxy"
+  description = "Browser egress proxy"
+  vpc_id      = module.network.vpc_id
+  tags        = { Name = "${local.prefix}-egress-proxy" }
 }
 
 resource "aws_security_group" "demo_api" {
@@ -57,7 +66,7 @@ resource "aws_vpc_security_group_egress_rule" "runtime_core_https" {
 }
 
 resource "aws_vpc_security_group_egress_rule" "runtime_core_to_browser" {
-  count = var.browser_enabled ? 1 : 0
+  count = local.browser_enabled ? 1 : 0
 
   security_group_id            = aws_security_group.runtime_core.id
   referenced_security_group_id = aws_security_group.browser_worker[0].id
@@ -122,7 +131,7 @@ resource "aws_vpc_security_group_egress_rule" "session_worker_dns" {
 # ---- browser-worker ----
 
 resource "aws_vpc_security_group_ingress_rule" "browser_from_runtime_core" {
-  count = var.browser_enabled ? 1 : 0
+  count = local.browser_enabled ? 1 : 0
 
   security_group_id            = aws_security_group.browser_worker[0].id
   referenced_security_group_id = aws_security_group.runtime_core.id
@@ -132,10 +141,42 @@ resource "aws_vpc_security_group_ingress_rule" "browser_from_runtime_core" {
 }
 
 resource "aws_vpc_security_group_egress_rule" "browser_web" {
-  for_each = var.browser_enabled ? toset(["80", "443"]) : toset([])
+  for_each = local.browser_enabled && var.egress_policy.mode == "legacy_direct" ? toset(["80", "443"]) : toset([])
 
   security_group_id = aws_security_group.browser_worker[0].id
   description       = "Web (restricted by DNS Firewall)"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = tonumber(each.value)
+  to_port           = tonumber(each.value)
+}
+
+resource "aws_vpc_security_group_egress_rule" "browser_to_proxy" {
+  count = local.browser_proxy_enabled ? 1 : 0
+
+  security_group_id            = aws_security_group.browser_worker[0].id
+  description                  = "Only allowed browser egress path"
+  referenced_security_group_id = aws_security_group.egress_proxy[0].id
+  ip_protocol                  = "tcp"
+  from_port                    = 3128
+  to_port                      = 3128
+}
+
+resource "aws_vpc_security_group_ingress_rule" "proxy_from_browser" {
+  count = local.browser_proxy_enabled ? 1 : 0
+
+  security_group_id            = aws_security_group.egress_proxy[0].id
+  referenced_security_group_id = aws_security_group.browser_worker[0].id
+  ip_protocol                  = "tcp"
+  from_port                    = 3128
+  to_port                      = 3128
+}
+
+resource "aws_vpc_security_group_egress_rule" "proxy_web" {
+  for_each = local.browser_proxy_enabled ? toset(["80", "443"]) : toset([])
+
+  security_group_id = aws_security_group.egress_proxy[0].id
+  description       = "Allowed web targets (FQDN enforced by proxy)"
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "tcp"
   from_port         = tonumber(each.value)

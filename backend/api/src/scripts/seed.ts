@@ -63,14 +63,26 @@ async function main() {
     await prisma.organization_openai_settings.upsert({ where: { organization_id: o.id }, create: { organization_id: o.id }, update: {} });
   }
 
-  // 社内 API（Runtime の Tool Gateway 経由）
-  await tool(a.id, "get_product", "商品情報の取得", {
+  // 1つの連携サービスの中で、操作単位の権限・リスク・Schemaは分離して維持する。
+  const sampleApiConnector = await prisma.connectors.upsert({
+    where: { organization_id_key: { organization_id: a.id, key: "sample-a-product-api" } },
+    create: {
+      organization_id: a.id,
+      key: "sample-a-product-api",
+      name: "Sample A社 商品API",
+      description: "商品情報の参照と価格変更に利用する社内サービス",
+      adapter: "runtime",
+      auth_type: "runtime_secret",
+    },
+    update: {},
+  });
+  const getProduct = await tool(a.id, "get_product", "商品情報の取得", {
     execution_location: "runtime_mcp",
     description: "商品 ID を指定して、商品名と現在の価格を取得する",
     risk: "read",
     input_schema: { type: "object", properties: { product_id: { type: "string" } }, required: ["product_id"], additionalProperties: false },
   });
-  await tool(a.id, "update_price", "価格の変更", {
+  const updatePrice = await tool(a.id, "update_price", "価格の変更", {
     execution_location: "runtime_mcp",
     description: "商品の価格を、指定した金額だけ変更する（値下げは負の数）",
     risk: "financial",
@@ -80,6 +92,10 @@ async function main() {
       required: ["product_id", "price_change"],
       additionalProperties: false,
     },
+  });
+  await prisma.tools.updateMany({
+    where: { id: { in: [getProduct.id, updatePrice.id] }, organization_id: a.id },
+    data: { connector_id: sampleApiConnector.id },
   });
 
   // OpenAI の環境（ツールなしで試せる）

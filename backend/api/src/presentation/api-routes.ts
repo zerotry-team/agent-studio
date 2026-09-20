@@ -1,8 +1,11 @@
 import {
   approvalDecisionSchema,
   createAgentSchema,
+  createAgentProjectSchema,
+  createAgentScheduleSchema,
   createAgentVersionSchema,
   createConnectionSchema,
+  createConnectorSchema,
   createDeploymentSchema,
   createEvalCaseSchema,
   createOrganizationSchema,
@@ -15,9 +18,11 @@ import {
   createWorkflowSchema,
   generateManifestSchema,
   inviteMemberSchema,
+  linkAgentConnectionSchema,
   listQuerySchema,
   sendRunMessageSchema,
   setConnectionSecretSchema,
+  setAgentEnvironmentSchema,
   setOpenAiCredentialsSchema,
   startEvalRunSchema,
   startWorkflowRunSchema,
@@ -25,6 +30,7 @@ import {
   updateOrganizationSchema,
   updatePolicySchema,
   updateWorkflowSchema,
+  updateAgentScheduleSchema,
 } from "@agent-studio/contracts";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -90,24 +96,83 @@ export function createApiRoutes(deps: Deps, s: Services) {
     c.json(await s.tools.addVersion(c.get("member"), id(c.req.param("id")), await json(c, createToolVersionSchema)), 201),
   );
 
+  org.get("/connectors", async (c) => c.json(await s.tools.listConnectors(c.get("member"))));
+  org.post("/connectors", async (c) => c.json(await s.tools.createConnector(c.get("member"), await json(c, createConnectorSchema)), 201));
+  org.get("/connectors/:id", async (c) => c.json(await s.tools.getConnector(c.get("member"), id(c.req.param("id")))));
+
   org.get("/connections", async (c) => c.json(await s.tools.listConnections(c.get("member"))));
   org.post("/connections", async (c) => c.json(await s.tools.createConnection(c.get("member"), await json(c, createConnectionSchema)), 201));
   org.put("/connections/:id/secret", async (c) => {
     await s.tools.setConnectionSecret(c.get("member"), id(c.req.param("id")), await json(c, setConnectionSecretSchema));
     return c.body(null, 204);
   });
+  org.post("/connections/:id/validate", async (c) =>
+    c.json(await s.tools.validateConnection(c.get("member"), id(c.req.param("id")))),
+  );
+  org.post("/connections/:id/revoke", async (c) =>
+    c.json(await s.tools.revokeConnection(c.get("member"), id(c.req.param("id")))),
+  );
   org.delete("/connections/:id", async (c) => {
     await s.tools.deleteConnection(c.get("member"), id(c.req.param("id")));
     return c.body(null, 204);
   });
 
   org.get("/agents", async (c) => c.json(await s.agents.list(c.get("member"))));
+  org.get("/agents/:id/schedules", async (c) => c.json(await s.schedules.list(c.get("member"), id(c.req.param("id")))));
+  org.post("/agents/:id/schedules", async (c) =>
+    c.json(await s.schedules.create(c.get("member"), id(c.req.param("id")), await json(c, createAgentScheduleSchema)), 201),
+  );
+  org.patch("/schedules/:id", async (c) =>
+    c.json(await s.schedules.update(c.get("member"), id(c.req.param("id")), await json(c, updateAgentScheduleSchema))),
+  );
+  org.delete("/schedules/:id", async (c) => {
+    await s.schedules.delete(c.get("member"), id(c.req.param("id")));
+    return c.body(null, 204);
+  });
+  org.post("/agent-projects", async (c) => {
+    const actor = c.get("member");
+    const input = await json(c, createAgentProjectSchema);
+    const agent = await s.agents.createProject(actor, input.description);
+    let autoPreviewCreated = false;
+    if (agent.capability_resolution.ready) {
+      try {
+        await s.environments.createPreview(actor, agent.id);
+        autoPreviewCreated = true;
+      } catch (error) {
+        deps.logger.warn({ err: error, agent_id: agent.id }, "Agent Project作成後のPreview自動作成を保留しました");
+      }
+    }
+    return c.json({ ...(await s.agents.getProject(actor, agent.id)), auto_preview_created: autoPreviewCreated }, 201);
+  });
   org.post("/agents", async (c) => c.json(await s.agents.create(c.get("member"), (await json(c, createAgentSchema)).manifest), 201));
   org.post("/agents/generate", async (c) =>
     c.json(await s.agents.generate(c.get("member"), (await json(c, generateManifestSchema)).description)),
   );
   org.post("/agents/validate", async (c) => c.json(await s.agents.validate(c.get("member"), (await json(c, createAgentSchema)).manifest)));
   org.get("/agents/:id", async (c) => c.json(await s.agents.get(c.get("member"), id(c.req.param("id")))));
+  org.get("/agents/:id/project", async (c) => c.json(await s.agents.getProject(c.get("member"), id(c.req.param("id")))));
+  org.put("/agents/:id/connections", async (c) => {
+    const actor = c.get("member");
+    const agentId = id(c.req.param("id"));
+    const project = await s.agents.linkConnection(actor, agentId, await json(c, linkAgentConnectionSchema));
+    const hasPreview = project.deployments.some((deployment) => deployment.stage === "staging" && deployment.status === "active");
+    if (project.agent.capability_resolution.ready && !hasPreview) await s.environments.createPreview(actor, agentId);
+    return c.json(await s.agents.getProject(actor, agentId));
+  });
+  org.put("/agents/:id/environment", async (c) => {
+    const actor = c.get("member");
+    const agentId = id(c.req.param("id"));
+    const project = await s.agents.setEnvironment(actor, agentId, await json(c, setAgentEnvironmentSchema));
+    const hasPreview = project.deployments.some((deployment) => deployment.stage === "staging" && deployment.status === "active");
+    if (project.agent.capability_resolution.ready && !hasPreview) await s.environments.createPreview(actor, agentId);
+    return c.json(await s.agents.getProject(actor, agentId));
+  });
+  org.post("/agents/:id/preview", async (c) => c.json(await s.environments.createPreview(c.get("member"), id(c.req.param("id"))), 201));
+  org.post("/agents/:id/invoke", async (c) => {
+    const stage = z.enum(["staging", "production"]).default("staging").parse(c.req.query("stage"));
+    const input = await json(c, z.object({ input: z.string().trim().min(1).max(100_000) }).strict());
+    return c.json(await s.runs.createForAgent(c.get("member"), id(c.req.param("id")), stage, input.input), 201);
+  });
   org.post("/agents/:id/versions", async (c) =>
     c.json(await s.agents.createVersion(c.get("member"), id(c.req.param("id")), (await json(c, createAgentVersionSchema)).manifest), 201),
   );
@@ -156,6 +221,8 @@ export function createApiRoutes(deps: Deps, s: Services) {
     c.json(await s.environments.createDeployment(c.get("member"), await json(c, createDeploymentSchema)), 201),
   );
   org.post("/deployments/:id/archive", async (c) => c.json(await s.environments.archiveDeployment(c.get("member"), id(c.req.param("id")))));
+  org.post("/deployments/:id/promote", async (c) => c.json(await s.environments.promote(c.get("member"), id(c.req.param("id"))), 201));
+  org.post("/deployments/:id/rollback", async (c) => c.json(await s.environments.rollback(c.get("member"), id(c.req.param("id"))), 201));
 
   org.get("/runs", async (c) => {
     const q = listQuerySchema.parse(c.req.query());

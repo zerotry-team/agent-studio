@@ -12,6 +12,7 @@ import type { GrantStore } from "./grants.js";
 import { createInternalApp, startInternalServer } from "./internal-server.js";
 import { JobHandler } from "./jobs.js";
 import type { SessionLauncher } from "./launcher.js";
+import { browserAccessToken, type BrowserLauncher } from "./browser-launcher.js";
 import type { Logger } from "./logger.js";
 import { errorInfo } from "./logger.js";
 import { SessionMonitor } from "./monitor.js";
@@ -32,6 +33,7 @@ export interface ControllerDeps {
   studio: StudioApi;
   grants: GrantStore;
   launcher: SessionLauncher;
+  browserLauncher: BrowserLauncher;
   secrets: ControllerSecrets;
   controllerVersion: string;
   fetchImpl?: typeof fetch;
@@ -67,10 +69,11 @@ export class Controller {
   private stopping = false;
 
   constructor(private readonly deps: ControllerDeps) {
-    const { config, logger, grants, launcher, studio, secrets } = deps;
+    const { config, logger, grants, launcher, browserLauncher, studio, secrets } = deps;
     this.jobs = new JobHandler({
       grants,
       launcher,
+      browserLauncher,
       studio,
       secrets,
       logger,
@@ -79,7 +82,7 @@ export class Controller {
         sessionMaxLifetimeMinutes: config.sessionMaxLifetimeMinutes,
       },
     });
-    this.monitor = new SessionMonitor({ grants, launcher, studio, logger });
+    this.monitor = new SessionMonitor({ grants, launcher, browserLauncher, studio, logger });
     this.audit = new AuditBuffer((events) => studio.sendAudit(events), logger, {
       isPermanentFailure: (err) => err instanceof StudioApiError && (err.status === 400 || err.status === 422),
     });
@@ -273,7 +276,7 @@ export class Controller {
 
   /** 再起動時: Agent Studio の activeSessions と、実行中の Worker を突き合わせて引き継ぐ */
   async reconcile(): Promise<void> {
-    const { studio, grants, launcher, logger, config } = this.deps;
+    const { studio, grants, launcher, browserLauncher, logger, config } = this.deps;
     const sessions = await studio.activeSessions();
     let adopted = 0;
     for (const grant of sessions) {
@@ -285,14 +288,47 @@ export class Controller {
         logger.warn({ err: errorInfo(err), session_id: grant.session_id }, "Session Worker を探せませんでした");
       }
       if (task) {
-        grants.upsert(grant, {
+        const extra: Parameters<GrantStore["upsert"]>[1] = {
           maxLifetimeMinutes: config.sessionMaxLifetimeMinutes,
           worker: { status: "running", taskArn: task.taskArn, startedAt: task.startedAt ?? new Date() },
-        });
+        };
+        if (grant.browser || grant.allowed_tools.some((tool) => tool.startsWith("browser_") || tool === "computer_action")) {
+          try {
+            const browserTask = await browserLauncher.findRunning(grant.session_id);
+            if (browserTask) {
+              const accessToken = browserAccessToken(grant.session_id, grant.run_id);
+              const endpoint = browserLauncher.endpoint(browserTask, accessToken);
+              if (!endpoint) throw new Error("Browser endpointを解決できませんでした");
+              const mode = grant.browser?.mode ?? "public_ephemeral";
+              const allowedDomains = grant.browser?.allowed_domains ?? [];
+              const browserConfig = {
+                enabled: true as const,
+                mode,
+                allowed_domains: allowedDomains,
+                code_execution_enabled: mode === "public_ephemeral" && grant.allowed_tools.includes("browser_exec_js"),
+                computer_actions_enabled: false,
+                viewport: { width: 1440, height: 900 },
+              };
+              grant.browser = { endpoint, mode, allowed_domains: allowedDomains };
+              extra.browser = {
+                status: "running",
+                taskArn: browserTask.taskArn,
+                startedAt: browserTask.startedAt ?? new Date(),
+                accessToken,
+                config: browserConfig,
+              };
+            }
+          } catch (err) {
+            logger.warn({ err: errorInfo(err), session_id: grant.session_id }, "Browser Session Worker を探せませんでした");
+          }
+        }
+        grants.upsert(grant, extra);
         adopted++;
       }
     }
     grants.syncFromActive(sessions, config.sessionMaxLifetimeMinutes);
+    this.monitor.enableOrphanSweep();
+    await this.monitor.sweepOrphans();
     logger.info({ active_sessions: sessions.length, adopted_workers: adopted }, "実行中のセッションを引き継ぎました");
   }
 

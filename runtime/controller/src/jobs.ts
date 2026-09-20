@@ -1,5 +1,6 @@
 import type { JobResultRequest, RuntimeJob, SessionEventRequest, StartSessionJob } from "@agent-studio/contracts";
 import type { GrantStore } from "./grants.js";
+import type { BrowserLauncher } from "./browser-launcher.js";
 import { isStopped, type SessionLauncher, type WorkerTaskState } from "./launcher.js";
 import type { Logger } from "./logger.js";
 import { errorInfo } from "./logger.js";
@@ -9,6 +10,7 @@ import type { StudioApi } from "./studio-client.js";
 export interface JobHandlerDeps {
   grants: GrantStore;
   launcher: SessionLauncher;
+  browserLauncher: BrowserLauncher;
   studio: Pick<StudioApi, "sessionEvent" | "environmentKey">;
   secrets: Pick<ControllerSecrets, "saveEnvironmentKey">;
   logger: Logger;
@@ -78,13 +80,14 @@ export class JobHandler {
   }
 
   private async startSession(job: StartSessionJob): Promise<JobResultRequest> {
-    const { grants, launcher, logger, limits } = this.deps;
+    const { grants, launcher, browserLauncher, logger, limits } = this.deps;
     const {
       openai_session_id: openaiSessionId,
       environment_id: environmentId,
       remote_url: remoteUrl,
       max_lifetime_minutes: requestedLifetime,
       idle_timeout_minutes: idleTimeoutMinutes,
+      browser,
       ...grant
     } = job.session;
     const sessionId = grant.session_id;
@@ -111,6 +114,45 @@ export class JobHandler {
     });
     const worker = record.worker!;
 
+    if (browser?.enabled) {
+      let browserTaskArn: string;
+      let accessToken: string;
+      try {
+        ({ taskArn: browserTaskArn, accessToken } = await browserLauncher.launch({
+          sessionId,
+          runId: grant.run_id,
+          config: browser,
+          idempotencyToken: `${job.job_id}-browser`,
+        }));
+      } catch (err) {
+        grants.remove(sessionId);
+        const detail = `Browser Session Worker を起動できませんでした: ${errorInfo(err).message}`;
+        log.error({ err: errorInfo(err) }, "Browser Session Worker を起動できませんでした");
+        await this.postEvent(sessionId, { type: "worker_failed", detail });
+        return fail(detail);
+      }
+      record.browser = { status: "starting", taskArn: browserTaskArn, accessToken, config: browser, startedAt: this.now() };
+      log.info({ browser_task_arn: browserTaskArn, launcher: browserLauncher.kind }, "Browser Session Worker の起動を待ちます");
+
+      const browserReady = await this.waitUntilRunning(browserLauncher, browserTaskArn, sessionId, record, "Browser Session Worker");
+      if (!browserReady.ok) {
+        grants.remove(sessionId);
+        return fail(browserReady.error);
+      }
+      const endpoint = browserLauncher.endpoint(browserReady.state, accessToken);
+      if (!endpoint) {
+        await browserLauncher.stop(browserTaskArn, "Private IP を解決できませんでした").catch(() => undefined);
+        grants.remove(sessionId);
+        return fail("Browser Session Worker の Private IP を解決できませんでした");
+      }
+      record.browser.status = "running";
+      record.grant = {
+        ...record.grant,
+        browser: { endpoint, mode: browser.mode, allowed_domains: browser.allowed_domains },
+      };
+      log.info({ browser_task_arn: browserTaskArn }, "Browser Session Worker が RUNNING になりました");
+    }
+
     let taskArn: string;
     try {
       ({ taskArn } = await launcher.launch({
@@ -121,6 +163,9 @@ export class JobHandler {
         idempotencyToken: job.job_id,
       }));
     } catch (err) {
+      if (record.browser?.taskArn) {
+        await browserLauncher.stop(record.browser.taskArn, "Session Worker の起動に失敗したため停止").catch(() => undefined);
+      }
       grants.remove(sessionId);
       const detail = `Session Worker を起動できませんでした: ${errorInfo(err).message}`;
       log.error({ err: errorInfo(err) }, "Session Worker を起動できませんでした");
@@ -158,6 +203,9 @@ export class JobHandler {
       }
       if (state === null) missing++;
       if ((state && isStopped(state)) || (state === null && missing > missingTolerance)) {
+        if (record.browser?.taskArn) {
+          await browserLauncher.stop(record.browser.taskArn, "Session Worker が起動できなかったため停止").catch(() => undefined);
+        }
         grants.remove(sessionId);
         const detail = `Session Worker が起動できずに終了しました: ${describeStop(state)}`;
         log.error({ task_arn: taskArn, detail }, "Session Worker が起動できずに終了しました");
@@ -167,6 +215,9 @@ export class JobHandler {
       if (this.now().getTime() >= deadline) {
         const detail = "Session Worker が時間内（5 分）に起動しませんでした";
         await launcher.stop(taskArn, detail).catch((err) => log.warn({ err: errorInfo(err) }, "起動に失敗したタスクを停止できませんでした"));
+        if (record.browser?.taskArn) {
+          await browserLauncher.stop(record.browser.taskArn, detail).catch((err) => log.warn({ err: errorInfo(err) }, "Browser Task を停止できませんでした"));
+        }
         grants.remove(sessionId);
         log.error({ task_arn: taskArn }, detail);
         await this.postEvent(sessionId, { type: "worker_failed", task_arn: taskArn, detail });
@@ -176,9 +227,42 @@ export class JobHandler {
     }
   }
 
+  private async waitUntilRunning(
+    launcher: Pick<BrowserLauncher, "describe" | "stop">,
+    taskArn: string,
+    sessionId: string,
+    record: NonNullable<ReturnType<GrantStore["get"]>>,
+    label: string,
+  ): Promise<{ ok: true; state: WorkerTaskState } | { ok: false; error: string }> {
+    const deadline = this.now().getTime() + (this.deps.startTimeoutMs ?? 5 * 60_000);
+    const pollInterval = this.deps.pollIntervalMs ?? 5_000;
+    const missingTolerance = this.deps.missingTolerance ?? 3;
+    let missing = 0;
+    for (;;) {
+      if (this.deps.grants.get(sessionId) !== record) return { ok: false, error: `起動中に ${label} が停止されました` };
+      let state: WorkerTaskState | null | undefined;
+      try {
+        state = (await launcher.describe([taskArn])).get(taskArn) ?? null;
+      } catch (err) {
+        this.deps.logger.warn({ err: errorInfo(err), session_id: sessionId }, `${label} の状態を取得できませんでした`);
+      }
+      if (state?.lastStatus === "RUNNING") return { ok: true, state };
+      if (state === null) missing++;
+      if ((state && isStopped(state)) || (state === null && missing > missingTolerance)) {
+        return { ok: false, error: `${label} が起動できずに終了しました: ${describeStop(state)}` };
+      }
+      if (this.now().getTime() >= deadline) {
+        const error = `${label} が時間内（5 分）に起動しませんでした`;
+        await launcher.stop(taskArn, error).catch(() => undefined);
+        return { ok: false, error };
+      }
+      await this.sleep(pollInterval);
+    }
+  }
+
   /** 冪等: 管理していない・すでに止まっているセッションでも成功を返す */
   async stopSession(sessionId: string, reason: string): Promise<JobResultRequest> {
-    const { grants, launcher, logger } = this.deps;
+    const { grants, launcher, browserLauncher, logger } = this.deps;
     const log = logger.child({ session_id: sessionId });
     const record = grants.get(sessionId);
 
@@ -200,6 +284,23 @@ export class JobHandler {
       }
       await launcher.stop(taskArn, stopReason);
       log.info({ task_arn: taskArn, reason: stopReason }, "Session Worker を停止しました");
+    }
+
+    let browserTaskArn = record?.browser?.taskArn;
+    if (!browserTaskArn) {
+      try {
+        browserTaskArn = (await browserLauncher.findRunning(sessionId))?.taskArn;
+      } catch (err) {
+        log.warn({ err: errorInfo(err) }, "停止対象の Browser Session Worker を探せませんでした");
+      }
+    }
+    if (browserTaskArn) {
+      if (record?.browser) {
+        record.browser.status = "stopping";
+        record.browser.stopReason = stopReason;
+      }
+      await browserLauncher.stop(browserTaskArn, stopReason);
+      log.info({ browser_task_arn: browserTaskArn, reason: stopReason }, "Browser Session Worker を停止しました");
     }
 
     grants.remove(sessionId);

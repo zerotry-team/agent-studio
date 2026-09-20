@@ -236,3 +236,52 @@ describe("ToolCallService: 承認", () => {
     expect(controller.createApproval).not.toHaveBeenCalled();
   });
 });
+
+describe("ToolCallService: Run専用Browser endpoint", () => {
+  it("Session Grantのendpointへだけルーティングし、Profile modeではexec_jsを隠す", async () => {
+    const dynamicConfig = runtimeToolConfigSchema.parse({
+      upstream_mcp: [
+        {
+          name: "browser",
+          url: "http://browser-session.invalid/mcp",
+          dynamic_session_endpoint: "browser",
+          tools: [
+            { name: "browser_snapshot", description: "snapshot", input_schema: { type: "object" }, risk: "read", reads_untrusted_content: true },
+            { name: "browser_exec_js", description: "exec", input_schema: { type: "object" }, risk: "write", reads_untrusted_content: true },
+          ],
+        },
+      ],
+    });
+    const catalog = new ToolCatalog(dynamicConfig, async () => {
+      throw new Error("動的endpointは起動前に問い合わせない");
+    }, logger);
+    await catalog.refreshUpstreams();
+    const upstream = { callTool: vi.fn(async () => textResult("ok", false)) };
+    const service = new ToolCallService({
+      catalog,
+      controller: { createApproval: vi.fn(), getApproval: vi.fn(), consumeApproval: vi.fn() },
+      audit: { record: vi.fn() },
+      executeHttp: vi.fn(),
+      upstream,
+      approvalWaitMs: 0,
+      approvalPollIntervalMs: 1,
+      logger,
+    });
+    const publicGrant: SessionGrant = {
+      ...grant([]),
+      allowed_tools: ["browser_snapshot", "browser_exec_js"],
+      browser: { endpoint: "http://10.40.1.25:8931/mcp/run-token", mode: "public_ephemeral", allowed_domains: ["example.com"] },
+    };
+    expect(catalog.visibleFor(publicGrant).map((tool) => tool.name)).toEqual(["browser_snapshot", "browser_exec_js"]);
+    await service.call(publicGrant, "browser_snapshot", {});
+    expect(upstream.callTool).toHaveBeenCalledWith(
+      publicGrant,
+      expect.objectContaining({ url: publicGrant.browser!.endpoint }),
+      "browser_snapshot",
+      {},
+    );
+
+    const authenticated = { ...publicGrant, browser: { ...publicGrant.browser!, mode: "authenticated_restricted" as const } };
+    expect(catalog.visibleFor(authenticated).map((tool) => tool.name)).toEqual(["browser_snapshot"]);
+  });
+});

@@ -27,7 +27,8 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
    ※ 業務システムの認証情報・AWS の権限を持たない（環境キーだけ）
 
   tool-gateway ──▶ demo-internal-api（:8090）/ 社内 API（HTTP ツール）
-               └─▶ browser-worker（:8931, Playwright MCP）（配下の MCP サーバー）
+               └─▶ browser-session-worker（RunごとのFargate Task）
+                         └─▶ egress-proxy（FQDN allowlist）──▶ 許可Webサイト
 ```
 
 | ディレクトリ | パッケージ / イメージ | 役割 |
@@ -35,7 +36,9 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 | `controller/` | `@agent-studio/runtime-controller` / `agent-studio/runtime-controller` | 登録（Bootstrap Token + 署名済み GetCallerIdentity）、ジョブの取得、Session Worker の起動・停止・監視、ハートビート、Tool Gateway 向けの内部 API（セッションの許可情報・承認の中継・監査の送信） |
 | `tool-gateway/` | `@agent-studio/tool-gateway` / `agent-studio/tool-gateway` | Session Worker 向けの MCP エンドポイント。セッション用トークンの検証、許可されたツールの判定、ポリシー（拒否・承認・回数・時間帯）、承認待ち、監査、認証情報の注入、HTTP ツールと配下の MCP サーバーへの中継 |
 | `session-worker/` | `agent-studio/session-worker`（Dockerfile のみ） | `codex exec-server`。セッションごとに 1 タスク、使い捨て |
-| `browser-worker/` | `agent-studio/browser-worker`（Dockerfile のみ） | Playwright MCP（HTTP）。Tool Gateway の配下で動く |
+| `browser-session-worker/` | `@agent-studio/browser-session-worker` / `agent-studio/browser-worker` | Chromium + Playwright。Runごとに1 Task起動し、Screenshot・Snapshot・Browser Actionを提供 |
+| `egress-proxy/` | `@agent-studio/egress-proxy` / `agent-studio/egress-proxy` | Browser専用のInternet出口。FQDN allowlist、IP literal、private/link-local address拒否を強制 |
+| `browser-worker/` | 旧 `agent-studio/browser-worker` | 移行前の常駐Playwright MCP。新規デプロイでは使用しない |
 | `demo-internal-api/` | `@agent-studio/demo-internal-api` / `agent-studio/demo-internal-api` | 受け入れシナリオ用の社内 API モック（商品と価格） |
 
 ## Runtime Controller
@@ -47,10 +50,10 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 3. `403 runtime_revoked` ならジョブの取得を止め、Tool Gateway へのセッションの提供も止めて、5 分ごとに再確認する。
 4. 認証後、`GET /runtime/v1/sessions/active` と実行中のタスク（`ListTasks(startedBy="as/<session_id>")`）を突き合わせて引き継ぐ。
 5. `GET /runtime/v1/jobs/next?wait=20` を繰り返す（ジョブは並行して処理する）。
-   - `start_session`: 同時実行数を確認 → `RunTask`（FARGATE・awsvpc・パブリック IP なし・タグ `agentstudio:session_id` / `agentstudio:run_id`）→ `worker_starting` → RUNNING で `worker_running`（ジョブ成功）。5 分以内に RUNNING にならない・先に STOPPED になったら `worker_failed`（ジョブ失敗）。
-   - `stop_session`: `StopTask` → 許可情報を消す → `worker_stopped`。何度呼んでも成功する。
+   - `start_session`: Browser能力があればRun専用Browser Taskを先に起動し、Private IPをSession Grantへ登録する。続いてSession Workerを`RunTask`し、RUNNINGで`worker_running`（ジョブ成功）。
+   - `stop_session`: Session WorkerとBrowser Taskを`StopTask` → 許可情報を消す → `worker_stopped`。何度呼んでも成功する。
    - `rotate_environment_key`: `GET /runtime/v1/environment-key` → Secrets Manager に保存。
-6. 30 秒ごとにハートビート（バージョン、`GATEWAY_PUBLIC_URL`、実行中のセッション、Tool Gateway のカタログ）。15 秒ごとに Worker を監視し、終了を報告（終了コード 0・Controller が止めたものは `worker_stopped`、それ以外は `worker_failed`）、最大寿命を過ぎたものを停止する。
+6. 30 秒ごとにハートビート。15 秒ごとに両Workerを監視し、片方の終了、最大寿命、active sessionの無い孤児Taskを検出してペアで停止する。
 7. SIGTERM ではジョブの取得をやめ、処理中のジョブを最大 20 秒待って終了する。**実行中の Session Worker は止めない**。
 
 ### 内部 API（127.0.0.1:`CONTROLLER_INTERNAL_PORT` だけに bind）
@@ -74,6 +77,8 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 | `BOOTSTRAP_TOKEN_SECRET_ID` / `ENVIRONMENT_KEY_SECRET_ID` | （secrets-manager のとき必須） | Secrets Manager のシークレット |
 | `ECS_CLUSTER` / `SESSION_WORKER_TASK_DEFINITION` / `SESSION_WORKER_SUBNETS` / `SESSION_WORKER_SECURITY_GROUPS` | （ecs のとき必須） | サブネット・SG はカンマ区切り |
 | `SESSION_WORKER_CONTAINER_NAME` | `session-worker` | |
+| `BROWSER_LAUNCHER` | `disabled` | `ecs` / `docker` / `noop` / `disabled` |
+| `BROWSER_WORKER_TASK_DEFINITION` / `BROWSER_WORKER_SUBNETS` / `BROWSER_WORKER_SECURITY_GROUPS` | （Browserのecs時に必須） | RunごとのBrowser Task起動設定 |
 | `GATEWAY_PUBLIC_URL` | （必須） | Session Worker から見た MCP の URL（ハートビートで報告） |
 | `GATEWAY_CATALOG_URL` | `http://127.0.0.1:8082/internal/catalog` | |
 | `CONTROLLER_INTERNAL_PORT` | `8081` | |
@@ -130,9 +135,9 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 - uid 10001 の一般ユーザー、`HOME=/home/worker`、作業ディレクトリ `/workspace`。git・python3・ripgrep・curl を入れている。
 - `codex` を上げるときは `codex exec-server --help` で `--remote` と `--environment-id` があることを確認してから `CODEX_VERSION` を変える。
 
-## Browser Worker
+## Browser Session Worker / Egress Proxy
 
-[`browser-worker/README.md`](browser-worker/README.md) を参照（`@playwright/mcp` **0.0.80** + `mcr.microsoft.com/playwright:v1.63.0-noble`）。
+[`browser-session-worker/README.md`](browser-session-worker/README.md) を参照。Browser TaskはAWS権限・Secretを持たず、read-only root filesystemで起動する。`proxy` modeではSecurity Group上もEgress Proxy:3128以外へ送信できない。
 
 ## 社内 API モック（demo-internal-api）
 
@@ -206,6 +211,8 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 yarn workspace @agent-studio/runtime-controller type-check && yarn workspace @agent-studio/runtime-controller test && yarn workspace @agent-studio/runtime-controller build
 yarn workspace @agent-studio/tool-gateway type-check && yarn workspace @agent-studio/tool-gateway test && yarn workspace @agent-studio/tool-gateway build
 yarn workspace @agent-studio/demo-internal-api type-check && yarn workspace @agent-studio/demo-internal-api test && yarn workspace @agent-studio/demo-internal-api build
+yarn workspace @agent-studio/browser-session-worker type-check && yarn workspace @agent-studio/browser-session-worker test && yarn workspace @agent-studio/browser-session-worker build
+yarn workspace @agent-studio/egress-proxy type-check && yarn workspace @agent-studio/egress-proxy test && yarn workspace @agent-studio/egress-proxy build
 ```
 
 ## イメージのビルド
@@ -217,7 +224,8 @@ docker build --platform linux/amd64 -f runtime/controller/Dockerfile        -t a
 docker build --platform linux/amd64 -f runtime/tool-gateway/Dockerfile      -t agent-studio/tool-gateway .
 docker build --platform linux/amd64 -f runtime/demo-internal-api/Dockerfile -t agent-studio/demo-internal-api .
 docker build --platform linux/amd64 -f runtime/session-worker/Dockerfile    -t agent-studio/session-worker .
-docker build --platform linux/amd64 -f runtime/browser-worker/Dockerfile    -t agent-studio/browser-worker .
+docker build --platform linux/amd64 -f runtime/browser-session-worker/Dockerfile -t agent-studio/browser-worker .
+docker build --platform linux/amd64 -f runtime/egress-proxy/Dockerfile      -t agent-studio/egress-proxy .
 ```
 
 Node のサービス（controller / tool-gateway / demo-internal-api）は、ワークスペースの `package.json` だけを先に集めて依存を入れ、`yarn workspaces focus --production` で実行に要る依存だけにしてから、一般ユーザー（`node`）で `node dist/index.js` を動かす。

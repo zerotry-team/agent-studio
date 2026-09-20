@@ -46,6 +46,8 @@ export interface CreateConnectionDialogProps {
   runtimes: RuntimeDto[] | undefined;
   /** Runtime の一覧を読み込めなかった */
   runtimesFailed?: boolean;
+  /** 連携サービスから開いた場合は、そのInstallationとして作成する */
+  connector?: { id: string; name: string; description?: string };
   onClose: () => void;
   onCreated: (connection: ConnectionDto) => void;
 }
@@ -59,7 +61,7 @@ interface FormState {
   runtimeSecretName: string;
 }
 
-function validate(form: FormState): { input: CreateConnectionInput | null; errors: Record<string, string> } {
+function validate(form: FormState, connectorId?: string): { input: CreateConnectionInput | null; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
   if (!form.scope) {
     errors.scope = "認証情報をどこに保管するかを選んでください";
@@ -70,6 +72,7 @@ function validate(form: FormState): { input: CreateConnectionInput | null; error
     name: form.name.trim(),
     description: form.description.trim() || undefined,
     scope: form.scope,
+    connector_id: connectorId,
     header_name: form.scope === "studio" ? form.headerName.trim() || undefined : undefined,
     runtime_id: form.scope === "runtime" ? form.runtimeId || undefined : undefined,
     runtime_secret_name: form.scope === "runtime" ? form.runtimeSecretName.trim() || undefined : undefined,
@@ -93,14 +96,14 @@ function validate(form: FormState): { input: CreateConnectionInput | null; error
 }
 
 /** 接続先を登録するダイアログ（開いている間だけ描画する） */
-export function CreateConnectionDialog({ runtimes, runtimesFailed = false, onClose, onCreated }: CreateConnectionDialogProps) {
+export function CreateConnectionDialog({ runtimes, runtimesFailed = false, connector, onClose, onCreated }: CreateConnectionDialogProps) {
   const formId = useId();
   const formRef = useRef<HTMLFormElement>(null);
   const [form, setForm] = useState<FormState>({
-    name: "",
-    description: "",
-    scope: null,
-    headerName: "",
+    name: connector ? `${connector.name} 接続` : "",
+    description: connector?.description ?? "",
+    scope: connector ? "studio" : null,
+    headerName: connector ? "Authorization" : "",
     runtimeId: "",
     runtimeSecretName: "",
   });
@@ -111,7 +114,7 @@ export function CreateConnectionDialog({ runtimes, runtimesFailed = false, onClo
   });
 
   const usableRuntimes = useMemo(() => (runtimes ?? []).filter((r) => r.status !== "revoked"), [runtimes]);
-  const validation = useMemo(() => validate(form), [form]);
+  const validation = useMemo(() => validate(form, connector?.id), [form, connector?.id]);
   const errors = { ...mutation.fieldErrors, ...(showErrors ? validation.errors : {}) };
 
   const update = (patch: Partial<FormState>) => {
@@ -137,8 +140,8 @@ export function CreateConnectionDialog({ runtimes, runtimesFailed = false, onClo
       onClose={onClose}
       size="lg"
       busy={mutation.pending}
-      title="接続先を登録"
-      description="社内システムや外部サービスに接続するための認証情報の保管場所を登録します。認証情報の値は、登録したあとに設定します。"
+      title={connector ? `${connector.name}を接続` : "接続先を登録"}
+      description={connector ? "この組織で一度接続すると、許可したAgentのPreview / Productionから利用できます。" : "社内システムや外部サービスに接続するための認証情報の保管場所を登録します。認証情報の値は、登録したあとに設定します。"}
       footer={
         <>
           <Button variant="secondary" onClick={onClose} disabled={mutation.pending}>
@@ -170,13 +173,15 @@ export function CreateConnectionDialog({ runtimes, runtimesFailed = false, onClo
           />
         </Field>
 
-        <RadioCards
-          legend="認証情報をどこに保管しますか？"
-          options={SCOPE_OPTIONS}
-          value={form.scope}
-          onChange={(scope) => update({ scope })}
-          error={errors.scope}
-        />
+        {connector ? null : (
+          <RadioCards
+            legend="認証情報をどこに保管しますか？"
+            options={SCOPE_OPTIONS}
+            value={form.scope}
+            onChange={(scope) => update({ scope })}
+            error={errors.scope}
+          />
+        )}
 
         {form.scope === "studio" ? (
           <Field

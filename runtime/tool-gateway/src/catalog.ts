@@ -57,6 +57,19 @@ export function buildUpstreamTools(upstream: RuntimeUpstreamMcp, infos: Upstream
   return { tools, missing };
 }
 
+/** Run ごとの endpoint は起動前に問い合わせられないため、Runtime 設定で固定した schema からカタログを作る。 */
+export function buildDynamicUpstreamTools(upstream: RuntimeUpstreamMcp): CatalogTool[] {
+  return upstream.tools.map((tool) => ({
+    name: upstreamExposedName(tool),
+    description: tool.description ?? `${upstream.name} の ${tool.name}`,
+    inputSchema: tool.input_schema ?? FALLBACK_SCHEMA,
+    risk: tool.risk,
+    readsUntrustedContent: tool.reads_untrusted_content,
+    policies: upstream.policies,
+    target: { kind: "upstream" as const, upstream, toolName: tool.name },
+  }));
+}
+
 /**
  * Tool Gateway が提供できるツールの一覧（CRT-11: Runtime 側の設定にあるものだけ）。
  * HTTP ツールは設定から、配下の MCP サーバーのツールは起動時と定期的に取り直す。
@@ -92,6 +105,12 @@ export class ToolCatalog {
     await Promise.all(
       this.config.upstream_mcp.map(async (upstream) => {
         try {
+          if (upstream.dynamic_session_endpoint === "browser") {
+            const tools = buildDynamicUpstreamTools(upstream);
+            this.upstreamTools.set(upstream.name, tools);
+            this.logger.debug({ upstream: upstream.name, tools: tools.length }, "動的 endpoint のツール設定を読み込みました");
+            return;
+          }
           const { tools, missing } = buildUpstreamTools(upstream, await this.lister(upstream));
           this.upstreamTools.set(upstream.name, tools);
           if (missing.length > 0) {
@@ -139,7 +158,12 @@ export class ToolCatalog {
       if (seen.has(name)) continue;
       seen.add(name);
       const tool = this.get(name);
-      if (tool) out.push(tool);
+      if (!tool) continue;
+      if (tool.target.kind === "upstream" && tool.target.upstream.dynamic_session_endpoint === "browser") {
+        if (!grant.browser) continue;
+        if (grant.browser.mode === "authenticated_restricted" && tool.target.toolName === "browser_exec_js") continue;
+      }
+      out.push(tool);
     }
     return out;
   }

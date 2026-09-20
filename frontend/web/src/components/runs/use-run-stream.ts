@@ -93,7 +93,8 @@ export function useRunStream(runId: string): RunStream {
         setRunState(res.run);
         setError(null);
         setPollError(null);
-        if (isTerminalRunStatus(res.run.status) && Date.now() >= graceUntil.current) next = null;
+        const externalJobActive = res.run.external_jobs.some((job) => job.status === "pending" || job.status === "processing");
+        if (isTerminalRunStatus(res.run.status) && !externalJobActive && Date.now() >= graceUntil.current) next = null;
       } catch (e) {
         if (!mounted.current || id !== loopId.current) return;
         const err = toActionError(e);

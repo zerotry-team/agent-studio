@@ -3,6 +3,7 @@ import type {
   ApprovalStatus,
   DeploymentStatus,
   EvalRunDto,
+  RunOutcome,
   RunStatus,
   RuntimeStatus,
   Stage,
@@ -27,7 +28,10 @@ import {
 
 const ACTIVE_RUN: RunStatus[] = ["queued", "provisioning", "running"];
 
-export function RunStatusBadge({ status }: { status: RunStatus }) {
+export function RunStatusBadge({ status, outcome }: { status: RunStatus; outcome?: RunOutcome }) {
+  if (status === "completed" && outcome === "completed_with_errors") {
+    return <Badge tone="warning" dot>完了（操作エラーあり）</Badge>;
+  }
   const s = RUN_STATUS[status];
   return (
     <Badge tone={s.tone} dot pulse={ACTIVE_RUN.includes(status)}>

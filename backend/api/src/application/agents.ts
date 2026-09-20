@@ -6,24 +6,38 @@ import {
   policySchema,
   stringifyManifest,
   type AgentDto,
+  type AgentProjectDto,
   type AgentManifest,
+  type CapabilityResolutionDto,
   type AgentVersionDto,
   type CreateEvalCaseInput,
   type EvalCaseDto,
   type EvalRunDto,
   type GenerateManifestResultDto,
+  type LinkAgentConnectionInput,
   type ManifestValidationDto,
+  type SetAgentEnvironmentInput,
   type Policy,
   type ToolVersionSpec,
 } from "@agent-studio/contracts";
 import { conflict, notFound, preconditionFailed, validationError } from "../domain/errors.js";
+import { resolveCapabilities } from "../domain/capability-resolver.js";
 import type { ResolvedTool } from "../domain/manifest-compiler.js";
 import { recordAudit } from "../infrastructure/audit.js";
 import type { Tx } from "../infrastructure/db/tenant-db.js";
 import type { GeneratedAgent } from "../infrastructure/llm/manifest-generator.js";
 import { auditBy, requireRole, scopeOf, type MemberActor } from "./context.js";
 import type { Deps } from "./deps.js";
-import { toAgentDto, toAgentVersionDto, toEvalCaseDto, toEvalRunDto } from "./dto.js";
+import {
+  toAgentBuildDto,
+  toAgentConnectionLinkDto,
+  toAgentDto,
+  toAgentEnvironmentConfigDto,
+  toAgentVersionDto,
+  toDeploymentDto,
+  toEvalCaseDto,
+  toEvalRunDto,
+} from "./dto.js";
 import { createRunInTx } from "./runs.js";
 
 /** Manifest のツール参照を、組織のツール（バージョン）に解決する */
@@ -48,7 +62,14 @@ export async function resolveTools(
       errors.push(`ツール ${name} のバージョン ${version} がありません`);
       continue;
     }
-    tools.push({ tool_id: tool.id, tool_version_id: v.id, name, version: v.version, spec: v.spec as unknown as ToolVersionSpec });
+    tools.push({
+      tool_id: tool.id,
+      tool_version_id: v.id,
+      name,
+      version: v.version,
+      connector_id: tool.connector_id,
+      spec: v.spec as unknown as ToolVersionSpec,
+    });
   }
   return { tools, errors };
 }
@@ -73,6 +94,177 @@ export class AgentService {
       if (!agent) throw notFound("エージェント");
       return toAgentDto(agent, true);
     });
+  }
+
+  /** 業務説明1つからAgent Projectを作る。YAMLは保存するが通常導線では表示しない。 */
+  async createProject(actor: MemberActor, description: string): Promise<AgentDto> {
+    requireRole(actor, "builder");
+    const draft = await this.generate(actor, description);
+    let manifest = this.parseOrThrow(draft.manifest_yaml);
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const siblings = await tx.agents.findMany({
+        where: { organization_id: actor.organizationId, key: { startsWith: manifest.agent.key } },
+        select: { key: true },
+      });
+      if (siblings.some((agent) => agent.key === manifest.agent.key)) {
+        const base = manifest.agent.key.slice(0, 60);
+        let suffix = 2;
+        while (siblings.some((agent) => agent.key === `${base}-${suffix}`)) suffix += 1;
+        manifest = { ...manifest, agent: { ...manifest.agent, key: `${base}-${suffix}` } };
+      }
+      const agent = await tx.agents.create({
+        data: {
+          organization_id: actor.organizationId,
+          key: manifest.agent.key,
+          name: manifest.agent.name,
+          description: manifest.agent.description ?? null,
+          project_brief: description,
+          capability_resolution: draft.resolution as unknown as Prisma.InputJsonValue,
+          latest_version: 1,
+          created_by: actor.userId,
+          versions: {
+            create: {
+              version: 1,
+              status: "published",
+              published_at: new Date(),
+              manifest: manifest as unknown as Prisma.InputJsonValue,
+              manifest_yaml: stringifyManifest(manifest),
+              created_by: actor.userId,
+            },
+          },
+          environment_configs: {
+            create: [
+              { stage: "staging", variables: {} },
+              { stage: "production", variables: {} },
+            ],
+          },
+        },
+        include: { versions: true },
+      });
+      await recordAudit(
+        tx,
+        auditBy(actor, {
+          action: "agent.project.create",
+          targetType: "agent",
+          targetId: agent.id,
+          detail: { key: agent.key, selected_tools: draft.resolution.selected_tools },
+        }),
+      );
+      return toAgentDto(agent, true);
+    });
+  }
+
+  async getProject(actor: MemberActor, id: string): Promise<AgentProjectDto> {
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const agent = await tx.agents.findFirst({
+        where: { id, organization_id: actor.organizationId },
+        include: { versions: true },
+      });
+      if (!agent) throw notFound("エージェント");
+      const [links, environments, builds, deployments, connectors] = await Promise.all([
+        tx.agent_connection_links.findMany({
+          where: { agent_id: id, organization_id: actor.organizationId },
+          include: { connector: true, connection: true },
+          orderBy: [{ stage: "asc" }, { created_at: "asc" }],
+        }),
+        tx.agent_environment_configs.findMany({ where: { agent_id: id, organization_id: actor.organizationId } }),
+        tx.agent_builds.findMany({ where: { agent_id: id, organization_id: actor.organizationId }, orderBy: { build_number: "desc" } }),
+        tx.deployments.findMany({
+          where: { agent_id: id, organization_id: actor.organizationId },
+          include: { agent: true, agent_version: true, runtime_profile: { include: { runtime: true } }, build: true, runs: { orderBy: { created_at: "desc" }, take: 20 } },
+          orderBy: { created_at: "desc" },
+        }),
+        tx.connectors.findMany({ where: { organization_id: actor.organizationId }, select: { id: true, auth_type: true } }),
+      ]);
+      const dto = toAgentDto(agent, true);
+      dto.capability_resolution = resolveProjectReadiness(dto.capability_resolution, links, environments, connectors, "staging");
+      const preview = deployments.find((deployment) => deployment.stage === "staging" && deployment.status === "active");
+      const base = this.deps.env.PUBLIC_BASE_URL.replace(/\/$/, "");
+      const apiBase = this.deps.env.PUBLIC_API_BASE_URL.replace(/\/$/, "");
+      return {
+        agent: dto,
+        connection_links: links.map(toAgentConnectionLinkDto),
+        environments: environments.map(toAgentEnvironmentConfigDto),
+        builds: builds.map(toAgentBuildDto),
+        deployments: deployments.map((deployment) => {
+          const dto = toDeploymentDto(deployment);
+          dto.health_status = deploymentHealth(deployment, links);
+          return dto;
+        }),
+        preview_url: preview ? `${base}/agents/${id}?tab=preview` : null,
+        preview_api_url: preview ? `${apiBase}/api/v1/agents/${id}/invoke?stage=staging` : null,
+      };
+    });
+  }
+
+  async linkConnection(actor: MemberActor, agentId: string, input: LinkAgentConnectionInput): Promise<AgentProjectDto> {
+    requireRole(actor, "builder");
+    await this.deps.db.run(scopeOf(actor), async (tx) => {
+      const [agent, connector, connection] = await Promise.all([
+        tx.agents.findFirst({ where: { id: agentId, organization_id: actor.organizationId } }),
+        tx.connectors.findFirst({ where: { id: input.connector_id, organization_id: actor.organizationId }, include: { tools: true } }),
+        tx.connections.findFirst({ where: { id: input.connection_id, organization_id: actor.organizationId } }),
+      ]);
+      if (!agent) throw notFound("エージェント");
+      if (!connector || !connection || connection.connector_id !== connector.id) {
+        throw validationError("この連携サービスで利用できる接続ではありません");
+      }
+      if (connection.status !== "connected" || (connector.auth_type !== "none" && !connection.secret_locator && connection.scope !== "runtime")) {
+        throw preconditionFailed("接続の認証情報がまだ利用できません");
+      }
+      const available = new Set(connector.tools.map((tool) => tool.name));
+      if (input.allowed_capabilities.some((name) => !available.has(name))) {
+        throw validationError("許可対象に、この連携サービスにない操作が含まれています");
+      }
+      await tx.agent_connection_links.upsert({
+        where: { agent_id_stage_connector_id: { agent_id: agentId, stage: input.stage, connector_id: connector.id } },
+        create: {
+          organization_id: actor.organizationId,
+          agent_id: agentId,
+          connector_id: connector.id,
+          connection_id: connection.id,
+          stage: input.stage,
+          allowed_capabilities: input.allowed_capabilities,
+          created_by: actor.userId,
+        },
+        update: { connection_id: connection.id, allowed_capabilities: input.allowed_capabilities },
+      });
+      await recordAudit(
+        tx,
+        auditBy(actor, {
+          action: "agent.connection.link",
+          targetType: "agent",
+          targetId: agentId,
+          detail: { connector_id: connector.id, connection_id: connection.id, stage: input.stage, capabilities: input.allowed_capabilities },
+        }),
+      );
+    });
+    return this.getProject(actor, agentId);
+  }
+
+  async setEnvironment(actor: MemberActor, agentId: string, input: SetAgentEnvironmentInput): Promise<AgentProjectDto> {
+    requireRole(actor, "builder");
+    const secretLike = Object.keys(input.variables).find((key) => /(SECRET|TOKEN|PASSWORD|API_KEY|PRIVATE_KEY)/i.test(key));
+    if (secretLike) throw validationError(`${secretLike} はVariablesではなく連携サービスの認証情報として設定してください`);
+    await this.deps.db.run(scopeOf(actor), async (tx) => {
+      const agent = await tx.agents.findFirst({ where: { id: agentId, organization_id: actor.organizationId } });
+      if (!agent) throw notFound("エージェント");
+      await tx.agent_environment_configs.upsert({
+        where: { agent_id_stage: { agent_id: agentId, stage: input.stage } },
+        create: { organization_id: actor.organizationId, agent_id: agentId, stage: input.stage, variables: input.variables },
+        update: { variables: input.variables },
+      });
+      await recordAudit(
+        tx,
+        auditBy(actor, {
+          action: "agent.environment.update",
+          targetType: "agent",
+          targetId: agentId,
+          detail: { stage: input.stage, variable_names: Object.keys(input.variables) },
+        }),
+      );
+    });
+    return this.getProject(actor, agentId);
   }
 
   /** 検証（エラーは保存を止める。警告は止めない） */
@@ -177,10 +369,17 @@ export class AgentService {
   /** 日本語の説明から Manifest の案を作る（AGT-03）。保存はしない */
   async generate(actor: MemberActor, description: string): Promise<GenerateManifestResultDto> {
     requireRole(actor, "builder");
-    const { tools, profiles } = await this.deps.db.run(scopeOf(actor), async (tx) => {
-      const tools = await tx.tools.findMany({ where: { organization_id: actor.organizationId }, include: { versions: true } });
+    const { tools, profiles, connections } = await this.deps.db.run(scopeOf(actor), async (tx) => {
+      const tools = await tx.tools.findMany({
+        where: { organization_id: actor.organizationId },
+        include: { versions: true, connector: true },
+      });
       const profiles = await tx.runtime_profiles.findMany({ where: { organization_id: actor.organizationId } });
-      return { tools, profiles };
+      const connections = await tx.connections.findMany({
+        where: { organization_id: actor.organizationId, status: "connected", connector_id: { not: null } },
+        select: { connector_id: true },
+      });
+      return { tools, profiles, connections };
     });
 
     const toolInfos = tools.map((t) => {
@@ -194,14 +393,36 @@ export class AgentService {
         execution_location: t.execution_location,
         risk: t.risk,
         input_fields: Object.keys(schema?.properties ?? {}),
+        connector_id: t.connector_id,
+        connector_name: t.connector?.name ?? null,
+        connector_auth_type: t.connector?.auth_type ?? null,
       };
     });
     const generated = await this.deps.generator.generate({
+      organizationId: actor.organizationId,
       description,
       tools: toolInfos,
       profiles: profiles.map((p) => ({ key: p.key, name: p.name, type: p.type })),
     });
-    return toManifestDraft(generated, new Set(tools.map((t) => t.name)), new Set(profiles.map((p) => p.key)));
+    const resolution = resolveCapabilities(
+      generated,
+      toolInfos,
+      new Set(connections.flatMap((connection) => (connection.connector_id ? [connection.connector_id] : []))),
+    );
+    const selectedLocations = new Set(
+      resolution.selected_tools.flatMap((name) => {
+        const selected = tools.find((tool) => tool.name === name);
+        return selected ? [selected.execution_location] : [];
+      }),
+    );
+    const requiredProfileType = selectedLocations.has("runtime_mcp") ? "self_hosted" : undefined;
+    const chosenProfile = requiredProfileType ? profiles.find((profile) => profile.type === requiredProfileType) : undefined;
+    return toManifestDraft(
+      chosenProfile ? { ...generated, environment_profile: chosenProfile.key } : generated,
+      new Set(tools.map((t) => t.name)),
+      new Set(profiles.map((p) => p.key)),
+      resolution,
+    );
   }
 
   private parseOrThrow(source: string): AgentManifest {
@@ -280,16 +501,22 @@ export class AgentService {
 }
 
 /** 生成結果を Manifest の YAML にする。存在しないツール・実行環境は外して notes で伝える */
-export function toManifestDraft(g: GeneratedAgent, toolNames: Set<string>, profileKeys: Set<string>): GenerateManifestResultDto {
-  const notes = [...g.notes];
-  const tools = [...new Set(g.tools)].filter((t) => {
+export function toManifestDraft(
+  g: GeneratedAgent,
+  toolNames: Set<string>,
+  profileKeys: Set<string>,
+  resolution?: CapabilityResolutionDto,
+): GenerateManifestResultDto {
+  const notes = [...(g.notes ?? [])];
+  const requestedTools = resolution?.selected_tools ?? g.tools ?? [];
+  const tools = [...new Set(requestedTools)].filter((t) => {
     if (toolNames.has(t)) return true;
     notes.push(`ツール ${t} は登録されていないため外しました`);
     return false;
   });
 
   const policies: Policy[] = [];
-  for (const r of g.approval_rules) {
+  for (const r of g.approval_rules ?? []) {
     if (!tools.includes(r.tool)) continue;
     const when = r.field && r.op && r.value !== null ? { field: r.field, op: r.op, value: r.value, ...(r.abs ? { abs: true } : {}) } : undefined;
     const parsed = policySchema.safeParse({ type: "approval", tool: r.tool, ...(when ? { when } : {}), reason: r.reason });
@@ -310,5 +537,67 @@ export function toManifestDraft(g: GeneratedAgent, toolNames: Set<string>, profi
   };
   const check = parseManifest(manifest);
   if (!check.ok) notes.push(`生成した定義に確認が必要な点があります: ${check.errors.map((e) => e.message).join(" / ")}`);
-  return { manifest_yaml: stringifyManifest(manifest), notes };
+  const fallbackResolution: CapabilityResolutionDto = resolution ?? {
+    requirements: tools.map((tool) => ({
+      requirement: tool,
+      state: "resolved",
+      connector_id: null,
+      connector_name: null,
+      tool_names: [tool],
+      confidence: 1,
+      reason: "生成結果で選択されました",
+    })),
+    selected_tools: tools,
+    missing_variables: g.missing_variables ?? [],
+    ready: true,
+  };
+  return { manifest_yaml: stringifyManifest(manifest), notes, resolution: fallbackResolution };
+}
+
+function deploymentHealth(
+  deployment: {
+    stage: string;
+    health_status: string;
+    runtime_profile: { runtime?: { status: string } | null };
+    runs: { status: string; outcome: string }[];
+  },
+  links: { stage: string; connection: { status: string } }[],
+): "ready" | "degraded" | "failed" {
+  const runtimeStatus = deployment.runtime_profile.runtime?.status;
+  if (runtimeStatus === "offline" || runtimeStatus === "revoked") return "failed";
+  if (runtimeStatus && runtimeStatus !== "active") return "degraded";
+  if (links.some((link) => link.stage === deployment.stage && link.connection.status !== "connected")) return "degraded";
+  const finished = deployment.runs.filter((run) => ["completed", "failed", "cancelled"].includes(run.status));
+  const failed = finished.filter((run) => run.status === "failed" || run.outcome === "completed_with_errors").length;
+  if (finished.length >= 3 && failed / finished.length >= 0.8) return "failed";
+  if (finished.length >= 3 && failed / finished.length >= 0.3) return "degraded";
+  return deployment.health_status === "failed" ? "failed" : "ready";
+}
+
+function resolveProjectReadiness(
+  resolution: CapabilityResolutionDto,
+  links: { stage: string; connector_id: string; allowed_capabilities: unknown }[],
+  environments: { stage: string; variables: unknown }[],
+  connectors: { id: string; auth_type: string }[],
+  stage: "staging" | "production",
+): CapabilityResolutionDto {
+  const stageLinks = links.filter((link) => link.stage === stage);
+  const requirements = resolution.requirements.map((requirement) => {
+    if (!requirement.connector_id || requirement.state === "missing" || requirement.state === "ambiguous") return requirement;
+    if (connectors.find((connector) => connector.id === requirement.connector_id)?.auth_type === "none") {
+      return { ...requirement, state: "resolved" as const };
+    }
+    const linked = stageLinks.find((link) => link.connector_id === requirement.connector_id);
+    const allowed = new Set(Array.isArray(linked?.allowed_capabilities) ? (linked.allowed_capabilities as string[]) : []);
+    const ready = Boolean(linked) && requirement.tool_names.every((tool) => allowed.has(tool));
+    return { ...requirement, state: ready ? ("resolved" as const) : ("needs_connection" as const) };
+  });
+  const values = (environments.find((environment) => environment.stage === stage)?.variables ?? {}) as Record<string, string>;
+  const missingVariables = resolution.missing_variables.filter((name) => !values[name]);
+  return {
+    ...resolution,
+    requirements,
+    missing_variables: missingVariables,
+    ready: requirements.every((requirement) => requirement.state === "resolved") && missingVariables.length === 0,
+  };
 }

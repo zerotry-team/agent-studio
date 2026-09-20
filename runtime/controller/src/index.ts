@@ -9,6 +9,13 @@ import { DockerSessionLauncher, EcsSessionLauncher, NoopSessionLauncher, type Se
 import { createLogger, errorInfo, type Logger } from "./logger.js";
 import { ControllerSecrets, MemorySecretStore, SecretsManagerStore } from "./secrets.js";
 import { AgentStudioClient, RuntimeAuth, StudioHttp, type StudioApi } from "./studio-client.js";
+import {
+  DisabledBrowserLauncher,
+  DockerBrowserLauncher,
+  EcsBrowserLauncher,
+  NoopBrowserLauncher,
+  type BrowserLauncher,
+} from "./browser-launcher.js";
 
 function readVersion(): string {
   try {
@@ -46,6 +53,19 @@ function createLauncher(
   }
 }
 
+function createBrowserLauncher(config: ControllerConfig, logger: Logger): BrowserLauncher {
+  switch (config.browserLauncher.type) {
+    case "ecs":
+      return new EcsBrowserLauncher(new ECSClient({ region: config.region }), config.browserLauncher);
+    case "docker":
+      return new DockerBrowserLauncher(config.browserLauncher, logger);
+    case "noop":
+      return new NoopBrowserLauncher();
+    case "disabled":
+      return new DisabledBrowserLauncher();
+  }
+}
+
 async function main(): Promise<void> {
   let config: ControllerConfig;
   try {
@@ -78,6 +98,7 @@ async function main(): Promise<void> {
   const studio = new AgentStudioClient(http, auth);
   const grants = new GrantStore();
   const launcher = createLauncher(config, secrets, studio, logger);
+  const browserLauncher = createBrowserLauncher(config, logger);
 
   logger.info(
     {
@@ -85,13 +106,14 @@ async function main(): Promise<void> {
       agent_studio_url: config.agentStudioUrl,
       identity_mode: config.identity.mode,
       launcher: launcher.kind,
+      browser_launcher: browserLauncher.kind,
       secret_store: config.secrets.store,
       max_concurrent_sessions: config.maxConcurrentSessions,
     },
     "設定を読み込みました",
   );
 
-  const controller = new Controller({ config, logger, auth, studio, grants, launcher, secrets, controllerVersion: version });
+  const controller = new Controller({ config, logger, auth, studio, grants, launcher, browserLauncher, secrets, controllerVersion: version });
   await controller.start();
 
   const shutdown = (signal: string) => {

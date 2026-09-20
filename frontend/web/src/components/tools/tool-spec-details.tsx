@@ -44,11 +44,19 @@ export function ToolSpecDetails({ spec, connections }: ToolSpecDetailsProps) {
 
   switch (spec.execution_location) {
     case "studio_function":
-      items.push(
-        { label: "送信先 URL", value: <Mono>{spec.studio_function.url}</Mono>, wide: true },
-        { label: "認証に使う接続先", value: <ConnectionName id={spec.studio_function.connection_id} connections={connections} /> },
-        { label: "入力の形式（JSON Schema）", value: <JsonView value={spec.input_schema} maxHeight="20rem" />, wide: true },
-      );
+      if (spec.studio_function.handler === "http_api") {
+        items.push(
+          { label: "API", value: <Mono>{spec.studio_function.method} {spec.studio_function.base_url}{spec.studio_function.path}</Mono>, wide: true },
+          { label: "認証", value: "Agent ProjectのConnectionを実行時に使用" },
+          { label: "入力の形式（JSON Schema）", value: <JsonView value={spec.input_schema} maxHeight="20rem" />, wide: true },
+        );
+      } else {
+        items.push(
+          { label: "送信先 URL", value: <Mono>{spec.studio_function.url}</Mono>, wide: true },
+          { label: "認証に使う接続先", value: <ConnectionName id={spec.studio_function.connection_id} connections={connections} /> },
+          { label: "入力の形式（JSON Schema）", value: <JsonView value={spec.input_schema} maxHeight="20rem" />, wide: true },
+        );
+      }
       break;
     case "openai_service_mcp": {
       const allowed = spec.service_mcp.allowed_tools ?? [];

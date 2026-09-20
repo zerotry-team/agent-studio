@@ -54,6 +54,8 @@ export async function setRunStatus(
     where: { id: run.id },
     data: {
       status,
+      ...(status === "failed" ? { outcome: "failed" } : {}),
+      ...(status === "cancelled" ? { outcome: "cancelled" } : {}),
       ...(status === "running" ? { started_at: undefined } : {}),
       ...(terminal ? { finished_at: new Date(), stream_lease_owner: null, stream_lease_until: null } : {}),
       ...extra,

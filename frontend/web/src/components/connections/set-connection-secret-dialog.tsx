@@ -28,6 +28,7 @@ export function SetConnectionSecretDialog({ connection, onClose, onSaved }: SetC
   const isVault = connection.scope === "openai_vault";
   const [value, setValue] = useState("");
   const [mcpServerUrl, setMcpServerUrl] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const mutation = useActionMutation(setConnectionSecretAction, {
     successMessage: `「${connection.name}」の認証情報を保存しました`,
@@ -37,7 +38,11 @@ export function SetConnectionSecretDialog({ connection, onClose, onSaved }: SetC
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     const url = mcpServerUrl.trim();
-    const input = { value, mcp_server_url: isVault ? url || undefined : undefined };
+    const input = {
+      value,
+      mcp_server_url: isVault ? url || undefined : undefined,
+      expires_at: expiresAt ? new Date(expiresAt).toISOString() : undefined,
+    };
     const parsed = setConnectionSecretSchema.safeParse(input);
     const next: Record<string, string> = parsed.success ? {} : zodFieldErrors(parsed.error);
     if (!value) next.value = "認証情報の値を入力してください";
@@ -130,6 +135,18 @@ export function SetConnectionSecretDialog({ connection, onClose, onSaved }: SetC
             />
           </Field>
         ) : null}
+
+        <Field
+          label="有効期限"
+          error={shownErrors.expires_at}
+          hint="任意。期限を過ぎると自動で利用を停止します。サービス側のトークン期限に合わせてください。"
+        >
+          <Input
+            type="datetime-local"
+            value={expiresAt}
+            onChange={(e) => setExpiresAt(e.target.value)}
+          />
+        </Field>
       </form>
     </Dialog>
   );

@@ -4,6 +4,7 @@ import {
   createRuntimeProfileSchema,
   type AgentManifest,
   type BootstrapTokenDto,
+  type CapabilityResolutionDto,
   type CreateDeploymentInput,
   type CreateRuntimeInput,
   type CreateRuntimeProfileInput,
@@ -194,12 +195,268 @@ export class EnvironmentService {
       (
         await tx.deployments.findMany({
           where: { organization_id: actor.organizationId, ...(agentId ? { agent_id: agentId } : {}) },
-          include: { agent: true, agent_version: true, runtime_profile: true },
+          include: { agent: true, agent_version: true, runtime_profile: true, build: true },
           orderBy: { created_at: "desc" },
           take: 200,
         })
       ).map(toDeploymentDto),
     );
+  }
+
+  /** 依存関係を検証し、Immutable BuildとPreview Deploymentを作る（AV-040）。 */
+  async createPreview(actor: MemberActor, agentId: string): Promise<DeploymentDto> {
+    requireRole(actor, "builder");
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const agent = await tx.agents.findFirst({
+        where: { id: agentId, organization_id: actor.organizationId },
+        include: { versions: { orderBy: { version: "desc" } } },
+      });
+      if (!agent) throw notFound("エージェント");
+      const version = agent.versions.find((candidate) => candidate.status === "published");
+      if (!version) throw preconditionFailed("公開済みのAgent Versionがありません");
+      const manifest = version.manifest as unknown as AgentManifest;
+      const profile = manifest.environment.profile
+        ? await tx.runtime_profiles.findUnique({
+            where: { organization_id_key: { organization_id: actor.organizationId, key: manifest.environment.profile } },
+            include: { runtime: true },
+          })
+        : await tx.runtime_profiles.findFirst({
+            where: { organization_id: actor.organizationId },
+            include: { runtime: true },
+            orderBy: [{ type: "asc" }, { created_at: "asc" }],
+          });
+      if (!profile) throw preconditionFailed("Previewを動かす環境がありません。SettingsでEnvironmentを設定してください");
+
+      const resolution = agent.capability_resolution as unknown as CapabilityResolutionDto;
+      const variables = await this.assertProjectDependencies(tx, actor.organizationId, agentId, "staging", resolution);
+      const { config, warnings } = await this.compile(tx, actor.organizationId, manifest, profile);
+      const latestBuild = await tx.agent_builds.findFirst({ where: { agent_id: agentId }, orderBy: { build_number: "desc" } });
+      const build = await tx.agent_builds.create({
+        data: {
+          organization_id: actor.organizationId,
+          agent_id: agentId,
+          agent_version_id: version.id,
+          runtime_profile_id: profile.id,
+          build_number: (latestBuild?.build_number ?? 0) + 1,
+          resolution: resolution as unknown as Prisma.InputJsonValue,
+          compiled_config: config as unknown as Prisma.InputJsonValue,
+          build_log: [
+            { type: "success", message: `${manifest.tools.length}個の能力を固定しました` },
+            { type: "success", message: "Preview Connectionと権限を検証しました" },
+            { type: "success", message: `Environment: ${profile.name}` },
+            ...warnings.map((message) => ({ type: "warning", message })),
+          ] as Prisma.InputJsonValue,
+          created_by: actor.userId,
+        },
+      });
+      await tx.deployments.updateMany({
+        where: { organization_id: actor.organizationId, agent_id: agentId, stage: "staging", status: "active" },
+        data: { status: "superseded" },
+      });
+      const deployment = await tx.deployments.create({
+        data: {
+          organization_id: actor.organizationId,
+          agent_id: agentId,
+          agent_version_id: version.id,
+          runtime_profile_id: profile.id,
+          build_id: build.id,
+          stage: "staging",
+          compiled_config: { ...config, variables } as unknown as Prisma.InputJsonValue,
+          created_by: actor.userId,
+        },
+        include: { agent: true, agent_version: true, runtime_profile: true, build: true },
+      });
+      await recordAudit(
+        tx,
+        auditBy(actor, {
+          action: "deployment.preview.create",
+          targetType: "deployment",
+          targetId: deployment.id,
+          detail: { agent_id: agentId, build_id: build.id, build_number: build.build_number, variable_names: Object.keys(variables) },
+        }),
+      );
+      return toDeploymentDto(deployment);
+    });
+  }
+
+  /** Previewで検証した同一BuildをProductionへ昇格する（再コンパイルしない）。 */
+  async promote(actor: MemberActor, previewDeploymentId: string): Promise<DeploymentDto> {
+    requireRole(actor, "admin");
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const preview = await tx.deployments.findFirst({
+        where: { id: previewDeploymentId, organization_id: actor.organizationId, stage: "staging" },
+        include: { build: true, agent: true, agent_version: true, runtime_profile: true },
+      });
+      if (!preview?.build) throw preconditionFailed("Buildを持つPreview DeploymentだけProductionへ公開できます");
+      if (preview.health_status !== "ready") throw preconditionFailed("PreviewがReadyではないため公開できません");
+      const variables = await this.assertProjectDependencies(
+        tx,
+        actor.organizationId,
+        preview.agent_id,
+        "production",
+        preview.build.resolution as unknown as CapabilityResolutionDto,
+      );
+      await tx.deployments.updateMany({
+        where: { organization_id: actor.organizationId, agent_id: preview.agent_id, stage: "production", status: "active" },
+        data: { status: "superseded" },
+      });
+      const baseConfig = preview.build.compiled_config as Record<string, unknown>;
+      const production = await tx.deployments.create({
+        data: {
+          organization_id: actor.organizationId,
+          agent_id: preview.agent_id,
+          agent_version_id: preview.agent_version_id,
+          runtime_profile_id: preview.runtime_profile_id,
+          build_id: preview.build_id,
+          promoted_from_id: preview.id,
+          stage: "production",
+          compiled_config: { ...baseConfig, variables } as Prisma.InputJsonValue,
+          created_by: actor.userId,
+        },
+        include: { agent: true, agent_version: true, runtime_profile: true, build: true },
+      });
+      await recordAudit(
+        tx,
+        auditBy(actor, {
+          action: "deployment.promote",
+          targetType: "deployment",
+          targetId: production.id,
+          detail: { preview_deployment_id: preview.id, build_id: preview.build.id, build_number: preview.build.build_number },
+        }),
+      );
+      return toDeploymentDto(production);
+    });
+  }
+
+  /** 過去の成功済みProduction Buildへ戻す。Tool versionとPolicyはBuildからそのまま復元する。 */
+  async rollback(actor: MemberActor, targetDeploymentId: string): Promise<DeploymentDto> {
+    requireRole(actor, "admin");
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const target = await tx.deployments.findFirst({
+        where: { id: targetDeploymentId, organization_id: actor.organizationId, stage: "production", health_status: "ready" },
+        include: { build: true, agent: true, agent_version: true, runtime_profile: true },
+      });
+      if (!target?.build) throw preconditionFailed("RollbackできるBuildがありません");
+      const variables = await this.assertProjectDependencies(
+        tx,
+        actor.organizationId,
+        target.agent_id,
+        "production",
+        target.build.resolution as unknown as CapabilityResolutionDto,
+      );
+      await tx.deployments.updateMany({
+        where: { organization_id: actor.organizationId, agent_id: target.agent_id, stage: "production", status: "active" },
+        data: { status: "superseded" },
+      });
+      const restored = await tx.deployments.create({
+        data: {
+          organization_id: actor.organizationId,
+          agent_id: target.agent_id,
+          agent_version_id: target.agent_version_id,
+          runtime_profile_id: target.runtime_profile_id,
+          build_id: target.build_id,
+          promoted_from_id: target.id,
+          stage: "production",
+          compiled_config: { ...(target.build.compiled_config as Record<string, unknown>), variables } as Prisma.InputJsonValue,
+          created_by: actor.userId,
+        },
+        include: { agent: true, agent_version: true, runtime_profile: true, build: true },
+      });
+      await recordAudit(
+        tx,
+        auditBy(actor, {
+          action: "deployment.rollback",
+          targetType: "deployment",
+          targetId: restored.id,
+          detail: { rollback_target_id: target.id, build_id: target.build.id, build_number: target.build.build_number },
+        }),
+      );
+      return toDeploymentDto(restored);
+    });
+  }
+
+  private async assertProjectDependencies(
+    tx: Prisma.TransactionClient,
+    organizationId: string,
+    agentId: string,
+    stage: "staging" | "production",
+    resolution: CapabilityResolutionDto,
+  ): Promise<Record<string, string>> {
+    const unresolved = resolution.requirements.find((requirement) => requirement.state === "missing" || requirement.state === "ambiguous");
+    if (unresolved) throw preconditionFailed(`必要な能力「${unresolved.requirement}」を解決できていません`);
+
+    const connectorIds = [...new Set(resolution.requirements.flatMap((requirement) => (requirement.connector_id ? [requirement.connector_id] : [])))];
+    const [connectors, links, environment] = await Promise.all([
+      tx.connectors.findMany({ where: { organization_id: organizationId, id: { in: connectorIds } } }),
+      tx.agent_connection_links.findMany({
+        where: { organization_id: organizationId, agent_id: agentId, stage, connector_id: { in: connectorIds } },
+        include: { connection: true },
+      }),
+      tx.agent_environment_configs.findUnique({ where: { agent_id_stage: { agent_id: agentId, stage } } }),
+    ]);
+    for (const requirement of resolution.requirements) {
+      if (!requirement.connector_id) continue;
+      const connector = connectors.find((candidate) => candidate.id === requirement.connector_id);
+      if (!connector) throw preconditionFailed(`連携サービス「${requirement.connector_name ?? requirement.requirement}」が見つかりません`);
+      if (connector.auth_type === "none") continue;
+      const link = links.find((candidate) => candidate.connector_id === connector.id);
+      if (!link) throw preconditionFailed(`${stage === "staging" ? "Preview" : "Production"}の${connector.name} Connectionを設定してください`);
+      const allowed = new Set(link.allowed_capabilities as string[]);
+      if (requirement.tool_names.some((tool) => !allowed.has(tool))) {
+        throw preconditionFailed(`${connector.name}で必要な操作が許可されていません`);
+      }
+      if (link.connection.status !== "connected") throw preconditionFailed(`${connector.name} Connectionは${link.connection.status}です`);
+      if (link.connection.scope !== "runtime" && !link.connection.secret_locator) {
+        throw preconditionFailed(`${connector.name} Connectionの認証情報が未設定です`);
+      }
+    }
+    const variables = (environment?.variables ?? {}) as Record<string, string>;
+    const missingVariable = resolution.missing_variables.find((name) => !variables[name]);
+    if (missingVariable) throw preconditionFailed(`Variable ${missingVariable} を設定してください`);
+    return variables;
+  }
+
+  private async compile(
+    tx: Prisma.TransactionClient,
+    organizationId: string,
+    manifest: AgentManifest,
+    profile: {
+      id: string;
+      key: string;
+      type: string;
+      template: string | null;
+      network: Prisma.JsonValue | null;
+      runtime: {
+        id: string;
+        status: string;
+        gateway_url: string | null;
+        tool_catalog: Prisma.JsonValue;
+      } | null;
+    },
+  ) {
+    const { tools, errors: toolErrors } = await resolveTools(tx, organizationId, manifest.tools);
+    if (toolErrors.length > 0) throw preconditionFailed(toolErrors[0]!, { errors: toolErrors });
+    const orgPolicies = (await tx.policies.findMany({ where: { organization_id: organizationId, enabled: true } })).map(
+      (policy) => policy.rule as unknown as Policy,
+    );
+    const compileProfile: CompileProfile = {
+      id: profile.id,
+      key: profile.key,
+      type: profile.type as CompileProfile["type"],
+      template: (profile.template as OpenAiTemplate | null) ?? null,
+      network: (profile.network as unknown as NetworkPolicy | null) ?? null,
+      runtime: profile.runtime
+        ? {
+            id: profile.runtime.id,
+            status: profile.runtime.status,
+            gateway_url: profile.runtime.gateway_url,
+            tool_catalog: profile.runtime.tool_catalog as unknown as RuntimeToolCatalogEntry[],
+          }
+        : null,
+    };
+    const result = compileAgent({ manifest, tools, profile: compileProfile, orgPolicies, defaultModel: this.deps.env.OPENAI_DEFAULT_MODEL });
+    if (!result.ok) throw preconditionFailed(result.errors[0]!, { errors: result.errors, warnings: result.warnings });
+    return { config: result.config, warnings: result.config.warnings };
   }
 
   /**
@@ -265,7 +522,7 @@ export class EnvironmentService {
           compiled_config: result.config as unknown as Prisma.InputJsonValue,
           created_by: actor.userId,
         },
-        include: { agent: true, agent_version: true, runtime_profile: true },
+        include: { agent: true, agent_version: true, runtime_profile: true, build: true },
       });
       await recordAudit(
         tx,
@@ -288,7 +545,7 @@ export class EnvironmentService {
       const updated = await tx.deployments.update({
         where: { id },
         data: { status: "archived" },
-        include: { agent: true, agent_version: true, runtime_profile: true },
+        include: { agent: true, agent_version: true, runtime_profile: true, build: true },
       });
       await recordAudit(tx, auditBy(actor, { action: "deployment.archive", targetType: "deployment", targetId: id }));
       return toDeploymentDto(updated);

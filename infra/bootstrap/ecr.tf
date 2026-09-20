@@ -8,6 +8,7 @@ locals {
     "agent-studio/tool-gateway",
     "agent-studio/session-worker",
     "agent-studio/browser-worker",
+    "agent-studio/egress-proxy",
     "agent-studio/demo-internal-api",
   ]) : toset([])
 

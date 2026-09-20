@@ -30,15 +30,33 @@ export type ToolInputSchema = z.infer<typeof inputSchemaSchema>;
 const EMPTY_INPUT_SCHEMA: ToolInputSchema = { type: "object", properties: {}, additionalProperties: false };
 
 /** Agent Studio が実行する function tool の実装種別 */
-export const studioFunctionSpecSchema = z
-  .object({
-    handler: z.literal("http_webhook"),
-    /** 送信先 URL（https のみ） */
-    url: z.url().refine((u) => u.startsWith("https://"), "https の URL を指定してください"),
-    /** 認証ヘッダの値を持つ Connection（任意） */
-    connection_id: z.uuid().optional(),
-  })
-  .strict();
+const httpsUrl = z.url().refine((u) => u.startsWith("https://"), "https の URL を指定してください");
+
+export const studioFunctionSpecSchema = z.discriminatedUnion("handler", [
+  z
+    .object({
+      handler: z.literal("http_webhook"),
+      /** 送信先 URL（https のみ）。Manifest v1 の後方互換用 */
+      url: httpsUrl,
+      /** 認証ヘッダの値を持つ Connection（任意） */
+      connection_id: z.uuid().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      handler: z.literal("http_api"),
+      /** Connector の Base URL。Secret は含めない */
+      base_url: httpsUrl,
+      method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
+      /** /v1/posts/{id} のような相対パス。{field} は入力値で置換する */
+      path: z.string().startsWith("/").max(500),
+      /** GET/DELETE は query、その他は JSON body が既定 */
+      argument_location: z.enum(["query", "body"]).optional(),
+      /** Agent Studio内だけで冪等性キー生成に使い、接続先へは送らない入力フィールド */
+      idempotency_key_field: toolNameSchema.optional(),
+    })
+    .strict(),
+]);
 
 export const serviceMcpSpecSchema = z
   .object({

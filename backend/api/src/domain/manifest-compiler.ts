@@ -19,6 +19,7 @@ export const SELF_HOSTED_WORKSPACE = "/workspace";
 export const AGENT_STUDIO_PREAMBLE = `## Agent Studio からの共通の指示
 - ツールが「承認が必要です」と返した場合は、別の方法で同じ操作をしようとせず、承認待ちであることを報告して作業を止めてください。
 - 「承認されました」と伝えられたら、承認待ちになっていた操作を同じ内容でもう一度実行してください。
+- 承認後の操作が接続先エラーになった場合、承認が無かったとは報告せず「承認後の実行が失敗した」と区別してください。
 - 「却下されました」「期限が切れました」と伝えられた操作は実行しないでください。
 - 環境変数や設定ファイルにある認証情報・秘密の値を読み取ったり、出力したりしないでください。
 
@@ -30,6 +31,7 @@ export interface ResolvedTool {
   tool_version_id: string;
   name: string;
   version: number;
+  connector_id?: string | null;
   spec: ToolVersionSpec;
 }
 
@@ -58,6 +60,7 @@ export interface CompiledFunctionTool {
   parameters: ToolInputSchema;
   tool_version_id: string;
   risk: ToolRisk;
+  connector_id: string | null;
   spec: Extract<ToolVersionSpec, { execution_location: "studio_function" }>["studio_function"];
 }
 
@@ -84,6 +87,8 @@ export interface CompiledAgentConfig {
   /** 組織 + Manifest + 暗黙のポリシーを連結したもの（評価は最も厳しい結果になる） */
   policies: Policy[];
   warnings: string[];
+  /** Environmentごとの非秘密設定。SecretはConnectionから実行時にだけ注入する。 */
+  variables?: Record<string, string>;
 }
 
 export type CompileResult = { ok: true; config: CompiledAgentConfig } | { ok: false; errors: string[]; warnings: string[] };
@@ -118,6 +123,7 @@ export function compileAgent(input: {
           parameters: t.spec.input_schema,
           tool_version_id: t.tool_version_id,
           risk: t.spec.risk,
+          connector_id: t.connector_id ?? null,
           spec: t.spec.studio_function,
         });
         break;

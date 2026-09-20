@@ -25,6 +25,7 @@ import type {
 } from "../infrastructure/openai/agents-api.js";
 import type { Logger } from "../logger.js";
 import type { StudioFunctionExecutor } from "./studio-functions.js";
+import { parseExternalJobResponse } from "./external-jobs.js";
 
 type Outcome = "continue" | "done" | "released";
 type RequiredAction = AgentSession["required_actions"][number];
@@ -36,6 +37,32 @@ const MAX_STREAM_RECONNECTS = 20;
 const MAX_ARTIFACTS = 50;
 const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 
+const BROWSER_TOOL_PREFIX = "browser_";
+
+export function browserConfigForRun(config: CompiledAgentConfig): StartSessionJob["session"]["browser"] {
+  const browserTools = config.runtime_tools.filter((name) => name.startsWith(BROWSER_TOOL_PREFIX) || name === "computer_action");
+  if (browserTools.length === 0) return undefined;
+
+  const explicit = config.variables?.BROWSER_ALLOWED_DOMAINS?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
+  const fromUrls = Object.values(config.variables ?? {}).flatMap((value) => {
+    try {
+      const url = new URL(value);
+      return url.protocol === "http:" || url.protocol === "https:" ? [url.hostname.toLowerCase()] : [];
+    } catch {
+      return [];
+    }
+  });
+  const allowedDomains = [...new Set([...explicit, ...fromUrls].map((domain) => domain.toLowerCase()))];
+  return {
+    enabled: true,
+    mode: "public_ephemeral",
+    allowed_domains: allowedDomains,
+    code_execution_enabled: browserTools.includes("browser_exec_js"),
+    computer_actions_enabled: browserTools.includes("computer_action"),
+    viewport: { width: 1440, height: 900 },
+  };
+}
+
 const ENV_STATUS_LABELS: Record<string, string> = {
   pending: "作業環境の準備を待っています",
   ready: "作業環境の準備ができました",
@@ -45,7 +72,7 @@ const ENV_STATUS_LABELS: Record<string, string> = {
 };
 
 interface DriverState {
-  run: { id: string; organization_id: string; status: string };
+  run: { id: string; organization_id: string; status: string; agent_id: string; stage: "staging" | "production" };
   config: CompiledAgentConfig;
   sessionRowId: string;
   openaiSessionId: string;
@@ -117,7 +144,13 @@ export class RunDriver {
     this.api = await this.deps.agentsApi.forOrganization(this.organizationId);
 
     const base = {
-      run: { id: run.id, organization_id: run.organization_id, status: run.status },
+      run: {
+        id: run.id,
+        organization_id: run.organization_id,
+        status: run.status,
+        agent_id: run.deployment.agent_id,
+        stage: run.deployment.stage as "staging" | "production",
+      },
       config,
       idle: false,
       rootTurnActive: false,
@@ -242,6 +275,7 @@ export class RunDriver {
     config: CompiledAgentConfig,
   ) {
     const { env } = this.deps;
+    const browser = browserConfigForRun(config);
     const session = await tx.agent_sessions.findUniqueOrThrow({ where: { id: sessionRowId } });
     const payload: Omit<StartSessionJob, "job_id"> = {
       type: "start_session",
@@ -258,6 +292,7 @@ export class RunDriver {
         remote_url: remoteUrl,
         max_lifetime_minutes: env.SESSION_MAX_LIFETIME_MINUTES,
         idle_timeout_minutes: env.SESSION_IDLE_TIMEOUT_MINUTES,
+        ...(browser ? { browser } : {}),
       },
     };
     await tx.runtime_jobs.create({
@@ -433,6 +468,9 @@ export class RunDriver {
           break;
         case "mcp_call": {
           const failed = item.status !== "completed" || Boolean(item.error);
+          if (failed) {
+            await tx.runs.updateMany({ where: { id: this.runId, outcome: "pending" }, data: { outcome: "completed_with_errors" } });
+          }
           await appendRunEvent(tx, state.run, "tool.call", `${item.name} を${failed ? "実行できませんでした" : "実行しました"}`, {
             kind: "mcp",
             server_label: item.server_label,
@@ -583,6 +621,7 @@ export class RunDriver {
 
     const callsSoFar = state.callCounts.get(tool.name) ?? 0;
     const decision = evaluatePolicies(state.config.policies, { tool: tool.name, args, now: new Date(), callsSoFar });
+    let approvedBeforeExecution = false;
 
     if (decision.action === "deny") {
       await this.recordToolEvent(state, tool.name, `${tool.name} はポリシーにより実行されませんでした`, { reason: decision.reason });
@@ -621,22 +660,70 @@ export class RunDriver {
       await this.deps.db.org(this.organizationId, (tx) =>
         tx.approvals.update({ where: { id: approval.id }, data: { status: "consumed", consumed_at: new Date() } }),
       );
+      approvedBeforeExecution = true;
     }
 
     state.callCounts.set(tool.name, callsSoFar + 1);
     try {
-      const output = await this.functions.execute(this.organizationId, tool, args);
+      const output = await this.functions.execute(this.organizationId, tool, args, {
+        agentId: state.run.agent_id,
+        stage: state.run.stage,
+        runId: this.runId,
+      });
       await this.recordToolEvent(state, tool.name, `${tool.name} を実行しました`, { status: "completed" });
+      await this.captureExternalJob(state, tool.name, tool.connector_id, output);
       return { success: true, output };
     } catch (e) {
       const message = e instanceof Error ? e.message : "ツールの実行に失敗しました";
       await this.recordToolEvent(state, tool.name, `${tool.name} を実行できませんでした`, { status: "failed", error: message });
-      return { success: false, error: message };
+      return { success: false, error: approvedBeforeExecution ? `承認後の実行に失敗しました: ${message}` : message };
     }
   }
 
   private async recordToolEvent(state: DriverState, name: string, summary: string, data: Record<string, unknown>) {
-    await this.deps.db.org(this.organizationId, (tx) => appendRunEvent(tx, state.run, "tool.call", summary, { kind: "function", name, ...data }));
+    await this.deps.db.org(this.organizationId, async (tx) => {
+      if (data.status === "failed") {
+        await tx.runs.updateMany({
+          where: { id: this.runId, outcome: "pending" },
+          data: { outcome: "completed_with_errors" },
+        });
+      }
+      await appendRunEvent(tx, state.run, "tool.call", summary, { kind: "function", name, ...data });
+    });
+  }
+
+  private async captureExternalJob(state: DriverState, toolName: string, connectorId: string | null, output: string) {
+    if (!connectorId || toolName !== "publish_post") return;
+    const parsed = parseExternalJobResponse(output);
+    if (!parsed?.providerJobId) return;
+    await this.deps.db.org(this.organizationId, async (tx) => {
+      const job = await tx.external_jobs.upsert({
+        where: {
+          organization_id_connector_id_provider_job_id: {
+            organization_id: this.organizationId,
+            connector_id: connectorId,
+            provider_job_id: parsed.providerJobId!,
+          },
+        },
+        create: {
+          organization_id: this.organizationId,
+          run_id: this.runId,
+          connector_id: connectorId,
+          source_tool: toolName,
+          poll_tool: "get_job",
+          provider_job_id: parsed.providerJobId!,
+          status: parsed.status,
+          response: parsed.response as Prisma.InputJsonValue,
+          next_poll_at: new Date(Date.now() + 2_000),
+        },
+        update: { response: parsed.response as Prisma.InputJsonValue },
+      });
+      await appendRunEvent(tx, state.run, "external.job", `外部サービスで投稿処理を受け付けました（Job ${job.provider_job_id}）`, {
+        job_id: job.id,
+        provider_job_id: job.provider_job_id,
+        status: job.status,
+      });
+    });
   }
 
   /** OpenAI から環境の再接続を求められた: Session Worker の起動を依頼し直す */
@@ -713,7 +800,7 @@ export class RunDriver {
     await this.deps.db.org(this.organizationId, async (tx) => {
       const run = await tx.runs.findUniqueOrThrow({ where: { id: this.runId } });
       if (TERMINAL_RUN_STATUSES.includes(run.status as RunStatus)) return;
-      await setRunStatus(tx, run, "completed");
+      await setRunStatus(tx, run, "completed", run.outcome === "pending" ? { outcome: "succeeded" } : {});
     });
   }
 

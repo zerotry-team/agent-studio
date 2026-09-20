@@ -56,7 +56,8 @@ jobs:
           - { name: runtime-controller, dockerfile: runtime/controller/Dockerfile }
           - { name: tool-gateway, dockerfile: runtime/tool-gateway/Dockerfile }
           - { name: session-worker, dockerfile: runtime/session-worker/Dockerfile }
-          - { name: browser-worker, dockerfile: runtime/browser-worker/Dockerfile }
+          - { name: browser-worker, dockerfile: runtime/browser-session-worker/Dockerfile }
+          - { name: egress-proxy, dockerfile: runtime/egress-proxy/Dockerfile }
           - { name: demo-internal-api, dockerfile: runtime/demo-internal-api/Dockerfile }
     steps:
       - name: AWS の設定を確認

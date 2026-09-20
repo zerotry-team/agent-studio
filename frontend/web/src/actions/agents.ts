@@ -2,17 +2,43 @@
 
 import { runAction } from "@/lib/api/run-action";
 import {
+  CreateAgentProjectService,
+  CreatePreviewService,
   CreateAgentService,
   CreateAgentVersionService,
   GenerateManifestService,
+  GetAgentProjectService,
   GetAgentService,
   ListAgentsService,
   PublishAgentVersionService,
+  LinkAgentConnectionService,
+  SetAgentEnvironmentService,
   ValidateManifestService,
 } from "@/lib/services/agents";
+import type { LinkAgentConnectionInput, SetAgentEnvironmentInput } from "@agent-studio/contracts";
 
 export async function listAgentsAction() {
   return runAction(() => new ListAgentsService().invoke(), "エージェントの一覧を取得できませんでした");
+}
+
+export async function createAgentProjectAction(input: { description: string }) {
+  return runAction(() => new CreateAgentProjectService().invoke(input.description), "Agent Projectを作成できませんでした");
+}
+
+export async function getAgentProjectAction(id: string) {
+  return runAction(() => new GetAgentProjectService().invoke(id), "Agent Projectを取得できませんでした");
+}
+
+export async function linkAgentConnectionAction(id: string, input: LinkAgentConnectionInput) {
+  return runAction(() => new LinkAgentConnectionService().invoke(id, input), "Connectionを設定できませんでした");
+}
+
+export async function setAgentEnvironmentAction(id: string, input: SetAgentEnvironmentInput) {
+  return runAction(() => new SetAgentEnvironmentService().invoke(id, input), "Variablesを設定できませんでした");
+}
+
+export async function createPreviewAction(id: string) {
+  return runAction(() => new CreatePreviewService().invoke(id), "Previewを作成できませんでした");
 }
 
 export async function getAgentAction(id: string) {

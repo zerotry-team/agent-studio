@@ -109,8 +109,74 @@ export interface ToolDto {
   execution_location: ToolExecutionLocation;
   risk: ToolRisk;
   latest_version: number;
+  connector_id: string | null;
   created_at: string;
   versions?: ToolVersionDto[];
+}
+
+export const connectorAdapterSchema = z.enum(["http_openapi", "mcp", "internal", "openai_builtin", "runtime"]);
+export type ConnectorAdapter = z.infer<typeof connectorAdapterSchema>;
+export const connectorAuthTypeSchema = z.enum(["none", "static_bearer", "runtime_secret"]);
+export type ConnectorAuthType = z.infer<typeof connectorAuthTypeSchema>;
+
+export const connectorOperationSchema = z
+  .object({
+    name: toolNameSchema,
+    display_name: z.string().trim().min(1).max(100),
+    description: z.string().trim().min(1).max(1000),
+    method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
+    path: z.string().startsWith("/").max(500).optional(),
+    /** この入力値はIdempotency-Key生成だけに使い、接続先のbody/queryへは送らない */
+    idempotency_key_field: toolNameSchema.optional(),
+    risk: z.enum(["read", "write", "external_send", "financial", "destructive"]),
+    input_schema: z
+      .object({
+        type: z.literal("object"),
+        properties: z.record(z.string(), z.unknown()).optional(),
+        required: z.array(z.string()).optional(),
+        additionalProperties: z.boolean().optional(),
+      })
+      .loose()
+      .default({ type: "object", properties: {}, additionalProperties: false }),
+  })
+  .strict();
+export type ConnectorOperationInput = z.input<typeof connectorOperationSchema>;
+
+export const createConnectorSchema = z
+  .object({
+    key: slugSchema,
+    name: z.string().trim().min(1).max(100),
+    description: z.string().trim().min(1).max(1000),
+    adapter: connectorAdapterSchema.default("http_openapi"),
+    base_url: z.url().refine((u) => u.startsWith("https://"), "https の URL を指定してください").optional(),
+    auth_type: connectorAuthTypeSchema.default("none"),
+    operations: z.array(connectorOperationSchema).min(1).max(100),
+  })
+  .strict()
+  .refine((v) => new Set(v.operations.map((o) => o.name)).size === v.operations.length, {
+    message: "操作名が重複しています",
+    path: ["operations"],
+  })
+  .refine((v) => v.adapter !== "http_openapi" || Boolean(v.base_url), {
+    message: "HTTP連携にはbase_urlが必要です",
+    path: ["base_url"],
+  })
+  .refine((v) => v.adapter !== "http_openapi" || v.operations.every((o) => o.method && o.path), {
+    message: "HTTP連携の各操作にはmethodとpathが必要です",
+    path: ["operations"],
+  });
+export type CreateConnectorInput = z.input<typeof createConnectorSchema>;
+
+export interface ConnectorDto {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  adapter: ConnectorAdapter;
+  base_url: string | null;
+  auth_type: ConnectorAuthType;
+  created_at: string;
+  tools: ToolDto[];
 }
 
 export const createToolVersionSchema = z.object({ spec: toolVersionSpecSchema }).strict();
@@ -129,6 +195,7 @@ export const createConnectionSchema = z
   .object({
     name: z.string().trim().min(1).max(100),
     description: z.string().max(1000).optional(),
+    connector_id: z.uuid().optional(),
     scope: connectionScopeSchema,
     /** scope=runtime のとき必須 */
     runtime_id: z.uuid().optional(),
@@ -155,6 +222,8 @@ export type CreateConnectionInput = z.infer<typeof createConnectionSchema>;
 export const setConnectionSecretSchema = z
   .object({
     value: z.string().min(1).max(10000),
+    /** 任意の有効期限。期限を過ぎるとWorkerが自動で利用不可にする */
+    expires_at: z.iso.datetime().optional(),
     /** scope=openai_vault のとき必須: この認証情報を使う MCP サーバーの URL（OpenAI の vault は URL で照合する） */
     mcp_server_url: z.url().optional(),
   })
@@ -165,11 +234,46 @@ export interface ConnectionDto {
   id: string;
   name: string;
   description: string | null;
+  connector_id: string | null;
   scope: ConnectionScope;
   runtime_id: string | null;
   runtime_secret_name: string | null;
   header_name: string | null;
   has_secret: boolean;
+  status: "connected" | "expired" | "revoked" | "error";
+  last_validated_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export const createAgentScheduleSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  stage: stageSchema,
+  input: z.string().trim().min(1).max(20000),
+  timezone: z.literal("Asia/Tokyo").default("Asia/Tokyo"),
+  local_time: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+  days_of_week: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+  enabled: z.boolean().default(true),
+}).strict();
+export type CreateAgentScheduleInput = z.input<typeof createAgentScheduleSchema>;
+
+export const updateAgentScheduleSchema = createAgentScheduleSchema.partial().strict();
+export type UpdateAgentScheduleInput = z.input<typeof updateAgentScheduleSchema>;
+
+export interface AgentScheduleDto {
+  id: string;
+  agent_id: string;
+  name: string;
+  stage: Stage;
+  input: string;
+  timezone: "Asia/Tokyo";
+  local_time: string;
+  days_of_week: number[];
+  enabled: boolean;
+  next_run_at: string;
+  last_run_at: string | null;
+  last_run_id: string | null;
   created_at: string;
 }
 
@@ -195,11 +299,31 @@ export interface AgentDto {
   key: string;
   name: string;
   description: string | null;
+  project_brief: string | null;
+  capability_resolution: CapabilityResolutionDto;
   latest_version: number;
   published_version: number | null;
   created_at: string;
   updated_at: string;
   versions?: AgentVersionDto[];
+}
+
+export const capabilityStateSchema = z.enum(["resolved", "needs_connection", "missing", "ambiguous"]);
+export type CapabilityState = z.infer<typeof capabilityStateSchema>;
+export interface CapabilityRequirementDto {
+  requirement: string;
+  state: CapabilityState;
+  connector_id: string | null;
+  connector_name: string | null;
+  tool_names: string[];
+  confidence: number;
+  reason: string;
+}
+export interface CapabilityResolutionDto {
+  requirements: CapabilityRequirementDto[];
+  selected_tools: string[];
+  missing_variables: string[];
+  ready: boolean;
 }
 
 export const createAgentSchema = z.object({ manifest: z.string().min(1).max(200000) }).strict();
@@ -219,6 +343,66 @@ export interface GenerateManifestResultDto {
   manifest_yaml: string;
   /** 生成時の補足（使えるツールが足りない、など） */
   notes: string[];
+  resolution: CapabilityResolutionDto;
+}
+
+export const createAgentProjectSchema = generateManifestSchema;
+export type CreateAgentProjectInput = z.infer<typeof createAgentProjectSchema>;
+
+export const linkAgentConnectionSchema = z
+  .object({
+    stage: stageSchema,
+    connector_id: z.uuid(),
+    connection_id: z.uuid(),
+    allowed_capabilities: z.array(toolNameSchema).min(1).max(100),
+  })
+  .strict();
+export type LinkAgentConnectionInput = z.infer<typeof linkAgentConnectionSchema>;
+
+export const setAgentEnvironmentSchema = z
+  .object({
+    stage: stageSchema,
+    variables: z.record(z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/), z.string().max(10000)).default({}),
+  })
+  .strict();
+export type SetAgentEnvironmentInput = z.infer<typeof setAgentEnvironmentSchema>;
+
+export interface AgentConnectionLinkDto {
+  id: string;
+  stage: Stage;
+  connector: { id: string; key: string; name: string };
+  connection: { id: string; name: string; status: ConnectionDto["status"]; has_secret: boolean };
+  allowed_capabilities: string[];
+}
+
+export interface AgentEnvironmentConfigDto {
+  stage: Stage;
+  variables: Record<string, string>;
+}
+
+export interface AgentBuildDto {
+  id: string;
+  build_number: number;
+  status: "ready" | "failed";
+  agent_version_id: string;
+  runtime_profile_id: string;
+  resolution: CapabilityResolutionDto;
+  build_log: { type: "info" | "success" | "warning" | "error"; message: string }[];
+  created_at: string;
+}
+
+export interface AgentProjectDto {
+  agent: AgentDto;
+  connection_links: AgentConnectionLinkDto[];
+  environments: AgentEnvironmentConfigDto[];
+  builds: AgentBuildDto[];
+  deployments: DeploymentDto[];
+  preview_url: string | null;
+  preview_api_url: string | null;
+}
+
+export interface CreateAgentProjectResultDto extends AgentProjectDto {
+  auto_preview_created: boolean;
 }
 
 export interface ManifestValidationDto {
@@ -351,8 +535,12 @@ export interface DeploymentDto {
   agent_version: number;
   agent_version_id: string;
   runtime_profile: { id: string; key: string; name: string; type: RuntimeProfileType };
+  build_id: string | null;
+  build_number: number | null;
+  promoted_from_id: string | null;
   stage: Stage;
   status: DeploymentStatus;
+  health_status: "ready" | "degraded" | "failed";
   created_by: string | null;
   created_at: string;
 }
@@ -368,6 +556,9 @@ export const runStatusSchema = z.enum([
   "cancelled",
 ]);
 export type RunStatus = z.infer<typeof runStatusSchema>;
+
+export const runOutcomeSchema = z.enum(["pending", "succeeded", "completed_with_errors", "failed", "cancelled"]);
+export type RunOutcome = z.infer<typeof runOutcomeSchema>;
 
 export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = ["completed", "failed", "cancelled"];
 
@@ -387,6 +578,7 @@ export const runEventTypeSchema = z.enum([
   "message",
   "tool.call",
   "tool.result",
+  "external.job",
   "approval.requested",
   "approval.decided",
   "usage",
@@ -406,6 +598,7 @@ export interface RunEventDto {
 export interface RunDto {
   id: string;
   status: RunStatus;
+  outcome: RunOutcome;
   input: string;
   output: string | null;
   error: string | null;
@@ -417,6 +610,14 @@ export interface RunDto {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  external_jobs: Array<{
+    id: string;
+    provider_job_id: string;
+    source_tool: string;
+    status: "pending" | "processing" | "succeeded" | "failed" | "unknown";
+    attempts: number;
+    last_checked_at: string | null;
+  }>;
   events?: RunEventDto[];
 }
 

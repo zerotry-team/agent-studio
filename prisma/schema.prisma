@@ -21,28 +21,34 @@ model organizations {
   created_at DateTime @default(now()) @db.Timestamptz(6)
   updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
-  openai_settings  organization_openai_settings?
-  members          organization_members[]
-  agents           agents[]
-  agent_versions   agent_versions[]
-  tools            tools[]
-  tool_versions    tool_versions[]
-  connections      connections[]
-  policies         policies[]
-  runtimes         runtimes[]
-  bootstrap_tokens runtime_bootstrap_tokens[]
-  runtime_profiles runtime_profiles[]
-  deployments      deployments[]
-  runs             runs[]
-  run_inputs       run_inputs[]
-  sessions         agent_sessions[]
-  run_events       run_events[]
-  approvals        approvals[]
-  runtime_jobs     runtime_jobs[]
-  workflows        workflows[]
-  workflow_runs    workflow_runs[]
-  eval_cases       eval_cases[]
-  eval_runs        eval_runs[]
+  openai_settings     organization_openai_settings?
+  members             organization_members[]
+  agents              agents[]
+  agent_versions      agent_versions[]
+  connectors          connectors[]
+  tools               tools[]
+  tool_versions       tool_versions[]
+  connections         connections[]
+  connection_links    agent_connection_links[]
+  environment_configs agent_environment_configs[]
+  builds              agent_builds[]
+  policies            policies[]
+  runtimes            runtimes[]
+  bootstrap_tokens    runtime_bootstrap_tokens[]
+  runtime_profiles    runtime_profiles[]
+  deployments         deployments[]
+  runs                runs[]
+  run_inputs          run_inputs[]
+  sessions            agent_sessions[]
+  run_events          run_events[]
+  approvals           approvals[]
+  runtime_jobs        runtime_jobs[]
+  workflows           workflows[]
+  workflow_runs       workflow_runs[]
+  eval_cases          eval_cases[]
+  eval_runs           eval_runs[]
+  external_jobs       external_jobs[]
+  agent_schedules     agent_schedules[]
 }
 
 /// 組織ごとの OpenAI Project とキーの保管場所（SEC-11）。キーの値は持たない
@@ -85,20 +91,28 @@ model organization_members {
 }
 
 model agents {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organization_id String   @db.Uuid
-  key             String
-  name            String
-  description     String?
-  latest_version  Int      @default(0)
-  created_by      String?  @db.Uuid
-  created_at      DateTime @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id       String   @db.Uuid
+  key                   String
+  name                  String
+  description           String?
+  /// 利用者が入力した業務説明。Manifest は Advanced 表示に留める
+  project_brief         String?
+  /// Capability Resolver の直近結果。Secret は含めない
+  capability_resolution Json     @default("{}")
+  latest_version        Int      @default(0)
+  created_by            String?  @db.Uuid
+  created_at            DateTime @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
-  organization organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  versions     agent_versions[]
-  deployments  deployments[]
-  eval_cases   eval_cases[]
+  organization        organizations               @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  versions            agent_versions[]
+  deployments         deployments[]
+  eval_cases          eval_cases[]
+  connection_links    agent_connection_links[]
+  environment_configs agent_environment_configs[]
+  builds              agent_builds[]
+  schedules           agent_schedules[]
 
   @@unique([organization_id, key])
   @@unique([organization_id, id])
@@ -117,17 +131,45 @@ model agent_versions {
   created_at      DateTime  @default(now()) @db.Timestamptz(6)
   published_at    DateTime? @db.Timestamptz(6)
 
-  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  agent        agents        @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
+  organization organizations  @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent        agents         @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
   deployments  deployments[]
+  builds       agent_builds[]
 
   @@unique([agent_id, version])
+  @@unique([organization_id, id])
+}
+
+/// 利用者に見せる連携サービス。配下の Tool は権限・リスク・監査の単位として分離したまま維持する
+model connectors {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  key             String
+  name            String
+  description     String
+  /// http_openapi / mcp / internal / openai_builtin / runtime
+  adapter         String
+  base_url        String?
+  /// none / static_bearer / runtime_secret
+  auth_type       String   @default("none")
+  icon            String?
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization  organizations            @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  tools         tools[]
+  connections   connections[]
+  links         agent_connection_links[]
+  external_jobs external_jobs[]
+
+  @@unique([organization_id, key])
   @@unique([organization_id, id])
 }
 
 model tools {
   id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   organization_id    String   @db.Uuid
+  connector_id       String?  @db.Uuid
   name               String
   display_name       String
   /// studio_function / openai_service_mcp / runtime_mcp
@@ -138,6 +180,7 @@ model tools {
   updated_at         DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
   organization organizations   @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  connector    connectors?     @relation(fields: [organization_id, connector_id], references: [organization_id, id], onDelete: Restrict)
   versions     tool_versions[]
 
   @@unique([organization_id, name])
@@ -162,24 +205,73 @@ model tool_versions {
 
 /// 接続先（CONN）。認証情報の値は持たず、保管場所（secret_locator）だけを持つ
 model connections {
-  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organization_id     String   @db.Uuid
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id     String    @db.Uuid
+  connector_id        String?   @db.Uuid
   name                String
   description         String?
   /// studio / openai_vault / runtime
   scope               String
-  runtime_id          String?  @db.Uuid
+  runtime_id          String?   @db.Uuid
   runtime_secret_name String?
   header_name         String?
   /// studio: Secrets Manager の ARN / openai_vault: "vault_id" または "vault_id:credential_id"
   secret_locator      String?
-  created_at          DateTime @default(now()) @db.Timestamptz(6)
-  updated_at          DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+  /// connected / expired / revoked / error
+  status              String    @default("connected")
+  last_validated_at   DateTime? @db.Timestamptz(6)
+  expires_at          DateTime? @db.Timestamptz(6)
+  revoked_at          DateTime? @db.Timestamptz(6)
+  created_at          DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
 
-  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  runtime      runtimes?     @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
+  organization organizations            @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  connector    connectors?              @relation(fields: [organization_id, connector_id], references: [organization_id, id], onDelete: Restrict)
+  runtime      runtimes?                @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
+  agent_links  agent_connection_links[]
 
   @@unique([organization_id, name])
+  @@unique([organization_id, id])
+}
+
+/// 組織 Installation を Agent Project の Preview / Production へ許可するリンク
+model agent_connection_links {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id      String   @db.Uuid
+  agent_id             String   @db.Uuid
+  connector_id         String   @db.Uuid
+  connection_id        String   @db.Uuid
+  /// staging は Preview、production は本番として扱う（Manifest v1 互換）
+  stage                String
+  /// 許可した Tool name の配列
+  allowed_capabilities Json     @default("[]")
+  created_by           String?  @db.Uuid
+  created_at           DateTime @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent        agents        @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
+  connector    connectors    @relation(fields: [organization_id, connector_id], references: [organization_id, id], onDelete: Restrict)
+  connection   connections   @relation(fields: [organization_id, connection_id], references: [organization_id, id], onDelete: Restrict)
+
+  @@unique([agent_id, stage, connector_id])
+  @@unique([organization_id, id])
+}
+
+/// Agent Project の環境別 Variables。Secret は格納しない
+model agent_environment_configs {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  agent_id        String   @db.Uuid
+  stage           String
+  variables       Json     @default("{}")
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent        agents        @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([agent_id, stage])
   @@unique([organization_id, id])
 }
 
@@ -261,11 +353,38 @@ model runtime_profiles {
   created_at      DateTime @default(now()) @db.Timestamptz(6)
   updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
-  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  runtime      runtimes?     @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
+  organization organizations  @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  runtime      runtimes?      @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
   deployments  deployments[]
+  builds       agent_builds[]
 
   @@unique([organization_id, key])
+  @@unique([organization_id, id])
+}
+
+/// Capability 解決・Tool version・Policy・Runtime profile を固定した Immutable Build
+model agent_builds {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id    String   @db.Uuid
+  agent_id           String   @db.Uuid
+  agent_version_id   String   @db.Uuid
+  runtime_profile_id String   @db.Uuid
+  build_number       Int
+  /// ready / failed
+  status             String   @default("ready")
+  resolution         Json     @default("{}")
+  compiled_config    Json
+  build_log          Json     @default("[]")
+  created_by         String?  @db.Uuid
+  created_at         DateTime @default(now()) @db.Timestamptz(6)
+
+  organization    organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent           agents           @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
+  agent_version   agent_versions   @relation(fields: [organization_id, agent_version_id], references: [organization_id, id], onDelete: Restrict)
+  runtime_profile runtime_profiles @relation(fields: [organization_id, runtime_profile_id], references: [organization_id, id], onDelete: Restrict)
+  deployments     deployments[]
+
+  @@unique([agent_id, build_number])
   @@unique([organization_id, id])
 }
 
@@ -275,11 +394,15 @@ model deployments {
   agent_id           String   @db.Uuid
   agent_version_id   String   @db.Uuid
   runtime_profile_id String   @db.Uuid
+  build_id           String?  @db.Uuid
+  promoted_from_id   String?  @db.Uuid
   stage              String
   /// active / superseded / archived
   status             String   @default("active")
   /// デプロイ時点のコンパイル結果（CMP-04）。シークレットは含めない（CMP-05）
   compiled_config    Json
+  /// ready / degraded / failed
+  health_status      String   @default("ready")
   created_by         String?  @db.Uuid
   created_at         DateTime @default(now()) @db.Timestamptz(6)
 
@@ -287,6 +410,7 @@ model deployments {
   agent           agents           @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
   agent_version   agent_versions   @relation(fields: [organization_id, agent_version_id], references: [organization_id, id], onDelete: Restrict)
   runtime_profile runtime_profiles @relation(fields: [organization_id, runtime_profile_id], references: [organization_id, id], onDelete: Restrict)
+  build           agent_builds?    @relation(fields: [organization_id, build_id], references: [organization_id, id], onDelete: Restrict)
   runs            runs[]
 
   @@unique([organization_id, id])
@@ -301,6 +425,8 @@ model runs {
   eval_run_id        String?   @db.Uuid
   /// queued / provisioning / running / waiting_approval / requires_action / completed / failed / cancelled
   status             String    @default("queued")
+  /// pending / succeeded / completed_with_errors / failed / cancelled
+  outcome            String    @default("pending")
   input              String
   output             String?
   error              String?
@@ -314,16 +440,72 @@ model runs {
   started_at         DateTime? @db.Timestamptz(6)
   finished_at        DateTime? @db.Timestamptz(6)
 
-  organization organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  deployment   deployments      @relation(fields: [organization_id, deployment_id], references: [organization_id, id], onDelete: Restrict)
-  sessions     agent_sessions[]
-  events       run_events[]
-  approvals    approvals[]
-  inputs       run_inputs[]
+  organization  organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  deployment    deployments      @relation(fields: [organization_id, deployment_id], references: [organization_id, id], onDelete: Restrict)
+  sessions      agent_sessions[]
+  events        run_events[]
+  approvals     approvals[]
+  inputs        run_inputs[]
+  external_jobs external_jobs[]
 
   @@unique([organization_id, id])
   @@index([organization_id, created_at(sort: Desc)])
   @@index([status])
+}
+
+/// 外部サービスが202等で受け付けた非同期Job。再投稿せず、状態確認だけを行う。
+model external_jobs {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  run_id          String    @db.Uuid
+  connector_id    String    @db.Uuid
+  source_tool     String
+  poll_tool       String
+  provider_job_id String
+  /// pending / processing / succeeded / failed / unknown
+  status          String    @default("pending")
+  response        Json?
+  attempts        Int       @default(0)
+  next_poll_at    DateTime  @default(now()) @db.Timestamptz(6)
+  last_checked_at DateTime? @db.Timestamptz(6)
+  error           String?
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  run          runs          @relation(fields: [organization_id, run_id], references: [organization_id, id], onDelete: Cascade)
+  connector    connectors    @relation(fields: [organization_id, connector_id], references: [organization_id, id], onDelete: Restrict)
+
+  @@unique([organization_id, connector_id, provider_job_id])
+  @@unique([organization_id, id])
+  @@index([status, next_poll_at])
+}
+
+/// Agent Projectを指定した曜日・時刻に実行するSchedule（MVPはAsia/Tokyo）。
+model agent_schedules {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  agent_id        String    @db.Uuid
+  name            String
+  stage           String
+  input           String
+  timezone        String    @default("Asia/Tokyo")
+  local_time      String
+  days_of_week    Json
+  enabled         Boolean   @default(true)
+  next_run_at     DateTime  @db.Timestamptz(6)
+  last_run_at     DateTime? @db.Timestamptz(6)
+  last_run_id     String?   @db.Uuid
+  lease_until     DateTime? @db.Timestamptz(6)
+  created_by      String?   @db.Uuid
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent        agents        @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, id])
+  @@index([enabled, next_run_at])
 }
 
 /// セッションに送る追加の入力（利用者の追加指示、承認結果の通知）。Worker が送信する
@@ -366,9 +548,9 @@ model agent_sessions {
   created_at            DateTime  @default(now()) @db.Timestamptz(6)
   ended_at              DateTime? @db.Timestamptz(6)
 
-  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  run          runs          @relation(fields: [organization_id, run_id], references: [organization_id, id], onDelete: Cascade)
-  runtime      runtimes?     @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
+  organization organizations  @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  run          runs           @relation(fields: [organization_id, run_id], references: [organization_id, id], onDelete: Cascade)
+  runtime      runtimes?      @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
   approvals    approvals[]
   jobs         runtime_jobs[]
 

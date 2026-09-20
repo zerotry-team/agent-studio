@@ -74,6 +74,17 @@ describe("GrantStore", () => {
     expect(record.grant.allowed_tools).toEqual(["get_product", "update_price"]);
   });
 
+  it("activeSessions再同期でもRuntime内で解決したBrowser endpointを保持する", () => {
+    const store = new GrantStore();
+    store.upsert(
+      grant(1, {
+        browser: { endpoint: "http://10.40.1.2:8931/mcp/token", mode: "public_ephemeral", allowed_domains: ["example.com"] },
+      }),
+    );
+    store.upsert(grant(1, { allowed_tools: ["browser_snapshot"] }));
+    expect(store.get(grant(1).session_id)?.grant.browser?.endpoint).toContain("/mcp/token");
+  });
+
   it("sweepExpired は Worker の無い期限切れだけを消す", () => {
     const store = new GrantStore();
     store.upsert(grant(1), { worker: { status: "running", taskArn: "arn:1", startedAt: before } });

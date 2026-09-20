@@ -15,6 +15,8 @@ module "runtime" {
   vpc_cidr                  = try(local.runtime.vpc_cidr, "10.40.0.0/16")
   nat_gateway_count         = try(local.runtime.nat_gateway_count, 1)
   browser_enabled           = try(local.runtime.browser_enabled, false)
+  browser_runtime           = try(local.runtime.browser_runtime, {})
+  egress_policy             = try(local.runtime.egress_policy, {})
   demo_internal_api_enabled = try(local.runtime.demo_internal_api_enabled, false)
   allowed_internal_cidrs    = try(local.runtime.allowed_internal_cidrs, [])
   extra_allowed_domains     = try(local.runtime.extra_allowed_domains, [])

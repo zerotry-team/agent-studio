@@ -94,11 +94,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/agents", label: "エージェント", capability: "view" },
   { href: "/runs", label: "実行履歴", capability: "view" },
   { href: "/approvals", label: "承認", capability: "view" },
-  { href: "/workflows", label: "ワークフロー", capability: "view" },
-  { href: "/tools", label: "ツール", capability: "view" },
-  { href: "/connections", label: "接続先", capability: "view" },
-  { href: "/environments", label: "実行環境", capability: "view" },
-  { href: "/audit-logs", label: "監査ログ", capability: "audit.view" },
+  { href: "/integrations", label: "連携サービス", capability: "view" },
   { href: "/usage", label: "利用状況", capability: "usage.view" },
   { href: "/settings", label: "設定", capability: "view" },
 ];

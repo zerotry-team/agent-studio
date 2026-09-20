@@ -19,7 +19,8 @@ resource "aws_ecs_cluster" "this" {
 resource "aws_cloudwatch_log_group" "this" {
   for_each = toset(concat(
     ["controller", "tool-gateway", "session-worker"],
-    var.browser_enabled ? ["browser-worker"] : [],
+    local.browser_enabled ? ["browser-worker"] : [],
+    local.browser_proxy_enabled ? ["egress-proxy"] : [],
     var.demo_internal_api_enabled ? ["demo-internal-api"] : [],
   ))
 
@@ -39,7 +40,7 @@ resource "aws_service_discovery_private_dns_namespace" "this" {
 resource "aws_service_discovery_service" "this" {
   for_each = toset(concat(
     ["gateway"],
-    var.browser_enabled ? ["browser"] : [],
+    local.browser_proxy_enabled ? ["egress-proxy"] : [],
     var.demo_internal_api_enabled ? ["demo-api"] : [],
   ))
 
@@ -87,6 +88,11 @@ locals {
     MAX_CONCURRENT_SESSIONS        = tostring(var.session_worker.max_concurrent)
     SESSION_MAX_LIFETIME_MINUTES   = tostring(var.session_worker.max_lifetime_minutes)
     SESSION_IDLE_TIMEOUT_MINUTES   = tostring(var.session_worker.idle_timeout_minutes)
+    BROWSER_LAUNCHER               = local.browser_enabled ? "ecs" : "disabled"
+    BROWSER_WORKER_TASK_DEFINITION = local.browser_enabled ? aws_ecs_task_definition.browser_worker[0].family : ""
+    BROWSER_WORKER_SUBNETS         = local.browser_enabled ? join(",", module.network.private_subnet_ids) : ""
+    BROWSER_WORKER_SECURITY_GROUPS = local.browser_enabled ? aws_security_group.browser_worker[0].id : ""
+    BROWSER_WORKER_CONTAINER_NAME  = "browser-session-worker"
   }
 
   tool_gateway_environment = {
@@ -210,14 +216,60 @@ resource "aws_ecs_task_definition" "session_worker" {
 # ---- Browser Worker（Playwright MCP） ----
 
 resource "aws_ecs_task_definition" "browser_worker" {
-  count = var.browser_enabled ? 1 : 0
+  count = local.browser_enabled ? 1 : 0
 
   family                   = "${local.prefix}-browser-worker"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = tostring(var.browser_worker_cpu)
-  memory                   = tostring(var.browser_worker_memory)
+  cpu                      = tostring(var.browser_runtime.cpu)
+  memory                   = tostring(var.browser_runtime.memory)
   execution_role_arn       = module.exec_browser_worker[0].arn
+  task_role_arn            = aws_iam_role.browser_worker_task[0].arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+
+  ephemeral_storage {
+    size_in_gib = var.browser_runtime.ephemeral_storage_gib
+  }
+
+  container_definitions = jsonencode([{
+    name      = "browser-session-worker"
+    image     = local.image["browser-worker"]
+    essential = true
+    portMappings = [{
+      containerPort = 8931
+      protocol      = "tcp"
+    }]
+    environment = concat(
+      [{ name = "PORT", value = "8931" }],
+      local.browser_proxy_enabled ? [{ name = "BROWSER_PROXY_SERVER", value = "http://egress-proxy.${local.namespace}:3128" }] : [],
+    )
+    readonlyRootFilesystem = true
+    user                   = "1001"
+    privileged             = false
+    linuxParameters = {
+      initProcessEnabled = true
+      capabilities       = { drop = ["ALL"] }
+    }
+    logConfiguration = local.log_configuration["browser-worker"]
+  }])
+}
+
+# ---- Egress Proxy（Browserからの唯一のInternet出口） ----
+
+resource "aws_ecs_task_definition" "egress_proxy" {
+  count = local.browser_proxy_enabled ? 1 : 0
+
+  family                   = "${local.prefix}-egress-proxy"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = module.exec_egress_proxy[0].arn
+  task_role_arn            = aws_iam_role.egress_proxy_task[0].arn
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -225,29 +277,41 @@ resource "aws_ecs_task_definition" "browser_worker" {
   }
 
   container_definitions = jsonencode([{
-    name      = "browser-worker"
-    image     = local.image["browser-worker"]
+    name      = "egress-proxy"
+    image     = local.image["egress-proxy"]
     essential = true
     portMappings = [{
-      containerPort = 8931
+      containerPort = 3128
       protocol      = "tcp"
     }]
-    # Playwright MCP は Host ヘッダを確認する（DNS リバインディング対策）。Tool Gateway から呼ぶ名前だけ許可する
-    environment = [{
-      name  = "PLAYWRIGHT_MCP_ALLOWED_HOSTS"
-      value = "browser.${local.prefix}.internal:8931"
-    }]
-    linuxParameters  = { initProcessEnabled = true }
-    logConfiguration = local.log_configuration["browser-worker"]
+    environment = [
+      { name = "PORT", value = "3128" },
+      { name = "ALLOWED_DOMAINS", value = join(",", var.egress_policy.allowed_domains) },
+    ]
+    readonlyRootFilesystem = true
+    user                   = "1000"
+    privileged             = false
+    linuxParameters = {
+      initProcessEnabled = true
+      capabilities       = { drop = ["ALL"] }
+    }
+    logConfiguration = local.log_configuration["egress-proxy"]
   }])
+
+  lifecycle {
+    precondition {
+      condition     = length(var.egress_policy.allowed_domains) > 0
+      error_message = "egress_policy.mode=proxy の場合は allowed_domains を1件以上指定してください。"
+    }
+  }
 }
 
-resource "aws_ecs_service" "browser_worker" {
-  count = var.browser_enabled ? 1 : 0
+resource "aws_ecs_service" "egress_proxy" {
+  count = local.browser_proxy_enabled ? 1 : 0
 
-  name                   = "${local.prefix}-browser-worker"
+  name                   = "${local.prefix}-egress-proxy"
   cluster                = aws_ecs_cluster.this.id
-  task_definition        = aws_ecs_task_definition.browser_worker[0].arn
+  task_definition        = aws_ecs_task_definition.egress_proxy[0].arn
   desired_count          = local.services_enabled ? 1 : 0
   launch_type            = "FARGATE"
   platform_version       = "LATEST"
@@ -261,13 +325,12 @@ resource "aws_ecs_service" "browser_worker" {
 
   network_configuration {
     subnets          = module.network.private_subnet_ids
-    security_groups  = [aws_security_group.browser_worker[0].id]
+    security_groups  = [aws_security_group.egress_proxy[0].id]
     assign_public_ip = false
   }
 
-  # browser.<prefix>.internal（ポート 8931）
   service_registries {
-    registry_arn = aws_service_discovery_service.this["browser"].arn
+    registry_arn = aws_service_discovery_service.this["egress-proxy"].arn
   }
 }
 

@@ -28,6 +28,7 @@ const ICONS: Record<string, LucideIcon> = {
   "/workflows": Workflow,
   "/tools": Wrench,
   "/connections": Plug,
+  "/integrations": Plug,
   "/environments": Server,
   "/audit-logs": ScrollText,
   "/usage": ChartColumn,

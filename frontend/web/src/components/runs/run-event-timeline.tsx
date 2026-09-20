@@ -15,6 +15,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Wrench,
+  Send,
   type LucideIcon,
 } from "lucide-react";
 import { useId, useState } from "react";
@@ -34,6 +35,7 @@ const EVENT_ICONS: Record<RunEventType, { icon: LucideIcon; className: string }>
   message: { icon: MessageSquare, className: "bg-accent-50 text-accent-600" },
   "tool.call": { icon: Wrench, className: "bg-gray-100 text-gray-600" },
   "tool.result": { icon: CornerDownRight, className: "bg-gray-100 text-gray-600" },
+  "external.job": { icon: Send, className: "bg-violet-50 text-violet-600" },
   "approval.requested": { icon: ShieldAlert, className: "bg-amber-50 text-amber-600" },
   "approval.decided": { icon: ShieldCheck, className: "bg-emerald-50 text-emerald-600" },
   usage: { icon: Gauge, className: "bg-gray-100 text-gray-500" },
@@ -215,6 +217,8 @@ function EventBody({ event }: { event: RunEventDto }) {
     case "tool.call":
       return <ToolCallBody event={event} />;
     case "tool.result":
+      return <ToolResultBody event={event} />;
+    case "external.job":
       return <ToolResultBody event={event} />;
     case "approval.requested":
       return <ApprovalRequestedBody event={event} />;

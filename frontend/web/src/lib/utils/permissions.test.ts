@@ -60,7 +60,8 @@ describe("visibleNavItems", () => {
     expect(labels("viewer")).not.toContain("/audit-logs");
     expect(labels("viewer")).not.toContain("/usage");
     expect(labels("viewer")).toContain("/approvals");
-    expect(labels("admin")).toContain("/audit-logs");
+    expect(labels("admin")).not.toContain("/audit-logs");
+    expect(labels("admin")).toContain("/integrations");
     expect(labels("admin")).toContain("/usage");
     expect(labels(null)).toEqual([]);
   });

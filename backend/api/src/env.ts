@@ -9,6 +9,7 @@ const envSchema = z
     APP_ENV: z.string().default("local"),
     PORT: z.coerce.number().int().default(3200),
     PUBLIC_BASE_URL: z.string().default("http://localhost:3201"),
+    PUBLIC_API_BASE_URL: z.string().default("http://localhost:3200"),
     LOG_LEVEL: z.string().default("info"),
 
     // DB: DATABASE_URL か、DB_* の組み合わせ（ECS ではこちら）
@@ -48,9 +49,9 @@ const envSchema = z
     /** ローカル開発だけで使う共通キー（本番では組織ごとのキーのみ使う） */
     OPENAI_API_KEY: z.string().optional(),
 
-    // 日本語 → Manifest の生成（Claude）
+    // 日本語 → Agent Project Draft の生成（OpenAI Responses API）
     ANTHROPIC_API_KEY: z.string().optional(),
-    MANIFEST_GENERATOR_MODEL: z.string().default("claude-opus-5"),
+    MANIFEST_GENERATOR_MODEL: z.string().default("gpt-5.6"),
 
     // Worker
     WORKER_ID: z.string().default(`${hostname()}-${process.pid}`),

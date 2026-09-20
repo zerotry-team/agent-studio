@@ -68,11 +68,16 @@ export const runtimeUpstreamMcpSchema = z
             expose_as: toolNameSchema.optional(),
             risk: toolRiskSchema,
             reads_untrusted_content: z.boolean().default(false),
+            /** Run ごとの endpoint では起動前に一覧取得できないため、設定側で schema を固定する。 */
+            description: z.string().min(1).max(1000).optional(),
+            input_schema: inputSchemaSchema.optional(),
           })
           .strict(),
       )
       .min(1)
       .max(200),
+    /** Session Grant の browser.endpoint へ接続する動的 upstream。 */
+    dynamic_session_endpoint: z.literal("browser").optional(),
     policies: z.array(policySchema).default([]),
   })
   .strict();

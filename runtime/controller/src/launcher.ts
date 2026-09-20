@@ -32,6 +32,9 @@ export interface WorkerTaskState {
   /** session-worker コンテナの終了コード */
   exitCode?: number;
   startedAt?: Date;
+  /** awsvpc タスクの Private IPv4。Browser Session の動的 endpoint 解決に使う。 */
+  privateIp?: string;
+  sessionId?: string;
 }
 
 export interface SessionLauncher {
@@ -42,6 +45,8 @@ export interface SessionLauncher {
   stop(taskArn: string, reason: string): Promise<void>;
   /** セッションの実行中の Worker（Controller 再起動時の引き継ぎ用） */
   findRunning(sessionId: string): Promise<WorkerTaskState | null>;
+  /** Controller再起動やJob消失で取り残されたTaskの検出用。 */
+  findAllRunning(): Promise<WorkerTaskState[]>;
 }
 
 export function isStopped(state: WorkerTaskState | null | undefined): boolean {
@@ -68,6 +73,9 @@ export class EcsSessionLauncher implements SessionLauncher {
 
   private toState(task: Task): WorkerTaskState {
     const container = task.containers?.find((c) => c.name === this.cfg.containerName);
+    const privateIp = task.attachments
+      ?.flatMap((attachment) => attachment.details ?? [])
+      .find((detail) => detail.name === "privateIPv4Address")?.value;
     return {
       taskArn: task.taskArn ?? "",
       lastStatus: task.lastStatus ?? "UNKNOWN",
@@ -75,6 +83,8 @@ export class EcsSessionLauncher implements SessionLauncher {
       stoppedReason: task.stoppedReason ?? container?.reason,
       exitCode: container?.exitCode,
       startedAt: task.startedAt ?? task.createdAt,
+      privateIp,
+      sessionId: task.startedBy?.startsWith(STARTED_BY_PREFIX) ? task.startedBy.slice(STARTED_BY_PREFIX.length) : undefined,
     };
   }
 
@@ -156,6 +166,12 @@ export class EcsSessionLauncher implements SessionLauncher {
     const states = await this.describe(arns);
     for (const state of states.values()) if (state && !isStopped(state)) return state;
     return null;
+  }
+
+  async findAllRunning(): Promise<WorkerTaskState[]> {
+    const listed = await this.ecs.send(new ListTasksCommand({ cluster: this.cfg.cluster, desiredStatus: "RUNNING" }));
+    const states = await this.describe(listed.taskArns ?? []);
+    return [...states.values()].filter((state): state is WorkerTaskState => Boolean(state?.sessionId && !isStopped(state)));
   }
 }
 
@@ -279,6 +295,21 @@ export class DockerSessionLauncher implements SessionLauncher {
     const state = (await this.describe([id])).get(id) ?? null;
     return state && !isStopped(state) ? state : null;
   }
+
+  async findAllRunning(): Promise<WorkerTaskState[]> {
+    const { stdout } = await this.exec(
+      "docker",
+      ["ps", "--no-trunc", "--filter", "label=agentstudio.session_id", "--format", "{{.ID}} {{.Label \"agentstudio.session_id\"}}"],
+      {},
+    );
+    const rows = stdout.trim().split("\n").filter(Boolean);
+    const states = await this.describe(rows.map((row) => row.split(" ")[0]!));
+    return rows.flatMap((row) => {
+      const [id, sessionId] = row.split(" ");
+      const state = id ? states.get(id) : null;
+      return state && sessionId ? [{ ...state, sessionId }] : [];
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +324,7 @@ export class NoopSessionLauncher implements SessionLauncher {
 
   async launch(req: LaunchRequest): Promise<{ taskArn: string }> {
     const taskArn = `noop:${req.sessionId}`;
-    this.running.set(taskArn, { taskArn, lastStatus: "RUNNING", startedAt: new Date() });
+    this.running.set(taskArn, { taskArn, lastStatus: "RUNNING", startedAt: new Date(), sessionId: req.sessionId });
     this.logger.info({ session_id: req.sessionId, environment_id: req.environmentId }, "（noop）Session Worker を起動したものとして扱います");
     return { taskArn };
   }
@@ -309,5 +340,9 @@ export class NoopSessionLauncher implements SessionLauncher {
 
   async findRunning(sessionId: string): Promise<WorkerTaskState | null> {
     return this.running.get(`noop:${sessionId}`) ?? null;
+  }
+
+  async findAllRunning(): Promise<WorkerTaskState[]> {
+    return [...this.running.values()];
   }
 }

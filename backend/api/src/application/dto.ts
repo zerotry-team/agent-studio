@@ -4,9 +4,14 @@ import type {
   approvals,
   audit_logs,
   connections,
+  connectors,
+  agent_builds,
+  agent_connection_links,
+  agent_environment_configs,
   deployments,
   eval_cases,
   eval_runs,
+  external_jobs,
   organizations,
   policies,
   run_events,
@@ -20,12 +25,16 @@ import type {
 } from "@prisma/client";
 import type {
   AgentDto,
+  AgentBuildDto,
+  AgentConnectionLinkDto,
+  AgentEnvironmentConfigDto,
   AgentManifest,
   AgentVersionDto,
   ApprovalDto,
   ApprovalStatus,
   AuditLogDto,
   ConnectionDto,
+  ConnectorDto,
   ConnectionScope,
   DeploymentDto,
   EvalCaseDto,
@@ -91,6 +100,8 @@ export const toAgentDto = (
     key: a.key,
     name: a.name,
     description: a.description,
+    project_brief: a.project_brief,
+    capability_resolution: a.capability_resolution as unknown as AgentDto["capability_resolution"],
     latest_version: a.latest_version,
     published_version: published.length > 0 ? Math.max(...published) : null,
     created_at: a.created_at.toISOString(),
@@ -115,6 +126,7 @@ export const toToolDto = (t: tools & { versions?: tool_versions[] }, includeVers
   execution_location: t.execution_location as ToolExecutionLocation,
   risk: t.risk as ToolRisk,
   latest_version: t.latest_version,
+  connector_id: t.connector_id,
   created_at: t.created_at.toISOString(),
   ...(includeVersions ? { versions: [...(t.versions ?? [])].sort((x, y) => y.version - x.version).map(toToolVersionDto) } : {}),
 });
@@ -123,12 +135,17 @@ export const toConnectionDto = (c: connections): ConnectionDto => ({
   id: c.id,
   name: c.name,
   description: c.description,
+  connector_id: c.connector_id,
   scope: c.scope as ConnectionScope,
   runtime_id: c.runtime_id,
   runtime_secret_name: c.runtime_secret_name,
   header_name: c.header_name,
   // runtime の接続先は値が顧客 AWS にあるため、Agent Studio からは設定済みか分からない
   has_secret: c.scope === "runtime" ? false : Boolean(c.secret_locator),
+  status: c.status as ConnectionDto["status"],
+  last_validated_at: iso(c.last_validated_at),
+  expires_at: iso(c.expires_at),
+  revoked_at: iso(c.revoked_at),
   created_at: c.created_at.toISOString(),
 });
 
@@ -178,7 +195,7 @@ export const toRuntimeProfileDto = (p: runtime_profiles & { runtime?: runtimes |
 });
 
 export const toDeploymentDto = (
-  d: deployments & { agent: agents; agent_version: agent_versions; runtime_profile: runtime_profiles },
+  d: deployments & { agent: agents; agent_version: agent_versions; runtime_profile: runtime_profiles; build?: agent_builds | null },
 ): DeploymentDto => ({
   id: d.id,
   agent: { id: d.agent.id, key: d.agent.key, name: d.agent.name },
@@ -190,19 +207,70 @@ export const toDeploymentDto = (
     name: d.runtime_profile.name,
     type: d.runtime_profile.type as RuntimeProfileType,
   },
+  build_id: d.build_id,
+  build_number: d.build?.build_number ?? null,
+  promoted_from_id: d.promoted_from_id,
   stage: d.stage as Stage,
   status: d.status as DeploymentDto["status"],
+  health_status: d.health_status as DeploymentDto["health_status"],
   created_by: d.created_by,
   created_at: d.created_at.toISOString(),
 });
 
+export const toConnectorDto = (
+  connector: connectors & { tools: (tools & { versions?: tool_versions[] })[] },
+): ConnectorDto => ({
+  id: connector.id,
+  key: connector.key,
+  name: connector.name,
+  description: connector.description,
+  adapter: connector.adapter as ConnectorDto["adapter"],
+  base_url: connector.base_url,
+  auth_type: connector.auth_type as ConnectorDto["auth_type"],
+  created_at: connector.created_at.toISOString(),
+  tools: connector.tools.map((tool) => toToolDto(tool, Boolean(tool.versions))),
+});
+
+export const toAgentConnectionLinkDto = (
+  link: agent_connection_links & { connector: connectors; connection: connections },
+): AgentConnectionLinkDto => ({
+  id: link.id,
+  stage: link.stage as AgentConnectionLinkDto["stage"],
+  connector: { id: link.connector.id, key: link.connector.key, name: link.connector.name },
+  connection: {
+    id: link.connection.id,
+    name: link.connection.name,
+    status: link.connection.status as ConnectionDto["status"],
+    has_secret: link.connection.scope === "runtime" ? false : Boolean(link.connection.secret_locator),
+  },
+  allowed_capabilities: link.allowed_capabilities as string[],
+});
+
+export const toAgentEnvironmentConfigDto = (config: agent_environment_configs): AgentEnvironmentConfigDto => ({
+  stage: config.stage as AgentEnvironmentConfigDto["stage"],
+  variables: config.variables as Record<string, string>,
+});
+
+export const toAgentBuildDto = (build: agent_builds): AgentBuildDto => ({
+  id: build.id,
+  build_number: build.build_number,
+  status: build.status as AgentBuildDto["status"],
+  agent_version_id: build.agent_version_id,
+  runtime_profile_id: build.runtime_profile_id,
+  resolution: build.resolution as unknown as AgentBuildDto["resolution"],
+  build_log: build.build_log as unknown as AgentBuildDto["build_log"],
+  created_at: build.created_at.toISOString(),
+});
+
 export type RunWithRelations = runs & {
   deployment: deployments & { agent: agents; agent_version: agent_versions; runtime_profile: runtime_profiles };
+  external_jobs: external_jobs[];
 };
 
 export const toRunDto = (r: RunWithRelations): RunDto => ({
   id: r.id,
   status: r.status as RunStatus,
+  outcome: r.outcome as RunDto["outcome"],
   input: r.input,
   output: r.output,
   error: r.error,
@@ -224,10 +292,19 @@ export const toRunDto = (r: RunWithRelations): RunDto => ({
   created_at: r.created_at.toISOString(),
   started_at: iso(r.started_at),
   finished_at: iso(r.finished_at),
+  external_jobs: r.external_jobs.map((job) => ({
+    id: job.id,
+    provider_job_id: job.provider_job_id,
+    source_tool: job.source_tool,
+    status: job.status as RunDto["external_jobs"][number]["status"],
+    attempts: job.attempts,
+    last_checked_at: iso(job.last_checked_at),
+  })),
 });
 
 export const runInclude = {
   deployment: { include: { agent: true, agent_version: true, runtime_profile: true } },
+  external_jobs: { orderBy: { created_at: "asc" as const } },
 } as const;
 
 export const toRunEventDto = (e: run_events): RunEventDto => ({

@@ -77,6 +77,7 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
   const canCancel = canStart && !terminal;
   const canMessage = canStart && run.status !== "cancelled" && run.status !== "failed";
   const hasApprovalRequests = events.some((e) => e.type === "approval.requested");
+  const activeExternalJobs = run.external_jobs.filter((job) => job.status === "pending" || job.status === "processing");
 
   return (
     <>
@@ -94,7 +95,7 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
           <>
             <Badge tone="neutral">v{run.agent.version}</Badge>
             <span role="status" aria-live="polite">
-              <RunStatusBadge status={run.status} />
+              <RunStatusBadge status={run.status} outcome={run.outcome} />
             </span>
             <StageBadge stage={run.deployment.stage} />
           </>
@@ -124,6 +125,18 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
         <Alert tone="warning" className="mb-6" title="最新の状態を読み込めませんでした">
           {stream.pollError}
           {stream.polling ? "（自動でもう一度読み込みます）" : null}
+        </Alert>
+      ) : null}
+
+      {run.outcome === "completed_with_errors" ? (
+        <Alert tone="warning" className="mb-6" title="一部の操作を完了できませんでした">
+          エージェントの回答は完了しましたが、外部サービスへの操作に失敗があります。下の経過で失敗内容と承認履歴を確認してください。
+        </Alert>
+      ) : null}
+
+      {activeExternalJobs.length > 0 ? (
+        <Alert tone="info" className="mb-6" title="外部サービスの処理結果を確認しています">
+          投稿要求は受け付け済みです。Agent Studioは同じ投稿を再送せず、Job IDを使って結果だけを確認しています。
         </Alert>
       ) : null}
 

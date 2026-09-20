@@ -1,9 +1,14 @@
 import type { Deps } from "../application/deps.js";
-import { applyApprovalOutcome } from "../application/runs.js";
+import type { Prisma } from "@prisma/client";
+import { applyApprovalOutcome, createRunInTx } from "../application/runs.js";
+import { nextScheduleAt } from "../application/schedules.js";
 import { AuditExporter } from "./audit-export.js";
 import { EvalEngine, WorkflowEngine } from "./engines.js";
 import { RunDriver } from "./run-driver.js";
 import type { StudioFunctionExecutor } from "./studio-functions.js";
+import type { CompiledAgentConfig } from "../domain/manifest-compiler.js";
+import { appendRunEvent } from "../application/run-events.js";
+import { parseExternalJobResponse } from "./external-jobs.js";
 
 const RUN_LEASE_SECONDS = 60;
 const RUNTIME_OFFLINE_AFTER_SECONDS = 180;
@@ -38,11 +43,124 @@ export class WorkerScheduler {
       this.every(10_000, signal, () => this.cleanupSessions()),
       this.every(3_000, signal, () => this.workflows.tick()),
       this.every(10_000, signal, () => this.evals.tick()),
+      this.every(3_000, signal, () => this.pollExternalJobs()),
+      this.every(10_000, signal, () => this.runDueSchedules()),
       this.every(10 * 60_000, signal, () => this.audit.tick()),
     ];
     await Promise.all(loops);
     // 停止時: 実行中の Run はリースを手放して終わる（別の Worker が引き継ぐ）
     await Promise.allSettled(this.active.values());
+  }
+
+  private async runDueSchedules() {
+    const items = await this.deps.system.claimDueSchedules(60, 20);
+    for (const item of items) {
+      await this.deps.db.org(item.organization_id, async (tx) => {
+        const schedule = await tx.agent_schedules.findUnique({ where: { id: item.schedule_id } });
+        if (!schedule || !schedule.enabled) return;
+        const days = schedule.days_of_week as number[];
+        const nextRunAt = nextScheduleAt(new Date(Date.now() + 1_000), schedule.local_time, days);
+        const deployment = await tx.deployments.findFirst({
+          where: { organization_id: item.organization_id, agent_id: schedule.agent_id, stage: schedule.stage, status: "active", health_status: "ready" },
+          orderBy: { created_at: "desc" },
+        });
+        if (!deployment) {
+          await tx.agent_schedules.update({ where: { id: schedule.id }, data: { next_run_at: nextRunAt, lease_until: null } });
+          await tx.audit_logs.createMany({ data: [{ organization_id: item.organization_id, actor_type: "system", action: "schedule.skip", target_type: "agent_schedule", target_id: schedule.id, result: "failure", detail: { reason: "deployment_not_ready", stage: schedule.stage } }] });
+          return;
+        }
+        const run = await createRunInTx(tx, item.organization_id, deployment.id, schedule.input, schedule.created_by);
+        await tx.agent_schedules.update({
+          where: { id: schedule.id },
+          data: { last_run_at: new Date(), last_run_id: run.id, next_run_at: nextRunAt, lease_until: null },
+        });
+        await tx.audit_logs.createMany({ data: [{ organization_id: item.organization_id, actor_type: "system", actor_id: schedule.id, action: "schedule.run", target_type: "run", target_id: run.id, result: "success", detail: { agent_id: schedule.agent_id, stage: schedule.stage } }] });
+      });
+    }
+  }
+
+  /** publish_postは再実行せず、返されたJob IDをget_jobで確認するだけに限定する。 */
+  private async pollExternalJobs() {
+    const items = await this.deps.system.listExternalJobs(20);
+    for (const item of items) {
+      try {
+        const context = await this.deps.db.org(item.organization_id, (tx) =>
+          tx.external_jobs.findUniqueOrThrow({
+            where: { id: item.job_id },
+            include: { run: { include: { deployment: true } } },
+          }),
+        );
+        const config = context.run.deployment.compiled_config as unknown as CompiledAgentConfig;
+        const pollTool = config.function_tools.find((tool) => tool.name === context.poll_tool && tool.connector_id === context.connector_id);
+        if (!pollTool) throw new Error("Job状態確認の操作がBuildに含まれていません");
+        const output = await this.functions.execute(item.organization_id, pollTool, { id: context.provider_job_id }, {
+          agentId: context.run.deployment.agent_id,
+          stage: context.run.deployment.stage as "staging" | "production",
+          runId: context.run_id,
+        });
+        const parsed = parseExternalJobResponse(output);
+        if (!parsed) throw new Error("Job状態の応答を読み取れませんでした");
+        const attempts = context.attempts + 1;
+        const terminal = parsed.status === "succeeded" || parsed.status === "failed";
+        const status = !terminal && attempts >= 20 ? "unknown" : parsed.status;
+        await this.deps.db.org(item.organization_id, async (tx) => {
+          await tx.external_jobs.update({
+            where: { id: context.id },
+            data: {
+              status,
+              response: parsed.response as Prisma.InputJsonValue,
+              attempts,
+              last_checked_at: new Date(),
+              next_poll_at: new Date(Date.now() + Math.min(60_000, 2_000 * 2 ** Math.min(attempts, 5))),
+              error: null,
+            },
+          });
+          if (status !== context.status || terminal || status === "unknown") {
+            await appendRunEvent(tx, context.run, "external.job", status === "succeeded"
+              ? `外部サービスの投稿処理が成功しました（Job ${context.provider_job_id}）`
+              : status === "failed"
+                ? `外部サービスの投稿処理が失敗しました（Job ${context.provider_job_id}）`
+                : status === "unknown"
+                  ? `外部サービスの投稿結果を確認できませんでした。自動再投稿はしません（Job ${context.provider_job_id}）`
+                  : `外部サービスで投稿処理中です（Job ${context.provider_job_id}）`, {
+              job_id: context.id,
+              provider_job_id: context.provider_job_id,
+              status,
+              attempts,
+            });
+          }
+          if (status === "failed" || status === "unknown") {
+            await tx.runs.updateMany({ where: { id: context.run_id, outcome: { in: ["pending", "succeeded"] } }, data: { outcome: "completed_with_errors" } });
+          }
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Job状態の確認に失敗しました";
+        await this.deps.db.org(item.organization_id, async (tx) => {
+          const job = await tx.external_jobs.findUniqueOrThrow({ where: { id: item.job_id }, include: { run: true } });
+          const attempts = job.attempts + 1;
+          const unknown = attempts >= 20;
+          await tx.external_jobs.update({
+            where: { id: job.id },
+            data: {
+              attempts,
+              status: unknown ? "unknown" : job.status,
+              error: message.slice(0, 1000),
+              last_checked_at: new Date(),
+              next_poll_at: new Date(Date.now() + Math.min(60_000, 2_000 * 2 ** Math.min(attempts, 5))),
+            },
+          });
+          if (unknown) {
+            await tx.runs.updateMany({ where: { id: job.run_id, outcome: { in: ["pending", "succeeded"] } }, data: { outcome: "completed_with_errors" } });
+            await appendRunEvent(tx, job.run, "external.job", `外部サービスの投稿結果を確認できませんでした。自動再投稿はしません（Job ${job.provider_job_id}）`, {
+              job_id: job.id,
+              provider_job_id: job.provider_job_id,
+              status: "unknown",
+              error: message,
+            });
+          }
+        });
+      }
+    }
   }
 
   private async every(intervalMs: number, signal: AbortSignal, task: () => Promise<void>) {
@@ -86,6 +204,8 @@ export class WorkerScheduler {
     if (offline > 0) this.deps.logger.warn({ count: offline }, "ハートビートが途絶えた Runtime を offline にしました");
     const requeued = await this.deps.system.requeueExpiredJobs(JOB_MAX_ATTEMPTS);
     if (requeued > 0) this.deps.logger.warn({ count: requeued }, "結果が返らなかったジョブを戻しました");
+    const expiredConnections = await this.deps.system.expireConnections();
+    if (expiredConnections > 0) this.deps.logger.info({ count: expiredConnections }, "期限を過ぎたConnectionを利用不可にしました");
   }
 
   /** 終了した Run のセッション: OpenAI のセッションを削除し、Runtime に Worker の停止を依頼する */

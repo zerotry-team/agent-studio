@@ -13,6 +13,10 @@ export interface SessionBuildOptions {
 /** コンパイル結果から OpenAI のセッション作成パラメータを組み立てる（初回の入力は含めない） */
 export function buildSessionCreateParams(config: CompiledAgentConfig, opts: SessionBuildOptions): SessionCreateParams {
   const tools: AgentToolParam[] = [];
+  const variables = config.variables ?? {};
+  const variableInstructions = Object.keys(variables).length
+    ? `\n\n## この環境の設定値\n${Object.entries(variables).map(([name, value]) => `- ${name}: ${value}`).join("\n")}`
+    : "";
 
   for (const f of config.function_tools) {
     tools.push({ type: "function", name: f.name, description: f.description, parameters: f.parameters });
@@ -68,7 +72,7 @@ export function buildSessionCreateParams(config: CompiledAgentConfig, opts: Sess
     environment,
     agent: {
       model: config.model,
-      instructions: config.instructions,
+      instructions: `${config.instructions}${variableInstructions}`,
       ...(config.reasoning_effort ? { reasoning: { effort: config.reasoning_effort } } : {}),
       tools,
     },

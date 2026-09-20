@@ -16,6 +16,14 @@ export class ConnectionRepository extends ApiRepository {
     return this.api.put(`/connections/${encodeURIComponent(id)}/secret`, input);
   }
 
+  validate(id: string): Promise<ConnectionDto> {
+    return this.api.post<ConnectionDto>(`/connections/${encodeURIComponent(id)}/validate`, {});
+  }
+
+  revoke(id: string): Promise<ConnectionDto> {
+    return this.api.post<ConnectionDto>(`/connections/${encodeURIComponent(id)}/revoke`, {});
+  }
+
   remove(id: string): Promise<void> {
     return this.api.delete(`/connections/${encodeURIComponent(id)}`);
   }

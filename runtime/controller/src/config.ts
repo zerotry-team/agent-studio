@@ -47,6 +47,14 @@ const envSchema = z
     SESSION_WORKER_IMAGE: z.string().min(1).optional(),
     SESSION_WORKER_DOCKER_NETWORK: z.string().min(1).optional(),
 
+    BROWSER_LAUNCHER: z.enum(["ecs", "docker", "noop", "disabled"]).default("disabled"),
+    BROWSER_WORKER_TASK_DEFINITION: z.string().min(1).optional(),
+    BROWSER_WORKER_SUBNETS: csv.optional(),
+    BROWSER_WORKER_SECURITY_GROUPS: csv.optional(),
+    BROWSER_WORKER_CONTAINER_NAME: z.string().min(1).default("browser-session-worker"),
+    BROWSER_WORKER_IMAGE: z.string().min(1).optional(),
+    BROWSER_WORKER_DOCKER_NETWORK: z.string().min(1).optional(),
+
     GATEWAY_PUBLIC_URL: httpUrl,
     GATEWAY_CATALOG_URL: httpUrl.default("http://127.0.0.1:8082/internal/catalog"),
     CONTROLLER_INTERNAL_PORT: z.coerce.number().int().min(1).max(65535).default(8081),
@@ -77,6 +85,13 @@ const envSchema = z
       need("SESSION_WORKER_SECURITY_GROUPS", "SESSION_LAUNCHER=ecs");
     }
     if (env.SESSION_LAUNCHER === "docker") need("SESSION_WORKER_IMAGE", "SESSION_LAUNCHER=docker");
+    if (env.BROWSER_LAUNCHER === "ecs") {
+      need("ECS_CLUSTER", "BROWSER_LAUNCHER=ecs");
+      need("BROWSER_WORKER_TASK_DEFINITION", "BROWSER_LAUNCHER=ecs");
+      need("BROWSER_WORKER_SUBNETS", "BROWSER_LAUNCHER=ecs");
+      need("BROWSER_WORKER_SECURITY_GROUPS", "BROWSER_LAUNCHER=ecs");
+    }
+    if (env.BROWSER_LAUNCHER === "docker") need("BROWSER_WORKER_IMAGE", "BROWSER_LAUNCHER=docker");
   });
 
 export type LauncherConfig =
@@ -90,6 +105,19 @@ export type LauncherConfig =
     }
   | { type: "docker"; image: string; network?: string }
   | { type: "noop" };
+
+export type BrowserLauncherConfig =
+  | {
+      type: "ecs";
+      cluster: string;
+      taskDefinition: string;
+      subnets: string[];
+      securityGroups: string[];
+      containerName: string;
+    }
+  | { type: "docker"; image: string; network?: string }
+  | { type: "noop" }
+  | { type: "disabled" };
 
 export interface ControllerConfig {
   nodeEnv: string;
@@ -105,6 +133,7 @@ export interface ControllerConfig {
     bootstrapTokenOverride?: string;
   };
   launcher: LauncherConfig;
+  browserLauncher: BrowserLauncherConfig;
   gatewayPublicUrl: string;
   gatewayCatalogUrl: string;
   internalPort: number;
@@ -150,6 +179,22 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ControllerC
     launcher = { type: "noop" };
   }
 
+  let browserLauncher: BrowserLauncherConfig;
+  if (e.BROWSER_LAUNCHER === "ecs") {
+    browserLauncher = {
+      type: "ecs",
+      cluster: e.ECS_CLUSTER!,
+      taskDefinition: e.BROWSER_WORKER_TASK_DEFINITION!,
+      subnets: e.BROWSER_WORKER_SUBNETS!,
+      securityGroups: e.BROWSER_WORKER_SECURITY_GROUPS!,
+      containerName: e.BROWSER_WORKER_CONTAINER_NAME,
+    };
+  } else if (e.BROWSER_LAUNCHER === "docker") {
+    browserLauncher = { type: "docker", image: e.BROWSER_WORKER_IMAGE!, network: e.BROWSER_WORKER_DOCKER_NETWORK };
+  } else {
+    browserLauncher = { type: e.BROWSER_LAUNCHER };
+  }
+
   return {
     nodeEnv: e.NODE_ENV,
     logLevel: e.LOG_LEVEL,
@@ -167,6 +212,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ControllerC
       bootstrapTokenOverride: e.BOOTSTRAP_TOKEN,
     },
     launcher,
+    browserLauncher,
     gatewayPublicUrl: e.GATEWAY_PUBLIC_URL,
     gatewayCatalogUrl: e.GATEWAY_CATALOG_URL,
     internalPort: e.CONTROLLER_INTERNAL_PORT,

@@ -6,6 +6,7 @@ import { RunService } from "./application/runs.js";
 import { RuntimeApiService } from "./application/runtime-api.js";
 import { ToolService } from "./application/tools.js";
 import { InsightService, WorkflowService } from "./application/workflows.js";
+import { ScheduleService } from "./application/schedules.js";
 import { runtimeTokenSecret, type Env } from "./env.js";
 import { createIdentityVerifier } from "./infrastructure/auth/identity-verifier.js";
 import { RuntimeTokenIssuer } from "./infrastructure/auth/runtime-token.js";
@@ -13,7 +14,7 @@ import { createUserInviter } from "./infrastructure/auth/user-inviter.js";
 import { DevRuntimeIdentityVerifier, StsRuntimeIdentityVerifier } from "./infrastructure/aws/sts-identity.js";
 import type { Database } from "./infrastructure/db/prisma.js";
 import { SystemDb, TenantDb } from "./infrastructure/db/tenant-db.js";
-import { ClaudeManifestGenerator, TemplateManifestGenerator } from "./infrastructure/llm/manifest-generator.js";
+import { OpenAIManifestGenerator, TemplateManifestGenerator } from "./infrastructure/llm/manifest-generator.js";
 import { AgentsApiProvider } from "./infrastructure/openai/agents-api-provider.js";
 import { createSecretStore } from "./infrastructure/secrets/secret-store.js";
 import { createObjectStore } from "./infrastructure/storage/object-store.js";
@@ -28,12 +29,12 @@ export interface Services {
   workflows: WorkflowService;
   insights: InsightService;
   runtimeApi: RuntimeApiService;
+  schedules: ScheduleService;
 }
 
 export function buildDeps(env: Env, logger: Logger, database: Database, overrides: Partial<Deps> = {}): Deps {
   const db = new TenantDb(database.prisma);
   const secrets = overrides.secrets ?? createSecretStore(env);
-  const anthropicKey = env.ANTHROPIC_API_KEY && env.ANTHROPIC_API_KEY !== "unset" ? env.ANTHROPIC_API_KEY : null;
   return {
     env,
     logger,
@@ -41,9 +42,10 @@ export function buildDeps(env: Env, logger: Logger, database: Database, override
     system: new SystemDb(database.prisma),
     secrets,
     agentsApi: new AgentsApiProvider(env, db, secrets),
-    generator: anthropicKey
-      ? new ClaudeManifestGenerator(anthropicKey, env.MANIFEST_GENERATOR_MODEL, logger)
-      : new TemplateManifestGenerator(),
+    generator:
+      env.AGENTS_API_MODE === "fake"
+        ? new TemplateManifestGenerator()
+        : new OpenAIManifestGenerator(env, db, secrets, logger),
     identity: createIdentityVerifier(env),
     runtimeIdentity:
       env.RUNTIME_IDENTITY_MODE === "dev" ? new DevRuntimeIdentityVerifier() : new StsRuntimeIdentityVerifier(env.RUNTIME_SERVER_ID),
@@ -64,5 +66,6 @@ export function buildServices(deps: Deps): Services {
     workflows: new WorkflowService(deps),
     insights: new InsightService(deps),
     runtimeApi: new RuntimeApiService(deps),
+    schedules: new ScheduleService(deps),
   };
 }

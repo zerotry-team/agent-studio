@@ -190,7 +190,7 @@ function RunPanel({ active }: { active: DeploymentDto[] }) {
                         <TimeAgo value={run.created_at} />
                       </span>
                     </span>
-                    <RunStatusBadge status={run.status} />
+                    <RunStatusBadge status={run.status} outcome={run.outcome} />
                   </Link>
                 </li>
               ))}

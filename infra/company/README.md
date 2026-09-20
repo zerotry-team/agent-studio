@@ -47,7 +47,8 @@ infra/company/
 | `stages.<stage>.aws_account_id` | 適用先のアカウント ID。書いておくと別アカウントへの誤適用を防げる |
 | `stages.<stage>.runtime_id` | Runtime を登録したあとに表示される ID（タグ用） |
 | `stages.<stage>.runtime` | `runtime` の 1 階層目のキーをステージごとに上書きする |
-| `runtime.browser_enabled` / `demo_internal_api_enabled` | Browser Worker / 社内 API モックを動かすか |
+| `runtime.browser_runtime.enabled` / `demo_internal_api_enabled` | RunごとのBrowser Session Worker / 社内 API モックを動かすか。`browser_enabled`は移行用 |
+| `runtime.egress_policy` | Browserの出口。`mode: proxy`と`allowed_domains`でFQDN allowlistを強制する |
 | `runtime.allowed_internal_cidrs` | Tool Gateway から到達を許す社内ネットワーク |
 | `runtime.extra_allowed_domains` | DNS Firewall で追加で許可するドメイン。**Browser Worker で開くサイトや、名前で呼ぶ社内システムもここに入れる**（VPC 内の名前解決はすべて許可リスト方式） |
 | `runtime.connections` | 業務システムの接続名。空のシークレット `agent-studio/runtime/<short_name>/<stage>/connections/<名前>` を作る |

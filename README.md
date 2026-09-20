@@ -19,7 +19,8 @@ agent-studio/
 │   ├── controller/         # Runtime Controller（ジョブ取得・Session Worker の起動）
 │   ├── tool-gateway/       # Tool Gateway（MCP・認可・ポリシー・承認・認証情報の注入）
 │   ├── session-worker/     # codex exec-server のイメージ
-│   ├── browser-worker/     # Playwright MCP のイメージ
+│   ├── browser-session-worker/ # RunごとのChromium / Playwright Worker
+│   ├── egress-proxy/       # Browser専用FQDN allowlist proxy
 │   └── demo-internal-api/  # 受け入れシナリオ用の社内 API モック
 ├── prisma/                 # DB スキーマとマイグレーション（RLS を含む）
 ├── infra/                  # Terraform（bootstrap / control-plane / tenant-runtime / 企業ごとの設定）
@@ -70,6 +71,9 @@ yarn type-check
 yarn test                                          # 単体テスト（全ワークスペース）
 yarn workspace @agent-studio/api test:integration  # 結合テスト（PostgreSQL が必要）
 ```
+
+結合テストはローカルの `.env` を読み、同じ PostgreSQL を使う。`yarn dev:worker` が起動中だと
+テスト用の Run を開発 Worker が取得して競合するため、結合テストの間だけ Worker を停止する。
 
 結合テストでは、組織の分離（RLS・複合外部キー・監査ログの追記のみ）と、実行の流れ（Runtime の登録、承認、後片付け）を確認する。
 

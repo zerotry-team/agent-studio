@@ -97,6 +97,35 @@ export class RunService {
     });
   }
 
+  /** Project公開API。利用者はDeployment IDを知らず、Agentと環境だけで実行できる。 */
+  async createForAgent(actor: MemberActor, agentId: string, stage: "staging" | "production", input: string): Promise<RunDto> {
+    requireRole(actor, "operator");
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const deployment = await tx.deployments.findFirst({
+        where: {
+          organization_id: actor.organizationId,
+          agent_id: agentId,
+          stage,
+          status: "active",
+          health_status: "ready",
+        },
+        orderBy: { created_at: "desc" },
+      });
+      if (!deployment) throw preconditionFailed(`${stage === "staging" ? "Preview" : "Production"}はReadyではありません`);
+      const run = await createRunInTx(tx, actor.organizationId, deployment.id, input, actor.userId);
+      await recordAudit(
+        tx,
+        auditBy(actor, {
+          action: "run.create",
+          targetType: "run",
+          targetId: run.id,
+          detail: { agent_id: agentId, stage, deployment_id: deployment.id, source: "agent_api" },
+        }),
+      );
+      return toRunDto(await tx.runs.findUniqueOrThrow({ where: { id: run.id }, include: runInclude }));
+    });
+  }
+
   /** 実行中のセッションに追加の指示を送る（Worker がセッションの空きを待って送信する） */
   async sendMessage(actor: MemberActor, id: string, input: string): Promise<void> {
     requireRole(actor, "operator");

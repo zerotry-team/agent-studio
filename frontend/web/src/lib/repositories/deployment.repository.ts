@@ -14,4 +14,12 @@ export class DeploymentRepository extends ApiRepository {
   archive(id: string): Promise<DeploymentDto> {
     return this.api.post<DeploymentDto>(`/deployments/${encodeURIComponent(id)}/archive`);
   }
+
+  promote(id: string): Promise<DeploymentDto> {
+    return this.api.post<DeploymentDto>(`/deployments/${encodeURIComponent(id)}/promote`);
+  }
+
+  rollback(id: string): Promise<DeploymentDto> {
+    return this.api.post<DeploymentDto>(`/deployments/${encodeURIComponent(id)}/rollback`);
+  }
 }

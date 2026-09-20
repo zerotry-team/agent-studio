@@ -19,7 +19,9 @@ locals {
   agent_studio_host = regex("^https://([^/:]+)", var.agent_studio_url)[0]
 
   # 初回（イメージがまだ無い）はサービスを起動しない
-  services_enabled = var.image_tag != "none"
+  services_enabled      = var.image_tag != "none"
+  browser_enabled       = var.browser_runtime.enabled || var.browser_enabled
+  browser_proxy_enabled = local.browser_enabled && var.egress_policy.mode == "proxy"
 
   # demo-internal-api は connections/demo-internal-api のトークンを使うため、有効なら必ず作る
   connection_names = distinct(concat(
@@ -33,7 +35,7 @@ locals {
 
   ecr_registry_parts = regex("^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com$", var.image_registry)
   ecr_repository_arn = {
-    for repo in ["runtime-controller", "tool-gateway", "session-worker", "browser-worker", "demo-internal-api"] :
+    for repo in ["runtime-controller", "tool-gateway", "session-worker", "browser-worker", "egress-proxy", "demo-internal-api"] :
     repo => "arn:${local.partition}:ecr:${local.ecr_registry_parts[1]}:${local.ecr_registry_parts[0]}:repository/agent-studio/${repo}"
   }
   image = {

@@ -42,6 +42,21 @@ runtime:
   vpc_cidr: 10.40.0.0/16
   nat_gateway_count: 1
   browser_enabled: true
+  browser_runtime:
+    enabled: true
+    session_isolation: fargate_task
+    cpu: 2048
+    memory: 4096
+    ephemeral_storage_gib: 30
+    max_concurrent_sessions: 10
+    max_lifetime_minutes: 120
+    idle_timeout_minutes: 15
+    code_execution_enabled: true
+  egress_policy:
+    mode: proxy
+    allowed_domains:
+      - example.com
+      - "*.example.com"
   demo_internal_api_enabled: true
   # Tool Gateway から到達を許す社内ネットワーク
   allowed_internal_cidrs: []
@@ -122,17 +137,132 @@ runtime:
 
     upstream_mcp:
       - name: browser
-        url: "http://browser.<prefix>.internal:8931/mcp"
+        # 一覧は下の固定schemaから作り、実行時はSession GrantのRun専用endpointへ差し替える。
+        url: "http://browser-session.invalid:8931/mcp"
+        dynamic_session_endpoint: browser
         tools:
           - name: browser_navigate
+            description: "許可されたWebページを開きます。"
             risk: read
             reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                url: { type: string }
+              required: [url]
+              additionalProperties: false
           - name: browser_snapshot
+            description: "現在ページのURL、title、アクセシビリティ表現を取得します。"
             risk: read
             reads_untrusted_content: true
+            input_schema: { type: object, properties: {}, additionalProperties: false }
+          - name: browser_screenshot
+            description: "現在画面を元解像度のPNGで取得します。"
+            risk: read
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                full_page: { type: boolean }
+              additionalProperties: false
+          - name: browser_wait_for
+            description: "文字列、selector、または時間を待ちます。"
+            risk: read
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                text: { type: string }
+                selector: { type: string }
+                timeout_ms: { type: number }
+              additionalProperties: false
+          - name: browser_tabs
+            description: "タブを一覧・選択・閉じます。"
+            risk: write
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                action: { type: string, enum: [list, select, close] }
+                index: { type: number }
+              required: [action]
+              additionalProperties: false
           - name: browser_click
+            description: "selectorまたは表示文字列で要素をクリックします。"
             risk: write
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                selector: { type: string }
+                text: { type: string }
+              additionalProperties: false
           - name: browser_type
+            description: "入力欄へ文字列を入力します。"
             risk: write
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                selector: { type: string }
+                text_locator: { type: string }
+                value: { type: string }
+                submit: { type: boolean }
+              required: [value]
+              additionalProperties: false
+          - name: browser_press_key
+            description: "現在ページへキー入力します。"
+            risk: write
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                key: { type: string }
+              required: [key]
+              additionalProperties: false
+          - name: browser_select_option
+            description: "select要素の選択値を変更します。"
+            risk: write
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                selector: { type: string }
+                value: { type: string }
+              required: [selector, value]
+              additionalProperties: false
+          - name: browser_hover
+            description: "要素へホバーします。"
+            risk: write
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                selector: { type: string }
+                text: { type: string }
+              additionalProperties: false
+          - name: browser_drag
+            description: "要素間をドラッグします。"
+            risk: write
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                source_selector: { type: string }
+                target_selector: { type: string }
+              required: [source_selector, target_selector]
+              additionalProperties: false
+          - name: browser_exec_js
+            description: "公開ページを制限付きPlaywrightコードで操作します。"
+            risk: write
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                code: { type: string }
+                timeout_ms: { type: number }
+                expects: { type: string }
+              required: [code]
+              additionalProperties: false
 
     policies: []

@@ -12,10 +12,10 @@ export default function NewAgentPage() {
   return (
     <>
       <PageHeader
-        title="エージェントを作る"
+        title="Agentを作成"
         description={
           allowed
-            ? "任せたい仕事を説明すると、AI がエージェントの定義の案を作ります。内容を確認・編集してから保存してください。"
+            ? "業務を説明すると、必要な連携と安全ルールを解決し、PreviewできるAgent Projectを作ります。"
             : undefined
         }
         back={{ href: "/agents", label: "エージェント一覧" }}

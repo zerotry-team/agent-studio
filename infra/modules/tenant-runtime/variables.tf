@@ -75,9 +75,47 @@ variable "image_tag" {
 }
 
 variable "browser_enabled" {
-  description = "Browser Worker（Playwright MCP）を動かすか"
+  description = "移行用。true は browser_runtime.enabled=true と同じ（将来削除予定）"
   type        = bool
   default     = false
+}
+
+variable "browser_runtime" {
+  description = "RunごとのBrowser Session Worker設定"
+  type = object({
+    enabled                  = optional(bool, false)
+    session_isolation        = optional(string, "fargate_task")
+    cpu                      = optional(number, 2048)
+    memory                   = optional(number, 4096)
+    ephemeral_storage_gib    = optional(number, 30)
+    max_concurrent_sessions  = optional(number, 10)
+    max_lifetime_minutes     = optional(number, 120)
+    idle_timeout_minutes     = optional(number, 15)
+    code_execution_enabled   = optional(bool, true)
+    authenticated_profiles   = optional(bool, false)
+    computer_actions_enabled = optional(bool, false)
+    screenshot_audit_enabled = optional(bool, false)
+  })
+  default = {}
+
+  validation {
+    condition     = var.browser_runtime.session_isolation == "fargate_task"
+    error_message = "browser_runtime.session_isolation は fargate_task にしてください。"
+  }
+}
+
+variable "egress_policy" {
+  description = "Browser egress制御。proxyはPhase 2でEgress Proxyを強制する"
+  type = object({
+    mode            = optional(string, "proxy")
+    allowed_domains = optional(list(string), [])
+  })
+  default = {}
+
+  validation {
+    condition     = contains(["proxy", "legacy_direct"], var.egress_policy.mode)
+    error_message = "現在のegress_policy.modeは proxy / legacy_direct のいずれかです（network_firewallは未実装）。"
+  }
 }
 
 variable "demo_internal_api_enabled" {

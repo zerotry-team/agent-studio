@@ -226,7 +226,15 @@ export class ToolCallService {
         result = outcome.result;
         detail = outcome.auditDetail;
       } else {
-        result = await this.deps.upstream.callTool(grant, tool.target.upstream, tool.target.toolName, args);
+        const configured = tool.target.upstream;
+        const upstream =
+          configured.dynamic_session_endpoint === "browser"
+            ? grant.browser
+              ? { ...configured, url: grant.browser.endpoint }
+              : null
+            : configured;
+        if (!upstream) throw new Error("Browser Session が起動していないか、すでに失われています");
+        result = await this.deps.upstream.callTool(grant, upstream, tool.target.toolName, args);
       }
       record(result.isError ? "failed" : "executed", withApproval(detail), elapsed());
       return result;

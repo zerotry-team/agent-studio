@@ -96,6 +96,11 @@ export class SystemDb {
     return Number(rows[0]?.n ?? 0);
   }
 
+  async expireConnections(): Promise<number> {
+    const rows = await this.prisma.$queryRaw<{ n: number }[]>`SELECT system_expire_connections() AS n`;
+    return Number(rows[0]?.n ?? 0);
+  }
+
   listActiveWorkflowRuns(limit: number) {
     return this.prisma.$queryRaw<{ workflow_run_id: string; organization_id: string }[]>`
       SELECT * FROM system_list_active_workflow_runs(${limit}::integer)`;
@@ -104,6 +109,16 @@ export class SystemDb {
   listSessionsToCleanup(limit: number) {
     return this.prisma.$queryRaw<{ session_id: string; organization_id: string }[]>`
       SELECT * FROM system_list_sessions_to_cleanup(${limit}::integer)`;
+  }
+
+  listExternalJobs(limit: number) {
+    return this.prisma.$queryRaw<{ job_id: string; organization_id: string }[]>`
+      SELECT * FROM system_list_external_jobs(${limit}::integer)`;
+  }
+
+  claimDueSchedules(leaseSeconds: number, limit: number) {
+    return this.prisma.$queryRaw<{ schedule_id: string; organization_id: string }[]>`
+      SELECT * FROM system_claim_due_schedules(${leaseSeconds}::integer, ${limit}::integer)`;
   }
 
   listRunningEvalRuns(limit: number) {

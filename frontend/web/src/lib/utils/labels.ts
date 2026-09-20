@@ -70,6 +70,7 @@ export const RUN_EVENT_LABELS: Record<RunEventType, string> = {
   message: "メッセージ",
   "tool.call": "ツールの呼び出し",
   "tool.result": "ツールの結果",
+  "external.job": "外部サービスの処理",
   "approval.requested": "承認の依頼",
   "approval.decided": "承認の結果",
   usage: "利用量",

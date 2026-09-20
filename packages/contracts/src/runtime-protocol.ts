@@ -77,6 +77,48 @@ export const runtimeToolCatalogEntrySchema = z.object({
 });
 export type RuntimeToolCatalogEntry = z.infer<typeof runtimeToolCatalogEntrySchema>;
 
+export const browserModeSchema = z.enum(["public_ephemeral", "authenticated_restricted"]);
+export type BrowserMode = z.infer<typeof browserModeSchema>;
+
+export const browserViewportSchema = z
+  .object({
+    width: z.number().int().min(320).max(3840).default(1440),
+    height: z.number().int().min(240).max(2160).default(900),
+  })
+  .strict();
+
+/** Control Plane から Runtime Controller へ渡す Browser Session の起動設定。 */
+export const browserSessionConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    mode: browserModeSchema,
+    profile_id: z.uuid().optional(),
+    allowed_domains: z.array(z.string().min(1).max(253)).max(100),
+    code_execution_enabled: z.boolean(),
+    computer_actions_enabled: z.boolean(),
+    viewport: browserViewportSchema,
+  })
+  .strict()
+  .superRefine((browser, ctx) => {
+    if (browser.mode === "authenticated_restricted" && browser.code_execution_enabled) {
+      ctx.addIssue({ code: "custom", path: ["code_execution_enabled"], message: "認証済み Browser ではコード実行を有効にできません" });
+    }
+    if (browser.mode === "authenticated_restricted" && !browser.profile_id) {
+      ctx.addIssue({ code: "custom", path: ["profile_id"], message: "認証済み Browser には profile_id が必要です" });
+    }
+  });
+export type BrowserSessionConfig = z.infer<typeof browserSessionConfigSchema>;
+
+/** Controller が起動後に解決し、Tool Gateway だけへ返す接続情報。 */
+export const browserSessionGrantSchema = z
+  .object({
+    endpoint: z.url().refine((url) => /^https?:\/\//.test(url), "Browser endpoint は http または https にしてください"),
+    mode: browserModeSchema,
+    allowed_domains: z.array(z.string().min(1).max(253)).max(100),
+  })
+  .strict();
+export type BrowserSessionGrant = z.infer<typeof browserSessionGrantSchema>;
+
 export const heartbeatRequestSchema = z
   .object({
     controller_version: z.string().min(1).max(64),
@@ -97,18 +139,20 @@ export const sessionGrantSchema = z.object({
   allowed_tools: z.array(toolNameSchema).max(200),
   policies: z.array(policySchema).max(200),
   expires_at: z.iso.datetime(),
+  browser: browserSessionGrantSchema.optional(),
 });
 export type SessionGrant = z.infer<typeof sessionGrantSchema>;
 
 export const startSessionJobSchema = z.object({
   type: z.literal("start_session"),
   job_id: z.uuid(),
-  session: sessionGrantSchema.extend({
+  session: sessionGrantSchema.omit({ browser: true }).extend({
     openai_session_id: z.string().min(1),
     environment_id: z.string().min(1),
     remote_url: z.string().min(1),
     max_lifetime_minutes: z.number().int().min(1).max(1440),
     idle_timeout_minutes: z.number().int().min(1).max(1440),
+    browser: browserSessionConfigSchema.optional(),
   }),
 });
 

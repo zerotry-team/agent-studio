@@ -10,9 +10,10 @@ import type { RuntimeJob, SessionEventRequest } from "@agent-studio/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { GrantStore } from "./grants.js";
 import { JobHandler } from "./jobs.js";
-import { EcsSessionLauncher } from "./launcher.js";
+import { EcsSessionLauncher, NoopSessionLauncher } from "./launcher.js";
 import { createLogger } from "./logger.js";
 import { SessionMonitor } from "./monitor.js";
+import { NoopBrowserLauncher, type BrowserLauncher } from "./browser-launcher.js";
 
 const SESSION_ID = "00000000-0000-4000-8000-000000000001";
 const RUN_ID = "10000000-0000-4000-8000-000000000001";
@@ -70,7 +71,7 @@ function fakeEcs(statuses: Array<Partial<Task>>) {
   return { ecs: { send } as never, calls };
 }
 
-function setup(statuses: Array<Partial<Task>>, opts: { maxConcurrentSessions?: number } = {}) {
+function setup(statuses: Array<Partial<Task>>, opts: { maxConcurrentSessions?: number; browserLauncher?: BrowserLauncher } = {}) {
   const { ecs, calls } = fakeEcs(statuses);
   const launcher = new EcsSessionLauncher(ecs, {
     type: "ecs",
@@ -92,6 +93,7 @@ function setup(statuses: Array<Partial<Task>>, opts: { maxConcurrentSessions?: n
   const handler = new JobHandler({
     grants,
     launcher,
+    browserLauncher: opts.browserLauncher ?? new NoopBrowserLauncher(),
     studio,
     secrets,
     logger,
@@ -189,6 +191,7 @@ describe("JobHandler start_session", () => {
     const handler = new JobHandler({
       grants: s.grants,
       launcher: s.launcher,
+      browserLauncher: new NoopBrowserLauncher(),
       studio: s.studio,
       secrets: s.secrets,
       logger,
@@ -222,6 +225,35 @@ describe("JobHandler start_session", () => {
     const again = await handler.handle(startJob());
     expect(again).toEqual({ status: "succeeded" });
     expect(calls.run).toHaveLength(1);
+  });
+
+  it("Browserを先にRun単位で起動し、動的endpointをGrantへ追加して停止時に両方止める", async () => {
+    const browserLauncher = new NoopBrowserLauncher();
+    const launch = vi.spyOn(browserLauncher, "launch");
+    const stop = vi.spyOn(browserLauncher, "stop");
+    const { handler, grants } = setup([{ lastStatus: "RUNNING" }], { browserLauncher });
+    const job = startJob({
+      allowed_tools: ["browser_navigate", "browser_snapshot"],
+      browser: {
+        enabled: true,
+        mode: "public_ephemeral",
+        allowed_domains: ["example.com"],
+        code_execution_enabled: false,
+        computer_actions_enabled: false,
+        viewport: { width: 1440, height: 900 },
+      },
+    });
+
+    expect(await handler.handle(job)).toEqual({ status: "succeeded" });
+    expect(launch).toHaveBeenCalledWith(expect.objectContaining({ sessionId: SESSION_ID, runId: RUN_ID }));
+    expect(grants.lookupByTokenHash("a".repeat(64))?.browser).toMatchObject({
+      endpoint: expect.stringContaining("/mcp/"),
+      mode: "public_ephemeral",
+      allowed_domains: ["example.com"],
+    });
+
+    await handler.handle({ type: "stop_session", job_id: JOB_ID, session_id: SESSION_ID, reason: "done" });
+    expect(stop).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -267,7 +299,7 @@ describe("SessionMonitor", () => {
       securityGroups: ["g"],
       containerName: "session-worker",
     });
-    await new SessionMonitor({ grants: s.grants, launcher, studio: s.studio, logger }).tick();
+    await new SessionMonitor({ grants: s.grants, launcher, browserLauncher: new NoopBrowserLauncher(), studio: s.studio, logger }).tick();
     expect(s.events.at(-1)).toMatchObject({ type: "worker_failed", task_arn: TASK_ARN });
     expect(s.events.at(-1)!.detail).toContain("終了コード 1");
     expect(s.grants.has(SESSION_ID)).toBe(false);
@@ -285,7 +317,7 @@ describe("SessionMonitor", () => {
       securityGroups: ["g"],
       containerName: "session-worker",
     });
-    await new SessionMonitor({ grants: s.grants, launcher, studio: s.studio, logger }).tick();
+    await new SessionMonitor({ grants: s.grants, launcher, browserLauncher: new NoopBrowserLauncher(), studio: s.studio, logger }).tick();
     expect(s.events.at(-1)).toMatchObject({ type: "worker_stopped" });
   });
 
@@ -293,8 +325,31 @@ describe("SessionMonitor", () => {
     const s = setup([{ lastStatus: "RUNNING" }]);
     await s.handler.handle(startJob());
     const later = new Date(Date.now() + 31 * 60_000);
-    await new SessionMonitor({ grants: s.grants, launcher: s.launcher, studio: s.studio, logger, now: () => later }).tick();
+    await new SessionMonitor({ grants: s.grants, launcher: s.launcher, browserLauncher: new NoopBrowserLauncher(), studio: s.studio, logger, now: () => later }).tick();
     expect(s.calls.stop).toEqual([TASK_ARN]);
     expect(s.grants.get(SESSION_ID)?.worker).toMatchObject({ status: "stopping" });
+  });
+
+  it("初回reconcile後はactive sessionの無いSession/Browser Taskを停止する", async () => {
+    const sessionLauncher = new NoopSessionLauncher(logger);
+    const browserLauncher = new NoopBrowserLauncher();
+    await sessionLauncher.launch({ sessionId: SESSION_ID, runId: RUN_ID, remoteUrl: "wss://example.invalid", environmentId: "env" });
+    await browserLauncher.launch({
+      sessionId: SESSION_ID,
+      runId: RUN_ID,
+      config: {
+        enabled: true,
+        mode: "public_ephemeral",
+        allowed_domains: ["example.com"],
+        code_execution_enabled: false,
+        computer_actions_enabled: false,
+        viewport: { width: 1440, height: 900 },
+      },
+    });
+    const monitor = new SessionMonitor({ grants: new GrantStore(), launcher: sessionLauncher, browserLauncher, studio: { sessionEvent: vi.fn() }, logger });
+    monitor.enableOrphanSweep();
+    expect(await monitor.sweepOrphans()).toBe(2);
+    expect(await sessionLauncher.findRunning(SESSION_ID)).toBeNull();
+    expect(await browserLauncher.findRunning(SESSION_ID)).toBeNull();
   });
 });

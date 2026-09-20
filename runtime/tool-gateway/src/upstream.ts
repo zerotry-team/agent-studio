@@ -91,7 +91,7 @@ export class UpstreamSessionPool {
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<CallToolResult> {
-    const key = `${grant.session_id}\u0000${upstream.name}`;
+    const key = `${grant.session_id}\u0000${upstream.name}\u0000${upstream.url}`;
     let entry = this.entries.get(key);
     if (!entry) {
       const created: PoolEntry = {

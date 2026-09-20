@@ -38,6 +38,20 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@agent-studio/browser-session-worker@workspace:runtime/browser-session-worker":
+  version: 0.0.0-use.local
+  resolution: "@agent-studio/browser-session-worker@workspace:runtime/browser-session-worker"
+  dependencies:
+    "@modelcontextprotocol/sdk": "npm:^1.30.0"
+    "@types/node": "npm:^22.10.0"
+    playwright-core: "npm:1.63.0-alpha-2026-08-31"
+    tsx: "npm:^4.23.13"
+    typescript: "npm:5.9.3"
+    vitest: "npm:^3.2.7"
+    zod: "npm:^4.3.6"
+  languageName: unknown
+  linkType: soft
+
 "@agent-studio/contracts@workspace:^, @agent-studio/contracts@workspace:packages/contracts":
   version: 0.0.0-use.local
   resolution: "@agent-studio/contracts@workspace:packages/contracts"
@@ -56,6 +70,17 @@ __metadata:
     "@hono/node-server": "npm:^1.19.17"
     "@types/node": "npm:^22.10.0"
     hono: "npm:^4.13.8"
+    tsx: "npm:^4.23.13"
+    typescript: "npm:5.9.3"
+    vitest: "npm:^3.2.7"
+  languageName: unknown
+  linkType: soft
+
+"@agent-studio/egress-proxy@workspace:runtime/egress-proxy":
+  version: 0.0.0-use.local
+  resolution: "@agent-studio/egress-proxy@workspace:runtime/egress-proxy"
+  dependencies:
+    "@types/node": "npm:^22.10.0"
     tsx: "npm:^4.23.13"
     typescript: "npm:5.9.3"
     vitest: "npm:^3.2.7"
@@ -6277,6 +6302,15 @@ __metadata:
     exsolve: "npm:^1.1.1"
     pathe: "npm:^2.0.3"
   checksum: 10c0/37d08d561428ab3dc09eebddd8860d9ab7851bbceeaa99d3b7fb246bdc4638d22be2cc1f8e8e38b440c5c7b30df7c20f2cbd8f0d74bb343d26a836cd9accd931
+  languageName: node
+  linkType: hard
+
+"playwright-core@npm:1.63.0-alpha-2026-08-31":
+  version: 1.63.0-alpha-2026-08-31
+  resolution: "playwright-core@npm:1.63.0-alpha-2026-08-31"
+  bin:
+    playwright-core: cli.js
+  checksum: 10c0/502654b75f156c1dad1f546b6da549c00e52ca1569b48137bd213b06584786f8fd62ca02ad7a053c6338dd602be44b1d4fe6e679fe79903f02efa6f2bd9a2f0d
   languageName: node
   linkType: hard
 

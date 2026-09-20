@@ -154,7 +154,8 @@ jobs:
           - { name: runtime-controller, dockerfile: runtime/controller/Dockerfile, filter: runtime }
           - { name: tool-gateway, dockerfile: runtime/tool-gateway/Dockerfile, filter: runtime }
           - { name: session-worker, dockerfile: runtime/session-worker/Dockerfile, filter: runtime }
-          - { name: browser-worker, dockerfile: runtime/browser-worker/Dockerfile, filter: runtime }
+          - { name: browser-worker, dockerfile: runtime/browser-session-worker/Dockerfile, filter: runtime }
+          - { name: egress-proxy, dockerfile: runtime/egress-proxy/Dockerfile, filter: runtime }
           - { name: demo-internal-api, dockerfile: runtime/demo-internal-api/Dockerfile, filter: runtime }
     steps:
       - uses: actions/checkout@v7
