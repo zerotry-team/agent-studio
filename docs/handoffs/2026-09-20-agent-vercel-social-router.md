@@ -168,7 +168,7 @@ yarn type-check
   成功
 
 yarn test
-  223 tests passed
+  250 tests passed（同一コミットに統合されたBrowser Runtime / Egress Proxyのテストを含む）
 
 yarn workspace @agent-studio/api test:integration
   24 tests passed
