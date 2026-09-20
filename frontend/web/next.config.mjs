@@ -1,8 +1,11 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.NODE_ENV !== "production";
+const rootEnvPath = path.join(__dirname, "../../.env");
+if (isDev && existsSync(rootEnvPath)) process.loadEnvFile(rootEnvPath);
 
 /**
  * Content-Security-Policy。
