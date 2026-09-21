@@ -1,5 +1,5 @@
 import "server-only";
-import type { ConnectionDto, CreateConnectionInput, SetConnectionSecretInput } from "@agent-studio/contracts";
+import type { ConnectionDto, CreateConnectionInput, CreateGitHubAppConnectionInput, SetConnectionSecretInput } from "@agent-studio/contracts";
 import { ApiRepository } from "./base";
 
 export class ConnectionRepository extends ApiRepository {
@@ -9,6 +9,14 @@ export class ConnectionRepository extends ApiRepository {
 
   create(input: CreateConnectionInput): Promise<ConnectionDto> {
     return this.api.post<ConnectionDto>("/connections", input);
+  }
+
+  createGitHubApp(input: CreateGitHubAppConnectionInput): Promise<ConnectionDto> {
+    return this.api.post<ConnectionDto>("/connections/github-app", input);
+  }
+
+  provisionIntegrationRepository(sourceConnectionId: string): Promise<ConnectionDto> {
+    return this.api.post<ConnectionDto>(`/connections/${encodeURIComponent(sourceConnectionId)}/integration-repository`, {});
   }
 
   /** 書き込み専用。値を読み出す API はない */

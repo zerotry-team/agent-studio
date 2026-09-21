@@ -14,7 +14,13 @@ export interface Db {
 }
 
 export function createDb(connectionString: string): Db {
-  const pool = new Pool({ connectionString, max: 4 });
+  const pool = new Pool({
+    connectionString,
+    max: 4,
+    application_name: "agent-studio-factoring-adapter",
+    statement_timeout: 5_000,
+    query_timeout: 6_000,
+  });
   return {
     async query<T>(text: string, params: unknown[] = []): Promise<T[]> {
       const result = await pool.query(text, params);

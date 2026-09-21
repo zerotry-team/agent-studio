@@ -1,10 +1,10 @@
-import type { LinkAgentConnectionInput, SetAgentEnvironmentInput , SetBrowserAccessInput } from "@agent-studio/contracts";
+import type { CreateAgentProjectInput, LinkAgentConnectionInput, SetAgentEnvironmentInput , SetBrowserAccessInput } from "@agent-studio/contracts";
 import { AgentRepository } from "@/lib/repositories";
 
 export class CreateAgentProjectService {
   constructor(private readonly agents = new AgentRepository()) {}
-  invoke(description: string) {
-    return this.agents.createProject({ description });
+  invoke(input: CreateAgentProjectInput) {
+    return this.agents.createProject(input);
   }
 }
 

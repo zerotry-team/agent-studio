@@ -9,6 +9,8 @@ import type { AgentsApiProvider } from "../infrastructure/openai/agents-api-prov
 import type { SecretStore } from "../infrastructure/secrets/secret-store.js";
 import type { ObjectStore } from "../infrastructure/storage/object-store.js";
 import type { Logger } from "../logger.js";
+import type { DiscoveredMcpToolDto } from "@agent-studio/contracts";
+import type { GitProvider } from "../infrastructure/git/github-app.js";
 
 /** アプリケーション層が使う依存（container.ts で組み立てる） */
 export interface Deps {
@@ -24,4 +26,6 @@ export interface Deps {
   runtimeTokens: RuntimeTokenIssuer;
   inviter: UserInviter;
   objects: ObjectStore;
+  mcpDiscovery: (serverUrl: string) => Promise<DiscoveredMcpToolDto[]>;
+  gitProvider: GitProvider;
 }

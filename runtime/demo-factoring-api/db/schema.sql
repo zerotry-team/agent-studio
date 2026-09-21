@@ -2,7 +2,7 @@
 -- Agent Studio の DB とは別のデータベースに置く。業務データは Control Plane に入れない（CLAUDE.md「組織の分離」）。
 -- 顧客の基幹システムに相当し、Agent からは demo-factoring-api の HTTP ツール経由でしか触れない。
 
-DROP TABLE IF EXISTS screenings, payment_records, invoices, counterparties, applicants CASCADE;
+DROP TABLE IF EXISTS screenings, internal_risk_flags, inquiry_history, payment_records, invoices, counterparties, applicants CASCADE;
 
 -- 申込者（売掛金を資金化したい事業者）
 CREATE TABLE applicants (
@@ -52,6 +52,29 @@ CREATE TABLE payment_records (
   amount           bigint      NOT NULL
 );
 
+-- 過去問い合わせ履歴。CRM/受付台帳に相当し、審査結果とは分けて保持する。
+CREATE TABLE inquiry_history (
+  id                text PRIMARY KEY,
+  applicant_id      text        NOT NULL REFERENCES applicants(id),
+  inquired_on       date        NOT NULL,
+  requested_amount  bigint      NOT NULL,
+  channel           text        NOT NULL,  -- 電話 / Web / 紹介
+  outcome           text        NOT NULL,  -- 案内済 / 見送り / 申込化
+  note              text
+);
+
+-- 社内の否決・注意フラグ。Agentには必要最小限のコードと要約だけを返す。
+CREATE TABLE internal_risk_flags (
+  id           text PRIMARY KEY,
+  applicant_id text        NOT NULL REFERENCES applicants(id),
+  flag_type    text        NOT NULL,  -- denied / caution
+  status       text        NOT NULL,  -- active / resolved
+  reason_code  text        NOT NULL,
+  summary      text        NOT NULL,
+  recorded_on  date        NOT NULL,
+  resolved_on  date
+);
+
 -- 審査結果の書き戻し。Agent はここに結果を残す
 CREATE TABLE screenings (
   id                       bigserial PRIMARY KEY,
@@ -60,6 +83,7 @@ CREATE TABLE screenings (
   advance_rate             numeric(4,3),          -- 掛目（0.850 = 85%）
   fee_rate                 numeric(4,3),          -- 手数料率
   reason                   text        NOT NULL,
+  idempotency_key          text        NOT NULL UNIQUE,
   verified_corporate_number char(13),             -- 実在確認で確認できた法人番号
   screened_by              text        NOT NULL DEFAULT 'agent',
   screened_at              timestamptz NOT NULL DEFAULT now()
@@ -67,4 +91,6 @@ CREATE TABLE screenings (
 
 CREATE INDEX invoices_applicant_idx ON invoices (applicant_id, status);
 CREATE INDEX payment_records_counterparty_idx ON payment_records (counterparty_id, due_on);
+CREATE INDEX inquiry_history_applicant_idx ON inquiry_history (applicant_id, inquired_on DESC);
+CREATE INDEX internal_risk_flags_applicant_idx ON internal_risk_flags (applicant_id, status);
 CREATE INDEX screenings_invoice_idx ON screenings (invoice_id, screened_at DESC);

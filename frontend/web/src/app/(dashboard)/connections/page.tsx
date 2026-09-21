@@ -1,7 +1,7 @@
 "use client";
 
 import type { ConnectionDto, RuntimeDto } from "@agent-studio/contracts";
-import { KeyRound, Plug, Plus, Terminal, Trash2 } from "lucide-react";
+import { KeyRound, Plug, Plus, Settings2, Terminal, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { deleteConnectionAction, listConnectionsAction } from "@/actions/connections";
@@ -13,7 +13,7 @@ import { CreateConnectionDialog } from "@/components/connections/create-connecti
 import { RuntimeSecretHelpDialog } from "@/components/connections/runtime-secret-help-dialog";
 import { SetConnectionSecretDialog } from "@/components/connections/set-connection-secret-dialog";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonLink } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -45,9 +45,14 @@ export default function ConnectionsPage() {
     connection.runtime_id ? runtimes.data?.find((r) => r.id === connection.runtime_id) : undefined;
 
   const createButton = canManage ? (
-    <Button icon={<Plus className="h-4 w-4" aria-hidden="true" />} onClick={() => setDialog({ kind: "create" })}>
-      接続先を登録
-    </Button>
+    <div className="flex flex-wrap gap-2">
+      <ButtonLink href="/settings?tab=infrastructure" variant="secondary" icon={<Settings2 className="h-4 w-4" aria-hidden="true" />}>
+        実行・開発基盤
+      </ButtonLink>
+      <Button icon={<Plus className="h-4 w-4" aria-hidden="true" />} onClick={() => setDialog({ kind: "create" })}>
+        接続先を登録
+      </Button>
+    </div>
   ) : null;
 
   return (
@@ -179,6 +184,7 @@ function ConnectionRow({
   onDelete: () => void;
 }) {
   const isRuntime = connection.scope === "runtime";
+  const isGitHubApp = connection.metadata.provider === "github_app";
 
   return (
     <TR>
@@ -219,7 +225,7 @@ function ConnectionRow({
             >
               <span className="hidden sm:inline">登録方法</span>
             </Button>
-          ) : canManage ? (
+          ) : canManage && !isGitHubApp ? (
             <Button
               variant="secondary"
               size="sm"
@@ -251,6 +257,16 @@ function ConnectionDetails({
   runtimesLoading: boolean;
 }) {
   if (connection.scope === "studio") {
+    if (connection.metadata.provider === "github_app") {
+      return (
+        <span className="block min-w-0 text-xs text-gray-600">
+          <span className="block truncate font-medium text-gray-800">
+            {String(connection.metadata.owner)}/{String(connection.metadata.repository)}
+          </span>
+          <span className="block truncate">base: {String(connection.metadata.base_branch)}</span>
+        </span>
+      );
+    }
     return (
       <span className="text-xs text-gray-600">
         ヘッダ: <code className="font-mono text-gray-800">{connection.header_name ?? "Authorization"}</code>

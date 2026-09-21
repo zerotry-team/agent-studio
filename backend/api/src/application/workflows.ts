@@ -72,9 +72,24 @@ export class WorkflowService {
 
   private async assertDeployments(tx: Tx, organizationId: string, definition: WorkflowDefinition) {
     for (const step of definition.steps) {
-      if (step.type !== "agent") continue;
+      if (step.type !== "agent" && step.type !== "tool" && step.type !== "compensate") continue;
       const d = await tx.deployments.findFirst({ where: { id: step.deployment_id, organization_id: organizationId } });
       if (!d) throw validationError(`ステップ ${step.name} のデプロイが見つかりません`);
+      if (step.type === "tool") {
+        const config = d.compiled_config as {
+          function_tools?: Array<{ name?: unknown }>;
+          service_mcp_tools?: Array<{ name?: unknown; server_label?: unknown }>;
+          runtime_tools?: unknown[];
+        };
+        const fixedNames = new Set([
+          ...(config.function_tools ?? []).flatMap((tool) => typeof tool.name === "string" ? [tool.name] : []),
+          ...(config.service_mcp_tools ?? []).flatMap((tool) => [tool.name, tool.server_label].filter((name): name is string => typeof name === "string")),
+          ...(config.runtime_tools ?? []).filter((name): name is string => typeof name === "string"),
+        ]);
+        if (!fixedNames.has(step.tool_name)) {
+          throw validationError(`ステップ ${step.name} のTool ${step.tool_name} はデプロイに固定されていません`);
+        }
+      }
     }
   }
 
@@ -92,6 +107,8 @@ export class WorkflowService {
         run_id: null,
         approval_id: null,
         output: null,
+        attempts: 0,
+        resume_at: null,
       }));
       const run = await tx.workflow_runs.create({
         data: {

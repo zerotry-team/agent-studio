@@ -45,6 +45,17 @@ describe("Agent Project / Preview / Promote", () => {
   let firstProductionId: string;
   let firstBuildId: string;
 
+  async function createThroughBuilder(description: string) {
+    const created = await h.request("POST", "/api/v1/agent-projects", { ...owner, body: { description } });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const agentId = created.body.agent.id as string;
+    return h.waitFor(
+      () => h.request("GET", `/api/v1/agents/${agentId}/project`, owner),
+      (response) => response.status === 200 && response.body.agent.versions.length > 0,
+      45_000,
+    );
+  }
+
   beforeAll(async () => {
     h = createHarness();
     // この結合テストは接続・設定値・Buildを検証する。キーワード推測の生成器には依存しない。
@@ -117,11 +128,12 @@ describe("Agent Project / Preview / Promote", () => {
       if (name === "Preview") previewConnectionId = connection.body.id;
       else productionConnectionId = connection.body.id;
     }
+    h.startWorker();
   });
 
   afterAll(async () => h.close());
 
-  it("Browser Agentは接続範囲を決めるまでPreviewを作らない", async () => {
+  it("公開Web調査はOpenAI標準のWeb Searchで自動Previewする", async () => {
     const originalGenerate = h.deps.generator.generate;
     h.deps.generator.generate = async () => ({
       key: "browser-report-agent",
@@ -142,43 +154,27 @@ describe("Agent Project / Preview / Promote", () => {
       conditional_approvals: [],
     });
     try {
-      const created = await h.request("POST", "/api/v1/agent-projects", {
-        ...owner,
-        body: { description: "競合の公開料金ページを比較してレポートにする" },
-      });
-      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      const created = await createThroughBuilder("競合の公開料金ページを比較してレポートにする");
       expect(created.body.agent.capability_resolution.ready).toBe(true);
-      expect(created.body.auto_preview_created).toBe(false);
-      expect(created.body.builds).toHaveLength(0);
-      expect(created.body.deployments).toHaveLength(0);
-
-      const blocked = await h.request("POST", `/api/v1/agents/${created.body.agent.id}/preview`, owner);
-      expect(blocked.status).toBe(412);
-      expect(blocked.body.error.message).toContain("ブラウザで接続できる範囲");
-
-      const configured = await h.request("PUT", `/api/v1/agents/${created.body.agent.id}/browser-access`, {
-        ...owner,
-        body: { access: "restricted", allowed_domains: ["example.com"] },
-      });
-      expect(configured.status).toBe(200);
-      const preview = await h.request("POST", `/api/v1/agents/${created.body.agent.id}/preview`, owner);
-      expect(preview.status, JSON.stringify(preview.body)).toBe(201);
+      expect(created.body.agent.versions[0].manifest.tools).toContain("web_search@1");
+      expect(created.body.builds).toHaveLength(1);
+      expect(created.body.deployments).toEqual(expect.arrayContaining([
+        expect.objectContaining({ stage: "staging", status: "active" }),
+      ]));
     } finally {
       h.deps.generator.generate = originalGenerate;
     }
   });
 
   it("不足ConnectionとVariablesだけを設定し、Preview Buildを作る", async () => {
-    const created = await h.request("POST", "/api/v1/agent-projects", {
-      ...owner,
-      body: { description: "ベンチマーク投稿と自社の過去投稿を分析し、投稿案を作成してSocial Router経由でSNSへ投稿する。" },
-    });
-    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const created = await createThroughBuilder("ベンチマーク投稿と自社の過去投稿を分析し、投稿案を作成してSocial Router経由でSNSへ投稿する。");
     projectId = created.body.agent.id;
     const tools = created.body.agent.versions[0].manifest.tools;
-    expect(tools).toEqual(expect.arrayContaining(["browser_navigate", "browser_snapshot", "list_accounts", "list_posts", "get_post", "publish_post", "get_job"]));
-    expect(tools).not.toEqual(expect.arrayContaining(["get_product", "update_price"]));
-    expect(created.body.agent.capability_resolution.ready).toBe(false);
+    expect(tools).toEqual(expect.arrayContaining(["list_accounts@1", "list_posts@1", "get_post@1", "publish_post@1", "get_job@1"]));
+    expect(tools).not.toEqual(expect.arrayContaining(["browser_navigate@1", "browser_snapshot@1", "get_product@1", "update_price@1"]));
+    // Builderは利用可能なToolを自動選定するため、この時点で能力解決は完了する。
+    // 環境別のConnectionとVariableは、下でPreview/Production用に明示的に固定する。
+    expect(created.body.agent.capability_resolution.ready).toBe(true);
 
     for (const [stage, connection_id] of [["staging", previewConnectionId], ["production", productionConnectionId]] as const) {
       const linked = await h.request("PUT", `/api/v1/agents/${projectId}/connections`, {
@@ -193,11 +189,6 @@ describe("Agent Project / Preview / Promote", () => {
       expect(variables.status).toBe(200);
     }
 
-    const browserAccess = await h.request("PUT", `/api/v1/agents/${projectId}/browser-access`, {
-      ...owner,
-      body: { access: "restricted", allowed_domains: ["example.com"] },
-    });
-    expect(browserAccess.status).toBe(200);
     const createdPreview = await h.request("POST", `/api/v1/agents/${projectId}/preview`, owner);
     expect(createdPreview.status, JSON.stringify(createdPreview.body)).toBe(201);
 

@@ -4,14 +4,15 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { TabPanel, Tabs } from "@/components/ui/tabs";
 import { useSession } from "@/hooks/use-session";
+import { InfrastructureTab } from "./infrastructure-tab";
 import { MembersTab } from "./members-tab";
 import { OpenAiTab } from "./openai-tab";
 import { OrganizationTab } from "./organization-tab";
 import { PoliciesTab } from "./policies-tab";
 
-type SettingsTab = "organization" | "openai" | "members" | "policies";
+type SettingsTab = "organization" | "infrastructure" | "openai" | "members" | "policies";
 
-const TAB_IDS: readonly SettingsTab[] = ["organization", "openai", "members", "policies"];
+const TAB_IDS: readonly SettingsTab[] = ["organization", "infrastructure", "openai", "members", "policies"];
 const DEFAULT_TAB: SettingsTab = "organization";
 const ID_PREFIX = "settings";
 
@@ -26,6 +27,7 @@ export function SettingsTabs() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const canViewOpenAi = can("openai.view");
+  const canViewInfrastructure = can("connection.manage") || can("environment.manage");
 
   const urlTab = searchParams.get("tab");
   const [tab, setTab] = useState<SettingsTab>(isSettingsTab(urlTab) ? urlTab : DEFAULT_TAB);
@@ -36,7 +38,7 @@ export function SettingsTabs() {
     setTab(isSettingsTab(urlTab) ? urlTab : DEFAULT_TAB);
   }
   // 権限が無いタブ（OpenAI）が指定された場合は、組織のタブを表示する
-  const active: SettingsTab = tab === "openai" && !canViewOpenAi ? DEFAULT_TAB : tab;
+  const active: SettingsTab = (tab === "openai" && !canViewOpenAi) || (tab === "infrastructure" && !canViewInfrastructure) ? DEFAULT_TAB : tab;
 
   const changeTab = (next: SettingsTab) => {
     setTab(next);
@@ -56,6 +58,7 @@ export function SettingsTabs() {
         onChange={changeTab}
         tabs={[
           { id: "organization", label: "組織" },
+          { id: "infrastructure", label: "実行・開発基盤", hidden: !canViewInfrastructure },
           { id: "openai", label: "OpenAI", hidden: !canViewOpenAi },
           { id: "members", label: "メンバー" },
           { id: "policies", label: "ポリシー" },
@@ -64,6 +67,11 @@ export function SettingsTabs() {
       <TabPanel id="organization" value={active} idPrefix={ID_PREFIX}>
         <OrganizationTab />
       </TabPanel>
+      {canViewInfrastructure ? (
+        <TabPanel id="infrastructure" value={active} idPrefix={ID_PREFIX}>
+          <InfrastructureTab />
+        </TabPanel>
+      ) : null}
       {canViewOpenAi ? (
         <TabPanel id="openai" value={active} idPrefix={ID_PREFIX}>
           <OpenAiTab />

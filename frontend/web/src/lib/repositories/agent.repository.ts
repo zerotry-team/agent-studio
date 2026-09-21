@@ -9,6 +9,7 @@ import type {
   CreateAgentProjectResultDto,
   ManifestValidationDto,
   SetBrowserAccessInput,
+  CreateAgentProjectInput,
 } from "@agent-studio/contracts";
 import { ApiRepository } from "./base";
 
@@ -25,7 +26,7 @@ export class AgentRepository extends ApiRepository {
     return this.api.get<AgentDto>(`/agents/${encodeURIComponent(id)}`);
   }
 
-  createProject(input: { description: string }): Promise<CreateAgentProjectResultDto> {
+  createProject(input: CreateAgentProjectInput): Promise<CreateAgentProjectResultDto> {
     return this.api.post<CreateAgentProjectResultDto>("/agent-projects", input, { timeoutMs: GENERATE_TIMEOUT_MS });
   }
 

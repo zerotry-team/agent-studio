@@ -14,7 +14,7 @@ describe("parseToolConfig", () => {
   it("examples/tool-config.local.yaml を読める", () => {
     const text = readFileSync(new URL("../examples/tool-config.local.yaml", import.meta.url), "utf8");
     const config = parseToolConfig(text, "example");
-    expect(config.tools.map((t) => t.name)).toEqual(["list_products", "get_product", "update_price", "list_applications", "get_application", "list_counterparty_payments", "record_screening"]);
+    expect(config.tools.map((t) => t.name)).toEqual(["list_products", "get_product", "update_price", "list_applications", "get_application", "lookup_internal_history", "list_counterparty_payments", "record_screening", "analyze_bank_statement", "check_compliance", "evaluate_factoring_rules"]);
     expect(config.tools[1]!.http.auth).toEqual({ type: "bearer", secret: "demo-internal-api" });
     expect(config.tools[2]!.policies).toHaveLength(1);
   });

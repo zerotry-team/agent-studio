@@ -11,7 +11,7 @@ const manifest = (yaml: string): AgentManifest => {
 
 const tool = (name: string, spec: ToolVersionSpec): ResolvedTool => ({ tool_id: `t-${name}`, tool_version_id: `v-${name}`, name, version: 1, spec });
 
-const runtimeTool = (name: string, risk: "read" | "financial" | "destructive" | "write", untrusted = false) =>
+const runtimeTool = (name: string, risk: "read" | "financial" | "destructive" | "write" | "external_send", untrusted = false) =>
   tool(name, { execution_location: "runtime_mcp", description: name, risk, input_schema: { type: "object" }, reads_untrusted_content: untrusted });
 
 const selfHosted = (catalog: string[], untrusted: string[] = []): CompileProfile => ({
@@ -100,6 +100,14 @@ describe("compileAgent", () => {
     expect(r.ok && r.config.policies).toEqual([expect.objectContaining({ type: "approval", tool: "delete_product" })]);
   });
 
+  it("外部への投稿は入力元に関係なく暗黙の承認を付ける", () => {
+    const m = manifest("agent: { key: test-agent, name: テスト }\ninstructions: x\ntools: [publish_x_post]\n");
+    const r = compileAgent({ manifest: m, tools: [runtimeTool("publish_x_post", "external_send")], profile: selfHosted(["publish_x_post"]), orgPolicies: [], defaultModel: "m" });
+    expect(r.ok && r.config.policies).toEqual([
+      expect.objectContaining({ type: "approval", tool: "publish_x_post", reason: expect.stringContaining("外部へ情報を送信・公開") }),
+    ]);
+  });
+
   it("外部の内容を読むツールがあれば、更新系の操作をすべて承認制にする（POL-07）", () => {
     const m = manifest("agent: { key: test-agent, name: テスト }\ninstructions: x\ntools: [browser_snapshot, update_price]\n");
     const r = compileAgent({
@@ -120,6 +128,35 @@ describe("compileAgent", () => {
 });
 
 describe("buildSessionCreateParams", () => {
+  it("OpenAI標準Web SearchをConnectionなしでSessionへ渡す", () => {
+    const m = manifest("agent: { key: news-agent, name: 最新ニュース }\ninstructions: 最新情報を調べる\ntools: [web_search]\n");
+    const webSearch: ResolvedTool = {
+      tool_id: "openai-builtin:web-search",
+      tool_version_id: "openai-builtin:web-search:v1",
+      name: "web_search",
+      version: 1,
+      spec: {
+        execution_location: "openai_builtin",
+        description: "最新情報を検索する",
+        input_schema: { type: "object", properties: {} },
+        risk: "read",
+        reads_untrusted_content: true,
+        openai_builtin: { type: "web_search" },
+      },
+    };
+    const compiled = compileAgent({
+      manifest: m,
+      tools: [webSearch],
+      profile: { id: "p", key: "n", type: "none", template: null, network: null, runtime: null },
+      orgPolicies: [],
+      defaultModel: "m",
+    });
+    if (!compiled.ok) throw new Error(compiled.errors.join(","));
+    expect(compiled.config.openai_builtin_tools).toEqual(["web_search"]);
+    const params = buildSessionCreateParams(compiled.config, { vaults: new Map(), metadata: {} });
+    expect(params.agent?.tools).toContainEqual({ type: "web_search", mode: "live" });
+  });
+
   it("Tool Gateway の MCP は環境から接続し、セッション用トークンをヘッダで渡す", () => {
     const r = compileAgent({
       manifest: pricing,

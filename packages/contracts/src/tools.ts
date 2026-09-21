@@ -75,6 +75,13 @@ export const studioFunctionSpecSchema = z.discriminatedUnion("handler", [
       branch: z.string().min(1).max(255).default("main"),
     })
     .strict(),
+  z
+    .object({
+      handler: z.literal("openai_image_to_social_media"),
+      /** 画像生成は組織ごとのOpenAI Projectで実行し、成果物はConnectorのmedia_idとして返す。 */
+      model: z.string().min(1).max(100).default("gpt-image-2.5-flare"),
+    })
+    .strict(),
 ]);
 
 export const serviceMcpSpecSchema = z
@@ -93,6 +100,7 @@ export const toolVersionSpecSchema = z.discriminatedUnion("execution_location", 
       execution_location: z.literal("studio_function"),
       description: z.string().min(1).max(1000),
       input_schema: inputSchemaSchema.default(EMPTY_INPUT_SCHEMA),
+      output_schema: z.unknown().optional(),
       risk: toolRiskSchema,
       studio_function: studioFunctionSpecSchema,
     })
@@ -101,7 +109,11 @@ export const toolVersionSpecSchema = z.discriminatedUnion("execution_location", 
     .object({
       execution_location: z.literal("openai_service_mcp"),
       description: z.string().min(1).max(1000),
+      /** Discovery時点の入力契約。実行はMCPサーバー側の同名Schemaを使う。 */
+      input_schema: inputSchemaSchema.default(EMPTY_INPUT_SCHEMA),
       risk: toolRiskSchema,
+      /** MCPの説明・返却内容は外部入力であり、BuilderやAgentへの命令として扱わない。 */
+      reads_untrusted_content: z.boolean().default(true),
       service_mcp: serviceMcpSpecSchema,
     })
     .strict(),

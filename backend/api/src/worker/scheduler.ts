@@ -9,6 +9,8 @@ import type { StudioFunctionExecutor } from "./studio-functions.js";
 import type { CompiledAgentConfig } from "../domain/manifest-compiler.js";
 import { appendRunEvent } from "../application/run-events.js";
 import { parseExternalJobResponse } from "./external-jobs.js";
+import { BuilderOrchestrator } from "./builder-orchestrator.js";
+import { BuilderSessionDriver } from "./builder-session-driver.js";
 
 const RUN_LEASE_SECONDS = 60;
 const RUNTIME_OFFLINE_AFTER_SECONDS = 180;
@@ -23,9 +25,11 @@ const JOB_MAX_ATTEMPTS = 3;
  */
 export class WorkerScheduler {
   private readonly active = new Map<string, Promise<void>>();
+  private readonly activeBuilderSessions = new Map<string, Promise<void>>();
   private readonly workflows: WorkflowEngine;
   private readonly evals: EvalEngine;
   private readonly audit: AuditExporter;
+  private readonly builders: BuilderOrchestrator;
 
   constructor(
     private readonly deps: Deps,
@@ -34,6 +38,7 @@ export class WorkerScheduler {
     this.workflows = new WorkflowEngine(deps);
     this.evals = new EvalEngine(deps);
     this.audit = new AuditExporter(deps);
+    this.builders = new BuilderOrchestrator(deps);
   }
 
   async run(signal: AbortSignal): Promise<void> {
@@ -45,11 +50,14 @@ export class WorkerScheduler {
       this.every(10_000, signal, () => this.evals.tick()),
       this.every(3_000, signal, () => this.pollExternalJobs()),
       this.every(10_000, signal, () => this.runDueSchedules()),
+      this.every(2_000, signal, () => this.builders.tick()),
+      this.every(1_000, signal, () => this.claimBuilderSessions(signal)),
       this.every(10 * 60_000, signal, () => this.audit.tick()),
     ];
     await Promise.all(loops);
     // 停止時: 実行中の Run はリースを手放して終わる（別の Worker が引き継ぐ）
     await Promise.allSettled(this.active.values());
+    await Promise.allSettled(this.activeBuilderSessions.values());
   }
 
   private async runDueSchedules() {
@@ -189,6 +197,18 @@ export class WorkerScheduler {
       const driver = new RunDriver(this.deps, this.functions, run_id, organization_id, signal);
       const p = driver.drive().finally(() => this.active.delete(run_id));
       this.active.set(run_id, p);
+    }
+  }
+
+  private async claimBuilderSessions(signal: AbortSignal) {
+    const capacity = this.deps.env.WORKER_MAX_CONCURRENT_RUNS - this.activeBuilderSessions.size;
+    if (capacity <= 0 || signal.aborted) return;
+    const claimed = await this.deps.system.claimBuilderWorkspaceSessions(this.deps.env.WORKER_ID, 120, capacity);
+    for (const { builder_session_id: sessionId, organization_id: organizationId } of claimed) {
+      if (this.activeBuilderSessions.has(sessionId)) continue;
+      const driver = new BuilderSessionDriver(this.deps, sessionId, organizationId, signal);
+      const task = driver.drive().finally(() => this.activeBuilderSessions.delete(sessionId));
+      this.activeBuilderSessions.set(sessionId, task);
     }
   }
 

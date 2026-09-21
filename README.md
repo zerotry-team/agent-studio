@@ -91,6 +91,8 @@ AWS には GitHub OIDC で接続する（長期のアクセスキーは使わな
 ## ドキュメント
 
 - [要件定義書](docs/requirements.md)
+- [Agent Studio Builder Agent 要件定義書](docs/builder-agent-requirements.md)
+- [Agent Builder 完成タスク仕様書](docs/builder-agent-completion-task-spec.md)
 - [デプロイ契約（名前・環境変数・IAM）](docs/architecture/deployment-contract.md)
 - [API 一覧](docs/architecture/api.md)
 - [実装状況と残っている作業](docs/implementation-status.md)

@@ -162,6 +162,7 @@ export const AGENT_VERSION_STATUS: Record<AgentVersionStatus, LabelWithTone> = {
 export const WORKFLOW_RUN_STATUS: Record<WorkflowRunStatus, LabelWithTone> = {
   running: { label: "実行中", tone: "info" },
   waiting_approval: { label: "承認待ち", tone: "warning" },
+  waiting_external: { label: "待機中", tone: "warning" },
   completed: { label: "完了", tone: "success" },
   failed: { label: "失敗", tone: "danger" },
   cancelled: { label: "中止", tone: "neutral" },

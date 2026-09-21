@@ -29,10 +29,12 @@ async function main(): Promise<void> {
       await pool.query(sql);
       log("info", "SQL を流しました", { file });
     }
-    const counts = await pool.query<{ applicants: string; invoices: string; payments: string }>(
+    const counts = await pool.query<{ applicants: string; invoices: string; payments: string; inquiries: string; risk_flags: string }>(
       `SELECT (SELECT count(*) FROM applicants) AS applicants,
               (SELECT count(*) FROM invoices) AS invoices,
-              (SELECT count(*) FROM payment_records) AS payments`,
+              (SELECT count(*) FROM payment_records) AS payments,
+              (SELECT count(*) FROM inquiry_history) AS inquiries,
+              (SELECT count(*) FROM internal_risk_flags) AS risk_flags`,
     );
     log("info", "デモデータを投入しました", counts.rows[0] ?? {});
   } finally {

@@ -55,6 +55,11 @@ const envSchema = z
     BROWSER_WORKER_IMAGE: z.string().min(1).optional(),
     BROWSER_WORKER_DOCKER_NETWORK: z.string().min(1).optional(),
 
+    BUILDER_WORKSPACE_EXECUTOR: z.enum(["disabled", "docker"]).default("disabled"),
+    BUILDER_WORKSPACE_IMAGE: z.string().min(1).optional(),
+    BUILDER_WORKSPACE_DOCKER_NETWORK: z.string().min(1).optional(),
+    BUILDER_WORKSPACE_TIMEOUT_MINUTES: z.coerce.number().int().min(5).max(120).default(30),
+
     GATEWAY_PUBLIC_URL: httpUrl,
     GATEWAY_CATALOG_URL: httpUrl.default("http://127.0.0.1:8082/internal/catalog"),
     CONTROLLER_INTERNAL_PORT: z.coerce.number().int().min(1).max(65535).default(8081),
@@ -92,6 +97,7 @@ const envSchema = z
       need("BROWSER_WORKER_SECURITY_GROUPS", "BROWSER_LAUNCHER=ecs");
     }
     if (env.BROWSER_LAUNCHER === "docker") need("BROWSER_WORKER_IMAGE", "BROWSER_LAUNCHER=docker");
+    if (env.BUILDER_WORKSPACE_EXECUTOR === "docker") need("BUILDER_WORKSPACE_IMAGE", "BUILDER_WORKSPACE_EXECUTOR=docker");
   });
 
 export type LauncherConfig =
@@ -119,6 +125,10 @@ export type BrowserLauncherConfig =
   | { type: "noop" }
   | { type: "disabled" };
 
+export type WorkspaceExecutorConfig =
+  | { type: "disabled" }
+  | { type: "docker"; image: string; network?: string; timeoutMinutes: number };
+
 export interface ControllerConfig {
   nodeEnv: string;
   logLevel: string;
@@ -134,6 +144,7 @@ export interface ControllerConfig {
   };
   launcher: LauncherConfig;
   browserLauncher: BrowserLauncherConfig;
+  workspaceExecutor: WorkspaceExecutorConfig;
   gatewayPublicUrl: string;
   gatewayCatalogUrl: string;
   internalPort: number;
@@ -213,6 +224,14 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ControllerC
     },
     launcher,
     browserLauncher,
+    workspaceExecutor: e.BUILDER_WORKSPACE_EXECUTOR === "docker"
+      ? {
+          type: "docker",
+          image: e.BUILDER_WORKSPACE_IMAGE!,
+          network: e.BUILDER_WORKSPACE_DOCKER_NETWORK,
+          timeoutMinutes: e.BUILDER_WORKSPACE_TIMEOUT_MINUTES,
+        }
+      : { type: "disabled" },
     gatewayPublicUrl: e.GATEWAY_PUBLIC_URL,
     gatewayCatalogUrl: e.GATEWAY_CATALOG_URL,
     internalPort: e.CONTROLLER_INTERNAL_PORT,

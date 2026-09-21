@@ -13,7 +13,7 @@
 -- 国税庁サイトでの引き方: 商号を入れて「前方一致検索」を選ぶと 1 件に絞れる。
 -- 部分一致のままだと系列会社が大量に出るので、所在地と突き合わせる必要がある。
 
-TRUNCATE screenings, payment_records, invoices, counterparties, applicants RESTART IDENTITY CASCADE;
+TRUNCATE screenings, internal_risk_flags, inquiry_history, payment_records, invoices, counterparties, applicants RESTART IDENTITY CASCADE;
 
 INSERT INTO applicants (id, name, representative, address, industry, founded_on, annual_revenue, employees, applied_on, note) VALUES
   ('A-001', '株式会社みなと製作所', '港 健一', '神奈川県横浜市中区海岸通 3-2-1', '金属部品製造', '2008-04-01', 480000000, 42, '2026-09-18', '取引10年以上の大手向け部品。前回買取は2026-05、期日どおり回収。'),
@@ -52,3 +52,12 @@ INSERT INTO payment_records (applicant_id, counterparty_id, invoice_number, due_
   -- A-003 × C-003: 期日超過で未入金
   ('A-003', 'C-003', 'HD-2605-005', '2026-07-31', '2026-08-12', 980000),
   ('A-003', 'C-003', 'HD-2606-007', '2026-08-31', NULL, 1350000);
+
+-- 社内CRMにある架空の過去問い合わせ。A-001は既存客、A-002/A-003は問い合わせ履歴なし。
+INSERT INTO inquiry_history (id, applicant_id, inquired_on, requested_amount, channel, outcome, note) VALUES
+  ('INQ-2026-0042', 'A-001', '2026-05-08', 780000, '電話', '申込化', '同じ売掛先について問い合わせ。期日内に回収済み。');
+
+-- 社内否決リストの架空データ。実在人物・実在企業の情報は含まない。
+INSERT INTO internal_risk_flags (id, applicant_id, flag_type, status, reason_code, summary, recorded_on, resolved_on) VALUES
+  ('RISK-2026-0007', 'A-003', 'denied', 'active', 'DUPLICATE_RECEIVABLE_HISTORY', '過去に同一債権の重複申込が確認された', '2026-07-15', NULL),
+  ('RISK-2025-0012', 'A-001', 'caution', 'resolved', 'OLD_DOCUMENT_DELAY', '過去の書類提出遅延。現在は解消済み', '2025-11-10', '2025-12-01');

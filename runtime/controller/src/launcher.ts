@@ -9,6 +9,7 @@ import {
 } from "@aws-sdk/client-ecs";
 import type { LauncherConfig } from "./config.js";
 import type { Logger } from "./logger.js";
+import type { BuilderSessionWorkspace } from "@agent-studio/contracts";
 
 /** ListTasks で自分が起動したタスクを探すための startedBy の接頭辞（ECS では英数字・- _ / だけ使える） */
 export const STARTED_BY_PREFIX = "as/";
@@ -19,6 +20,7 @@ export interface LaunchRequest {
   runId: string;
   remoteUrl: string;
   environmentId: string;
+  builderWorkspace?: BuilderSessionWorkspace;
   /** ECS の冪等性トークン（ジョブ ID）。同じジョブの再配送で二重に起動しないため */
   idempotencyToken?: string;
 }
@@ -112,6 +114,15 @@ export class EcsSessionLauncher implements SessionLauncher {
                 { name: "REMOTE_URL", value: req.remoteUrl },
                 { name: "ENVIRONMENT_ID", value: req.environmentId },
                 { name: "WORKSPACE_DIRECTORY", value: WORKSPACE_DIRECTORY },
+                ...(req.builderWorkspace ? [
+                  { name: "BUILDER_PROJECT_ID", value: req.builderWorkspace.project_id },
+                  { name: "BUILDER_CHANGE_SET_ID", value: req.builderWorkspace.change_set_id },
+                  { name: "BUILDER_CAPABILITY_TOPIC", value: req.builderWorkspace.capability_topic },
+                  { name: "BUILDER_REPOSITORY_URL", value: req.builderWorkspace.repository_url },
+                  { name: "BUILDER_BASE_BRANCH", value: req.builderWorkspace.base_branch },
+                  { name: "BUILDER_BRANCH", value: req.builderWorkspace.branch },
+                  { name: "BUILDER_ADAPTER_PATH", value: req.builderWorkspace.adapter_path },
+                ] : []),
               ],
             },
           ],
@@ -240,6 +251,18 @@ export class DockerSessionLauncher implements SessionLauncher {
       "-e",
       "CODEX_API_KEY",
     ];
+    if (req.builderWorkspace) {
+      args.push(
+        "--mount", `type=volume,source=as-builder-${req.builderWorkspace.change_set_id.replaceAll("-", "")},target=/workspace`,
+        "-e", "BUILDER_PROJECT_ID",
+        "-e", "BUILDER_CHANGE_SET_ID",
+        "-e", "BUILDER_CAPABILITY_TOPIC",
+        "-e", "BUILDER_REPOSITORY_URL",
+        "-e", "BUILDER_BASE_BRANCH",
+        "-e", "BUILDER_BRANCH",
+        "-e", "BUILDER_ADAPTER_PATH",
+      );
+    }
     if (this.cfg.network) args.push("--network", this.cfg.network);
     args.push(this.cfg.image);
     const { stdout } = await this.exec("docker", args, {
@@ -249,6 +272,15 @@ export class DockerSessionLauncher implements SessionLauncher {
         ENVIRONMENT_ID: req.environmentId,
         WORKSPACE_DIRECTORY,
         CODEX_API_KEY: key,
+        ...(req.builderWorkspace ? {
+          BUILDER_PROJECT_ID: req.builderWorkspace.project_id,
+          BUILDER_CHANGE_SET_ID: req.builderWorkspace.change_set_id,
+          BUILDER_CAPABILITY_TOPIC: req.builderWorkspace.capability_topic,
+          BUILDER_REPOSITORY_URL: req.builderWorkspace.repository_url,
+          BUILDER_BASE_BRANCH: req.builderWorkspace.base_branch,
+          BUILDER_BRANCH: req.builderWorkspace.branch,
+          BUILDER_ADAPTER_PATH: req.builderWorkspace.adapter_path,
+        } : {}),
       },
     });
     const id = stdout.trim().split("\n").pop()?.trim();

@@ -64,6 +64,7 @@ interface OperationDraft {
 interface DiscoveredDraft {
   name: string;
   description: string;
+  inputSchema: ConnectorOperationInput["input_schema"];
   selected: boolean;
   /** サーバーの申告。null は申告なし */
   readOnly: boolean | null;
@@ -94,17 +95,30 @@ const emptyOperation = (): OperationDraft => ({
   inputSchema: DEFAULT_INPUT_SCHEMA_TEXT,
 });
 
-function selectedOperations(form: FormState): { name: string; display_name: string; description: string; risk: OperationDraft["risk"] }[] {
+function safeToolName(value: string): string {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return (/^[a-z]/.test(normalized) ? normalized : `tool_${normalized || "call"}`).slice(0, 64).replace(/_+$/g, "");
+}
+
+function selectedOperations(form: FormState): ConnectorOperationInput[] {
   if (form.kind === "mcp" && form.discovered) {
+    const seen = new Set<string>();
     return form.discovered
       .filter((tool) => tool.selected)
       // 何をする操作かは接続先が決める。サーバーの申告があれば従い、無ければ安全側で記録する。
-      .map((tool) => ({
-        name: tool.name,
-        display_name: tool.name,
-        description: tool.description || tool.name,
-        risk: tool.destructive ? ("destructive" as const) : tool.readOnly === true ? ("read" as const) : ("write" as const),
-      }));
+      .map((tool, index) => {
+        const base = safeToolName(`${form.key}_${tool.name}`);
+        const name = seen.has(base) ? `${base.slice(0, 61)}_${index + 1}` : base;
+        seen.add(name);
+        return {
+          name,
+          provider_operation_name: tool.name,
+          display_name: tool.name.slice(0, 100),
+          description: tool.description || tool.name,
+          risk: tool.destructive ? ("destructive" as const) : tool.readOnly === true ? ("read" as const) : ("write" as const),
+          input_schema: tool.inputSchema,
+        };
+      });
   }
   return form.operations.map((operation) => ({
     name: operation.name.trim(),
@@ -237,7 +251,19 @@ function draftFromConnector(connector: ConnectorDto): FormState {
     operations: operations.length > 0 ? operations : [emptyOperation()],
     discovered:
       kind === "mcp"
-        ? operations.map((operation) => ({ name: operation.name, description: operation.description, selected: true, readOnly: null, destructive: false }))
+        ? operations.map((operation, index) => {
+            const spec = connector.tools[index]?.versions?.find((version) => version.version === connector.tools[index]?.latest_version)?.spec;
+            const service = spec && "service_mcp" in spec ? spec.service_mcp : undefined;
+            const remoteName = service?.allowed_tools?.[0] ?? operation.name;
+            return {
+              name: remoteName,
+              description: operation.description,
+              inputSchema: spec && "input_schema" in spec ? spec.input_schema : { type: "object", properties: {}, additionalProperties: false },
+              selected: true,
+              readOnly: null,
+              destructive: false,
+            };
+          })
         : null,
   };
 }
@@ -273,6 +299,7 @@ export function CreateConnectorDialog({ connector, onClose, onCreated }: CreateC
         discovered: result.tools.map((tool) => ({
           name: tool.name,
           description: tool.description,
+          inputSchema: tool.input_schema,
           selected: true,
           readOnly: tool.read_only,
           destructive: tool.destructive,

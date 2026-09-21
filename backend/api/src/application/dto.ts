@@ -1,4 +1,5 @@
 import type {
+  Prisma,
   agent_versions,
   agents,
   approvals,
@@ -22,6 +23,16 @@ import type {
   tools,
   workflow_runs,
   workflows,
+  builder_projects,
+  builder_runs,
+  builder_steps,
+  capability_plans,
+  capability_gaps,
+  human_actions,
+  builder_discovery_sources,
+  builder_change_sets,
+  builder_validation_runs,
+  builder_releases,
 } from "@prisma/client";
 import type {
   AgentDto,
@@ -67,9 +78,164 @@ import type {
   WorkflowDto,
   WorkflowRunDto,
   WorkflowRunStatus,
+  BuilderProjectDto,
+  BuilderRunDto,
+  BuilderReleaseDto,
+  BuilderStepDto,
+  CapabilityPlanDto,
+  CapabilityGapDto,
+  HumanActionDto,
+  BuilderDiscoverySourceDto,
+  BuilderChangeSetDto,
+  BuilderValidationRunDto,
 } from "@agent-studio/contracts";
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
+
+export const toBuilderStepDto = (step: builder_steps): BuilderStepDto => ({
+  id: step.id,
+  kind: step.kind,
+  status: step.status as BuilderStepDto["status"],
+  attempts: step.attempts,
+  error_class: step.error_class,
+  error: step.error,
+  started_at: iso(step.started_at),
+  finished_at: iso(step.finished_at),
+});
+
+export const toBuilderRunDto = (run: builder_runs & { steps: builder_steps[] }): BuilderRunDto => ({
+  id: run.id,
+  attempt: run.attempt,
+  status: run.status as BuilderRunDto["status"],
+  correlation_id: run.correlation_id,
+  error_class: run.error_class,
+  error: run.error,
+  started_at: iso(run.started_at),
+  finished_at: iso(run.finished_at),
+  created_at: run.created_at.toISOString(),
+  steps: run.steps.map(toBuilderStepDto),
+});
+
+export const toCapabilityPlanDto = (plan: capability_plans): CapabilityPlanDto => ({
+  id: plan.id,
+  version: plan.version,
+  requirements: plan.requirements as unknown as CapabilityPlanDto["requirements"],
+  graph: plan.graph as unknown as CapabilityPlanDto["graph"],
+  risks: plan.risks as string[],
+  execution_locations: plan.execution_locations as string[],
+  created_at: plan.created_at.toISOString(),
+});
+
+export const toCapabilityGapDto = (gap: capability_gaps): CapabilityGapDto => ({
+  id: gap.id,
+  requirement: gap.requirement,
+  gap_type: gap.gap_type as CapabilityGapDto["gap_type"],
+  resolution_strategy: gap.resolution_strategy as CapabilityGapDto["resolution_strategy"],
+  status: gap.status as CapabilityGapDto["status"],
+  detail: gap.detail,
+});
+
+export const toHumanActionDto = (action: human_actions): HumanActionDto => ({
+  id: action.id,
+  type: action.type as HumanActionDto["type"],
+  title: action.title,
+  reason: action.reason,
+  assignee_role: action.assignee_role as HumanActionDto["assignee_role"],
+  fields: action.fields as unknown as HumanActionDto["fields"],
+  instructions: action.instructions as string[],
+  resume_condition: action.resume_condition,
+  response: action.response as HumanActionDto["response"],
+  status: action.status as HumanActionDto["status"],
+  completed_at: iso(action.completed_at),
+  expires_at: iso(action.expires_at),
+  created_at: action.created_at.toISOString(),
+});
+
+/** Runtimeのcommand line・一時path・外部応答本文をBuilder画面/APIへ露出しない。詳細はRuntimeログだけに残す。 */
+const publicValidationError = (suite: string, error: string | null): string | null => {
+  if (!error) return null;
+  if (suite === "code_workspace") {
+    if (/401 Unauthorized|ジョブ限定認証が無効/i.test(error)) {
+      return "Code Agentのジョブ限定認証が無効です。Runtime用の短期認証を再発行してから再実行してください";
+    }
+    if (/clone|Repository/i.test(error)) return "Git Repositoryを取得できませんでした。専用Git Connectionの読み取り権限を確認してください";
+    return "Code Workspaceの隔離実行に失敗しました。詳細はRuntimeログで確認してください";
+  }
+  return error.slice(0, 500);
+};
+
+export const toBuilderProjectDto = (
+  project: builder_projects & {
+    plans: capability_plans[];
+    gaps: capability_gaps[];
+    human_actions: human_actions[];
+    discovery_sources: builder_discovery_sources[];
+    change_sets: builder_change_sets[];
+    validation_runs: builder_validation_runs[];
+    releases: builder_releases[];
+    runs: (builder_runs & { steps: builder_steps[] })[];
+  },
+): BuilderProjectDto => ({
+  id: project.id,
+  agent_id: project.agent_id,
+  request: project.request,
+  target: project.target as BuilderProjectDto["target"],
+  status: project.status as BuilderProjectDto["status"],
+  created_by: project.created_by,
+  created_at: project.created_at.toISOString(),
+  updated_at: project.updated_at.toISOString(),
+  completed_at: iso(project.completed_at),
+  latest_plan: project.plans[0] ? toCapabilityPlanDto(project.plans[0]) : null,
+  gaps: project.gaps.map(toCapabilityGapDto),
+  human_actions: project.human_actions.map(toHumanActionDto),
+  discovery_sources: project.discovery_sources.map((source): BuilderDiscoverySourceDto => ({
+    id: source.id,
+    kind: source.kind,
+    title: source.title,
+    spec_version: source.spec_version,
+    source_url: source.source_url,
+    content_hash: source.content_hash,
+    metadata: source.metadata,
+    created_at: source.created_at.toISOString(),
+  })),
+  change_sets: project.change_sets.map((change): BuilderChangeSetDto => ({
+    id: change.id,
+    kind: change.kind,
+    status: change.status as BuilderChangeSetDto["status"],
+    summary: change.summary,
+    risk: change.risk as BuilderChangeSetDto["risk"],
+    artifacts: change.artifacts as unknown as BuilderChangeSetDto["artifacts"],
+    source_hash: change.source_hash,
+    created_at: change.created_at.toISOString(),
+  })),
+  validation_runs: project.validation_runs.map((validation): BuilderValidationRunDto => ({
+    id: validation.id,
+    suite: validation.suite as BuilderValidationRunDto["suite"],
+    environment: validation.environment as BuilderValidationRunDto["environment"],
+    status: validation.status as BuilderValidationRunDto["status"],
+    evidence: validation.evidence,
+    error_class: validation.error_class,
+    error: publicValidationError(validation.suite, validation.error),
+    created_at: validation.created_at.toISOString(),
+    finished_at: iso(validation.finished_at),
+  })),
+  releases: project.releases.map((release): BuilderReleaseDto => ({
+    id: release.id,
+    status: release.status as BuilderReleaseDto["status"],
+    agent_id: release.agent_id,
+    build_id: release.build_id,
+    preview_deployment_id: release.preview_deployment_id,
+    preview_run_id: release.preview_run_id,
+    production_deployment_id: release.production_deployment_id,
+    production_run_id: release.production_run_id,
+    rollback_target_deployment_id: release.rollback_target_deployment_id,
+    config_hash: release.config_hash,
+    required_tools: release.required_tools,
+    created_at: release.created_at.toISOString(),
+    finished_at: iso(release.finished_at),
+  })),
+  runs: project.runs.map(toBuilderRunDto),
+});
 
 export const toOrganizationDto = (o: organizations): OrganizationDto => ({
   id: o.id,
@@ -118,6 +284,9 @@ export const toAgentDto = (
     browser_allowed_domains: Array.isArray(a.browser_allowed_domains) ? (a.browser_allowed_domains as string[]) : [],
     latest_version: a.latest_version,
     published_version: published.length > 0 ? Math.max(...published) : null,
+    builder_project_id: null,
+    builder_status: null,
+    builder_error: null,
     created_at: a.created_at.toISOString(),
     updated_at: a.updated_at.toISOString(),
     ...(includeVersions
@@ -154,6 +323,7 @@ export const toConnectionDto = (c: connections): ConnectionDto => ({
   runtime_id: c.runtime_id,
   runtime_secret_name: c.runtime_secret_name,
   header_name: c.header_name,
+  metadata: c.metadata && typeof c.metadata === "object" && !Array.isArray(c.metadata) ? c.metadata as Record<string, unknown> : {},
   // runtime の接続先は値が顧客 AWS にあるため、Agent Studio からは設定済みか分からない
   has_secret: c.scope === "runtime" ? false : Boolean(c.secret_locator),
   status: c.status as ConnectionDto["status"],
@@ -162,6 +332,30 @@ export const toConnectionDto = (c: connections): ConnectionDto => ({
   revoked_at: iso(c.revoked_at),
   created_at: c.created_at.toISOString(),
 });
+
+function externalJobRecords(value: Prisma.JsonValue | null): Record<string, unknown>[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const root = value as Record<string, unknown>;
+  return [root, root.data, root.job, root.result].flatMap((item) => item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : []);
+}
+
+function externalJobString(value: Prisma.JsonValue | null, keys: string[]): string | null {
+  for (const record of externalJobRecords(value)) {
+    for (const key of keys) if (typeof record[key] === "string" && record[key]) return record[key];
+  }
+  return null;
+}
+
+function externalJobUrl(value: Prisma.JsonValue | null): string | null {
+  const raw = externalJobString(value, ["permalink", "url", "post_url", "postUrl"]);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 export const toPolicyDto = (p: policies): PolicyDto => ({
   id: p.id,
@@ -314,6 +508,8 @@ export const toRunDto = (r: RunWithRelations): RunDto => ({
     status: job.status as RunDto["external_jobs"][number]["status"],
     attempts: job.attempts,
     last_checked_at: iso(job.last_checked_at),
+    provider_post_id: externalJobString(job.response, ["post_id", "postId", "tweet_id", "tweetId"]),
+    permalink: externalJobUrl(job.response),
   })),
 });
 

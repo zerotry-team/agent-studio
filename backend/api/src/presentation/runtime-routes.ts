@@ -39,6 +39,9 @@ export function createRuntimeRoutes(service: RuntimeApiService) {
     await service.jobResult(c.get("runtime"), uuid.parse(c.req.param("id")), jobResultRequestSchema.parse(await c.req.json()));
     return c.body(null, 204);
   });
+  authed.post("/jobs/:id/git-credential", async (c) =>
+    c.json(await service.gitCredential(c.get("runtime"), uuid.parse(c.req.param("id")))),
+  );
   authed.post("/sessions/:id/events", async (c) => {
     await service.sessionEvent(c.get("runtime"), uuid.parse(c.req.param("id")), sessionEventRequestSchema.parse(await c.req.json()));
     return c.body(null, 204);

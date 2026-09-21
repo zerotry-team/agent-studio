@@ -10,7 +10,7 @@ export default function SettingsPage() {
     <>
       <PageHeader
         title="設定"
-        description="組織の情報、OpenAI との連携、メンバーの権限、組織全体のポリシーを管理します。"
+        description="組織の情報、実行・開発基盤、OpenAI、メンバーの権限、組織全体のポリシーを管理します。"
       />
       {/* ?tab= を読むため、useSearchParams を使う部分を Suspense で囲む */}
       <Suspense fallback={<CardSkeleton />}>

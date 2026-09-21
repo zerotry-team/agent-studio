@@ -6,11 +6,17 @@ import type { Logger } from "./logger.js";
 import { errorInfo } from "./logger.js";
 import type { ControllerSecrets } from "./secrets.js";
 import type { StudioApi } from "./studio-client.js";
+import type { WorkspaceExecutor } from "./workspace-executor.js";
+import type { GitPublisher } from "./git-publisher.js";
+import type { BuilderResultCollector } from "./builder-result-collector.js";
 
 export interface JobHandlerDeps {
   grants: GrantStore;
   launcher: SessionLauncher;
   browserLauncher: BrowserLauncher;
+  workspaceExecutor?: WorkspaceExecutor;
+  gitPublisher?: GitPublisher;
+  builderResultCollector?: BuilderResultCollector;
   studio: Pick<StudioApi, "sessionEvent" | "environmentKey">;
   secrets: Pick<ControllerSecrets, "saveEnvironmentKey">;
   logger: Logger;
@@ -61,6 +67,15 @@ export class JobHandler {
           return await this.stopSession(job.session_id, job.reason);
         case "rotate_environment_key":
           return await this.rotateEnvironmentKey();
+        case "builder_workspace":
+          if (!this.deps.workspaceExecutor) return fail("このRuntimeではCode Workspace実行が有効になっていません");
+          return { status: "succeeded", output: await this.deps.workspaceExecutor.execute(job) };
+        case "collect_builder_session_result":
+          if (!this.deps.builderResultCollector) return fail("このRuntimeではSelf-hosted Builder結果の回収が有効になっていません");
+          return { status: "succeeded", output: await this.deps.builderResultCollector.collect(job) };
+        case "publish_builder_branch":
+          if (!this.deps.gitPublisher) return fail("このRuntimeではGit branch公開が有効になっていません");
+          return { status: "succeeded", output: await this.deps.gitPublisher.publish(job) };
       }
     } catch (err) {
       log.error({ err: errorInfo(err) }, "ジョブの処理に失敗しました");
@@ -88,6 +103,7 @@ export class JobHandler {
       max_lifetime_minutes: requestedLifetime,
       idle_timeout_minutes: idleTimeoutMinutes,
       browser,
+      builder_workspace: builderWorkspace,
       ...grant
     } = job.session;
     const sessionId = grant.session_id;
@@ -160,6 +176,7 @@ export class JobHandler {
         runId: grant.run_id,
         remoteUrl,
         environmentId,
+        ...(builderWorkspace ? { builderWorkspace } : {}),
         idempotencyToken: job.job_id,
       }));
     } catch (err) {

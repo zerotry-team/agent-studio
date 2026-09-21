@@ -3,16 +3,21 @@ import { zodFieldErrors } from "@/lib/utils/zod-ja";
 
 /** 画面で編集中のステップ（並べ替えても入力欄がずれないように uid を持つ） */
 export type StepDraft =
-  | { uid: string; type: "agent"; key: string; name: string; deployment_id: string; input_template: string }
-  | { uid: string; type: "approval"; key: string; name: string; message: string };
+  | ({ uid: string } & Extract<WorkflowStep, { type: "agent" }>)
+  | ({ uid: string } & Extract<WorkflowStep, { type: "approval" }>);
 
 export type StepType = StepDraft["type"];
 
 export const MAX_STEPS = 20;
 
-export const STEP_TYPE_LABELS: Record<StepType, string> = {
+export const STEP_TYPE_LABELS: Record<WorkflowStep["type"], string> = {
   agent: "エージェントを実行",
   approval: "承認を待つ",
+  tool: "Toolを実行",
+  condition: "条件分岐",
+  transform: "データ変換",
+  wait: "待機",
+  compensate: "補償処理",
 };
 
 /** ステップのエラーのキー（例: steps.0.key）。ステップ全体に関するエラーは "steps" */
@@ -25,7 +30,9 @@ function newUid(): string {
 }
 
 export function toDrafts(steps: readonly WorkflowStep[]): StepDraft[] {
-  return steps.map((step) => ({ ...step, uid: newUid() }));
+  return steps
+    .filter((step): step is Extract<WorkflowStep, { type: "agent" | "approval" }> => step.type === "agent" || step.type === "approval")
+    .map((step) => ({ ...step, uid: newUid() }));
 }
 
 /** API に送る形にする（余分な項目を含めない） */

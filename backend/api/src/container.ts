@@ -7,6 +7,8 @@ import { RuntimeApiService } from "./application/runtime-api.js";
 import { ToolService } from "./application/tools.js";
 import { InsightService, WorkflowService } from "./application/workflows.js";
 import { ScheduleService } from "./application/schedules.js";
+import { BuilderProjectService } from "./application/builder-projects.js";
+import { BuilderConnectorService } from "./application/builder-connectors.js";
 import { runtimeTokenSecret, type Env } from "./env.js";
 import { createIdentityVerifier } from "./infrastructure/auth/identity-verifier.js";
 import { RuntimeTokenIssuer } from "./infrastructure/auth/runtime-token.js";
@@ -18,7 +20,10 @@ import { OpenAIManifestGenerator, TemplateManifestGenerator } from "./infrastruc
 import { AgentsApiProvider } from "./infrastructure/openai/agents-api-provider.js";
 import { createSecretStore } from "./infrastructure/secrets/secret-store.js";
 import { createObjectStore } from "./infrastructure/storage/object-store.js";
+import { discoverMcpTools } from "./infrastructure/mcp/discover.js";
 import type { Logger } from "./logger.js";
+import { GitHubAppProvider } from "./infrastructure/git/github-app.js";
+import { GitWebhookService } from "./application/git-webhooks.js";
 
 export interface Services {
   organizations: OrganizationService;
@@ -30,6 +35,9 @@ export interface Services {
   insights: InsightService;
   runtimeApi: RuntimeApiService;
   schedules: ScheduleService;
+  builderProjects: BuilderProjectService;
+  builderConnectors: BuilderConnectorService;
+  gitWebhooks: GitWebhookService;
 }
 
 export function buildDeps(env: Env, logger: Logger, database: Database, overrides: Partial<Deps> = {}): Deps {
@@ -52,6 +60,8 @@ export function buildDeps(env: Env, logger: Logger, database: Database, override
     runtimeTokens: new RuntimeTokenIssuer(runtimeTokenSecret(env), env.RUNTIME_SERVER_ID),
     inviter: createUserInviter(env),
     objects: createObjectStore(env),
+    mcpDiscovery: discoverMcpTools,
+    gitProvider: new GitHubAppProvider(),
     ...overrides,
   };
 }
@@ -67,5 +77,8 @@ export function buildServices(deps: Deps): Services {
     insights: new InsightService(deps),
     runtimeApi: new RuntimeApiService(deps),
     schedules: new ScheduleService(deps),
+    builderProjects: new BuilderProjectService(deps),
+    builderConnectors: new BuilderConnectorService(deps),
+    gitWebhooks: new GitWebhookService(deps),
   };
 }

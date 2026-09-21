@@ -1,5 +1,6 @@
 "use client";
 
+import { createAgentProjectSchema } from "@agent-studio/contracts";
 import { ArrowRight, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -14,9 +15,9 @@ import { Spinner } from "@/components/ui/spinner";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { cn } from "@/lib/utils/cn";
 
-const DESCRIPTION_MIN = 5;
-const DESCRIPTION_MAX = 4000;
-const EXAMPLE = "ベンチマーク投稿と自社の過去投稿を分析し、X向けの投稿案を作成して公開したい";
+const DESCRIPTION_MIN = 20;
+const DESCRIPTION_MAX = 20_000;
+const EXAMPLE = "ファクタリング申込を審査するAgentを作りたい。社内履歴と口座情報を確認し、判断根拠を担当者へ提示して、承認後だけ結果を書き戻したい。";
 
 function useElapsedSeconds(active: boolean) {
   const [seconds, setSeconds] = useState(0);
@@ -40,7 +41,7 @@ export function AgentCreator() {
     successMessage: (project) => `Agent「${project.agent.name}」を準備しました`,
     onSuccess: (project) => {
       setNavigating(true);
-      router.push(`/agents/${project.agent.id}`);
+      router.push(`/agents/${project.agent.id}?tab=build`);
     },
   });
   const elapsed = useElapsedSeconds(create.pending);
@@ -52,7 +53,11 @@ export function AgentCreator() {
     if (length < DESCRIPTION_MIN) return setError(`${DESCRIPTION_MIN}文字以上で入力してください`);
     if (length > DESCRIPTION_MAX) return setError(`${DESCRIPTION_MAX}文字以内で入力してください`);
     setError(null);
-    void create.mutate({ description: description.trim() });
+    // 利用者のゴールは常に「使える状態」。BuilderがPreviewで検証し、同じBuildを
+    // Production承認待ちまで進めるため、技術的な途中到達点は選ばせない。
+    const parsed = createAgentProjectSchema.safeParse({ description: description.trim(), target: "production" });
+    if (!parsed.success) return setError(parsed.error.issues[0]?.message ?? "入力内容を確認してください");
+    void create.mutate(parsed.data);
   };
 
   return (
@@ -63,9 +68,9 @@ export function AgentCreator() {
             <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-accent-50 text-accent-700">
               <Sparkles className="h-6 w-6" aria-hidden="true" />
             </div>
-            <h2 className="text-2xl font-semibold tracking-tight text-gray-950">どんなAgentを公開しますか？</h2>
+            <h2 className="text-2xl font-semibold tracking-tight text-gray-950">どんな仕事をAgentに任せたいですか？</h2>
             <p className="mt-2 text-sm leading-relaxed text-gray-500">
-              実現したい業務を書いてください。必要な連携サービスと設定だけを確認し、Previewを準備します。
+              やりたいことを書くだけで、必要なToolの調査、接続設定、不足機能の実装、Preview検証まで進めます。
             </p>
           </div>
 
@@ -95,6 +100,10 @@ export function AgentCreator() {
                 data-autofocus
               />
             </Field>
+            <div className="mt-6 rounded-xl border border-accent-100 bg-accent-50/60 px-4 py-3 text-sm text-accent-950">
+              <p className="font-medium">利用可能になるまでBuilderが進めます</p>
+              <p className="mt-1 text-accent-800">Previewで安全性と実行結果を確認した後、同じBuildを本番承認待ちにします。本番公開だけは管理者が承認します。</p>
+            </div>
           </div>
 
           {create.pending ? (
@@ -118,7 +127,7 @@ export function AgentCreator() {
             Advanced設定
           </Link>
           <Button type="submit" loading={create.pending || navigating} icon={<ArrowRight className="h-4 w-4" aria-hidden="true" />}>
-            Agentを作成
+            作成を開始
           </Button>
         </CardFooter>
       </form>

@@ -16,14 +16,14 @@ import {
   SetAgentEnvironmentService,
   ValidateManifestService,
 } from "@/lib/services/agents";
-import type { LinkAgentConnectionInput, SetAgentEnvironmentInput , SetBrowserAccessInput } from "@agent-studio/contracts";
+import type { CreateAgentProjectInput, LinkAgentConnectionInput, SetAgentEnvironmentInput , SetBrowserAccessInput } from "@agent-studio/contracts";
 
 export async function listAgentsAction() {
   return runAction(() => new ListAgentsService().invoke(), "エージェントの一覧を取得できませんでした");
 }
 
-export async function createAgentProjectAction(input: { description: string }) {
-  return runAction(() => new CreateAgentProjectService().invoke(input.description), "Agent Projectを作成できませんでした");
+export async function createAgentProjectAction(input: CreateAgentProjectInput) {
+  return runAction(() => new CreateAgentProjectService().invoke(input), "Agent Projectを作成できませんでした");
 }
 
 export async function getAgentProjectAction(id: string) {

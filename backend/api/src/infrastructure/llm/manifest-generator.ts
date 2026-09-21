@@ -7,6 +7,8 @@ import type { Logger } from "../../logger.js";
 import type { TenantDb } from "../db/tenant-db.js";
 import type { SecretStore } from "../secrets/secret-store.js";
 
+const GENERATION_TIMEOUT_MS = 90_000;
+
 export interface GeneratorToolInfo {
   name: string;
   display_name: string;
@@ -123,12 +125,15 @@ export class OpenAIManifestGenerator implements ManifestGenerator {
 
     const client = new OpenAI({ apiKey, project: settings?.openai_project_id ?? undefined, maxRetries: 2 });
     try {
-      const response = await client.responses.parse({
-        model: this.env.MANIFEST_GENERATOR_MODEL,
-        instructions: SYSTEM_PROMPT,
-        input: `# 利用可能な連携サービスと能力\n${JSON.stringify({ tools: input.tools, environments: input.profiles }, null, 2)}\n\n# 利用者の業務説明\n${input.description}`,
-        text: { format: zodTextFormat(generatedAgentSchema, "agent_project_draft") },
-      });
+      const response = await client.responses.parse(
+        {
+          model: this.env.MANIFEST_GENERATOR_MODEL,
+          instructions: SYSTEM_PROMPT,
+          input: `# 利用可能な連携サービスと能力\n${JSON.stringify({ tools: input.tools, environments: input.profiles }, null, 2)}\n\n# 利用者の業務説明\n${input.description}`,
+          text: { format: zodTextFormat(generatedAgentSchema, "agent_project_draft") },
+        },
+        { signal: AbortSignal.timeout(GENERATION_TIMEOUT_MS) },
+      );
       if (!response.output_parsed) {
         throw new AppError("generation_failed", 502, "エージェントの構成を作れませんでした。もう一度お試しください");
       }
@@ -138,6 +143,9 @@ export class OpenAIManifestGenerator implements ManifestGenerator {
       if (error instanceof AppError) throw error;
       if (error instanceof OpenAI.RateLimitError) {
         throw new AppError("generation_rate_limited", 429, "混み合っています。しばらくしてからお試しください");
+      }
+      if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError" || error.name === "APIUserAbortError")) {
+        throw new AppError("generation_timeout", 503, "要件整理が時間内に完了しませんでした。自動再試行できます");
       }
       if (error instanceof OpenAI.APIError) {
         this.logger.error({ status: error.status, message: error.message }, "Agent Project Draftの生成に失敗しました");
@@ -162,6 +170,7 @@ export class TemplateManifestGenerator implements ManifestGenerator {
       list_posts: ["過去投稿", "投稿を分析", "posts"],
       get_post: ["投稿詳細", "投稿内容", "post"],
       publish_post: ["投稿する", "公開", "publish"],
+      generate_social_image: ["画像", "挿絵", "イラスト", "サムネイル", "image"],
       publish_qiita_article: ["qiita", "記事を投稿", "技術記事を公開", "qiitaに投稿"],
       publish_zenn_article: ["zenn", "記事を投稿", "技術記事を公開", "zennに投稿"],
       get_job: ["投稿結果", "成功確認", "job"],

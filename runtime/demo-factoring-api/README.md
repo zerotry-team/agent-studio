@@ -20,7 +20,13 @@
 | `counterparties` | 売掛先（商号・所在地・法人番号／申込書に記載が無いものは NULL） | 3 |
 | `invoices` | 買取申込の請求書（請求額・発行日・支払期日・支払条件・状態） | 5 |
 | `payment_records` | 売掛先からの過去の入金実績（期日・実入金日・金額） | 11 |
+| `inquiry_history` | 社内CRMを模した過去問い合わせ履歴 | 1 |
+| `internal_risk_flags` | 社内否決・注意台帳（有効／解消済み） | 2 |
 | `screenings` | 審査結果の書き戻し用。**読むだけの構成では使わない** | 0 |
+
+`GET /applications/:invoice_id` は申込情報とあわせて `internal_history` を返します。デモで社内DB照会を明示したい場合は
+`GET /internal-history/:applicant_id`（Tool名 `lookup_internal_history`）を使います。どちらも実際にPostgreSQLを参照します。
+AgentへDB接続文字列や任意SQLは渡しません。
 
 ### 4 件が別々の結論になる
 
@@ -128,7 +134,7 @@ aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
   --query 'tasks[0].containers[0].exitCode'   # 0 であること
 ```
 
-ログは CloudWatch Logs に `デモデータを投入しました applicants=3 invoices=5 payments=11` が出ます。
+ログは CloudWatch Logs に `デモデータを投入しました applicants=3 invoices=5 payments=11 inquiries=1 risk_flags=2` が出ます。
 
 確認は、Runtime 内から API を叩くか、Agent Studio でエージェントを 1 回走らせるのが早いです。
 
@@ -207,7 +213,18 @@ curl -s -H "Authorization: Bearer local-factoring-token" localhost:8091/applicat
 
 ## 6. 実データに切り替えるとき
 
-顧客の実システムを使うなら、**このデータもこの API も本番には出しません**。
+顧客の実システムを使う場合も、AgentからDBへ直接SQLを許可しません。Self-host Runtime内のAdapterだけが、
+読み取り専用DBユーザーで社内PostgreSQLへ接続します。現在のAdapterは `FACTORING_DATABASE_URL` を差し替えれば
+PostgreSQL互換の社内DBへ接続できます。接続元Runtimeを社内LAN/VPN/VPC内に置き、DB側はそのRuntimeからの通信だけを許可します。
+
+```bash
+FACTORING_DATABASE_URL='postgresql://agent_reader:***@internal-db.example.local:5432/factoring?sslmode=require'
+```
+
+資格情報はSecrets ManagerなどRuntime側のSecret Storeから注入し、Control Plane、Git、Agentの指示文には保存しません。
+MySQL、SQL Server、Oracleの場合は、このAPIの返却契約を維持したままDBドライバー部分だけを専用Adapterへ交換します。
+
+既存の社内HTTP APIを使う場合は、**このデータもこの API も本番には出しません**。
 [tool-config](../tool-gateway/examples/tool-config.local.yaml) のツール定義をコピーして、
 `infra/company/<tenant>/config.yaml` の `runtime.tools` に URL を実システム向けで書くだけです。
 

@@ -5,6 +5,7 @@ import {
   createAgentScheduleSchema,
   createAgentVersionSchema,
   createConnectionSchema,
+  createGitHubAppConnectionSchema,
   createConnectorSchema,
   discoverMcpToolsSchema,
   exchangeQiitaOAuthSchema,
@@ -38,6 +39,10 @@ import {
   updateWorkflowSchema,
   updateAgentScheduleSchema,
   usesBrowserCapability,
+  createBuilderProjectSchema,
+  builderOpenApiInputSchema,
+  builderMcpInputSchema,
+  completeBuilderHumanActionSchema,
 } from "@agent-studio/contracts";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -105,6 +110,70 @@ export function createApiRoutes(deps: Deps, s: Services) {
   });
 
   org.get("/tools", async (c) => c.json(await s.tools.list(c.get("member"))));
+
+  org.get("/builder-projects", async (c) => c.json(await s.builderProjects.list(c.get("member"))));
+  org.post("/builder-projects", async (c) =>
+    c.json(await s.builderProjects.create(c.get("member"), await json(c, createBuilderProjectSchema)), 201),
+  );
+  org.get("/builder-projects/:id", async (c) =>
+    c.json(await s.builderProjects.get(c.get("member"), id(c.req.param("id")))),
+  );
+  org.post("/builder-projects/:id/resume", async (c) =>
+    c.json(await s.builderProjects.resume(c.get("member"), id(c.req.param("id")))),
+  );
+  org.post("/builder-projects/:id/agent", async (c) =>
+    c.json(await s.builderProjects.ensureAgent(c.get("member"), id(c.req.param("id")))),
+  );
+  org.post("/builder-projects/:id/cancel", async (c) =>
+    c.json(await s.builderProjects.cancel(c.get("member"), id(c.req.param("id")))),
+  );
+  org.post("/builder-projects/:id/production/approve", async (c) =>
+    c.json(await s.builderProjects.approveProduction(c.get("member"), id(c.req.param("id")))),
+  );
+  org.post("/builder-projects/:id/self-hosted/plan", async (c) =>
+    c.json(await s.builderProjects.prepareSelfHosted(c.get("member"), id(c.req.param("id")), await json(c, createRuntimeSchema)), 201),
+  );
+  org.post("/builder-projects/:id/openapi/inspect", async (c) =>
+    c.json(
+      await s.builderConnectors.inspectOpenApi(
+        c.get("member"),
+        id(c.req.param("id")),
+        await json(c, builderOpenApiInputSchema),
+      ),
+    ),
+  );
+  org.post("/builder-projects/:id/openapi/apply", async (c) =>
+    c.json(
+      await s.builderConnectors.applyOpenApi(
+        c.get("member"),
+        id(c.req.param("id")),
+        await json(c, builderOpenApiInputSchema),
+      ),
+      201,
+    ),
+  );
+  org.post("/builder-projects/:id/mcp/inspect", async (c) =>
+    c.json(
+      await s.builderConnectors.inspectMcp(
+        c.get("member"),
+        id(c.req.param("id")),
+        await json(c, builderMcpInputSchema),
+      ),
+    ),
+  );
+  org.post("/builder-projects/:id/mcp/apply", async (c) =>
+    c.json(
+      await s.builderConnectors.applyMcp(
+        c.get("member"),
+        id(c.req.param("id")),
+        await json(c, builderMcpInputSchema),
+      ),
+      201,
+    ),
+  );
+  org.post("/builder-human-actions/:id/complete", async (c) =>
+    c.json(await s.builderProjects.completeHumanAction(c.get("member"), id(c.req.param("id")), await json(c, completeBuilderHumanActionSchema))),
+  );
   org.post("/tools", async (c) => c.json(await s.tools.create(c.get("member"), await json(c, createToolInputSchema)), 201));
   org.get("/tools/:id", async (c) => c.json(await s.tools.get(c.get("member"), id(c.req.param("id")))));
   org.post("/tools/:id/versions", async (c) =>
@@ -133,17 +202,35 @@ export function createApiRoutes(deps: Deps, s: Services) {
 
   org.get("/connections", async (c) => c.json(await s.tools.listConnections(c.get("member"))));
   org.post("/connections", async (c) => c.json(await s.tools.createConnection(c.get("member"), await json(c, createConnectionSchema)), 201));
+  org.post("/connections/github-app", async (c) => {
+    const actor = c.get("member");
+    const connection = await s.tools.createGitHubAppConnection(actor, await json(c, createGitHubAppConnectionSchema));
+    await s.builderProjects.completeGitHubRepositoryActions(actor, connection);
+    return c.json(connection, 201);
+  });
+  org.post("/connections/:id/integration-repository", async (c) => {
+    const actor = c.get("member");
+    const connection = await s.tools.provisionOrganizationIntegrationRepository(actor, id(c.req.param("id")));
+    await s.builderProjects.completeGitHubRepositoryActions(actor, connection);
+    return c.json(connection, 201);
+  });
   org.post("/connectors/:id/qiita-oauth/exchange", async (c) => {
     const input = await json(c, exchangeQiitaOAuthSchema);
-    return c.json(await s.tools.exchangeQiitaOAuth(c.get("member"), id(c.req.param("id")), input.code), 201);
+    const actor = c.get("member");
+    const connection = await s.tools.exchangeQiitaOAuth(actor, id(c.req.param("id")), input.code);
+    await s.builderProjects.completeConnectionActions(actor, connection);
+    return c.json(connection, 201);
   });
   org.put("/connections/:id/secret", async (c) => {
     await s.tools.setConnectionSecret(c.get("member"), id(c.req.param("id")), await json(c, setConnectionSecretSchema));
     return c.body(null, 204);
   });
-  org.post("/connections/:id/validate", async (c) =>
-    c.json(await s.tools.validateConnection(c.get("member"), id(c.req.param("id")))),
-  );
+  org.post("/connections/:id/validate", async (c) => {
+    const actor = c.get("member");
+    const connection = await s.tools.validateConnection(actor, id(c.req.param("id")));
+    await s.builderProjects.completeConnectionActions(actor, connection);
+    return c.json(connection);
+  });
   org.post("/connections/:id/revoke", async (c) =>
     c.json(await s.tools.revokeConnection(c.get("member"), id(c.req.param("id")))),
   );
@@ -167,17 +254,9 @@ export function createApiRoutes(deps: Deps, s: Services) {
   org.post("/agent-projects", async (c) => {
     const actor = c.get("member");
     const input = await json(c, createAgentProjectSchema);
-    const agent = await s.agents.createProject(actor, input.description);
-    let autoPreviewCreated = false;
-    if (readyForPreview(agent)) {
-      try {
-        await s.environments.createPreview(actor, agent.id);
-        autoPreviewCreated = true;
-      } catch (error) {
-        deps.logger.warn({ err: error, agent_id: agent.id }, "Agent Project作成後のPreview自動作成を保留しました");
-      }
-    }
-    return c.json({ ...(await s.agents.getProject(actor, agent.id)), auto_preview_created: autoPreviewCreated }, 201);
+    const buildJob = await s.builderProjects.create(actor, { request: input.description, target: input.target });
+    if (!buildJob.agent_id) throw new AppError("agent_shell_missing", 500, "Agentの作成状態を初期化できませんでした");
+    return c.json({ ...(await s.agents.getProject(actor, buildJob.agent_id)), auto_preview_created: false }, 201);
   });
   org.post("/agents", async (c) => c.json(await s.agents.create(c.get("member"), (await json(c, createAgentSchema)).manifest), 201));
   org.post("/agents/generate", async (c) =>
@@ -189,6 +268,10 @@ export function createApiRoutes(deps: Deps, s: Services) {
     c.json(await s.agents.setBrowserAccess(c.get("member"), id(c.req.param("id")), await json(c, setBrowserAccessSchema))),
   );
   org.get("/agents/:id/project", async (c) => c.json(await s.agents.getProject(c.get("member"), id(c.req.param("id")))));
+  org.get("/agents/:id/build-jobs", async (c) => {
+    const project = await s.agents.getProject(c.get("member"), id(c.req.param("id")));
+    return c.json(project.build_jobs);
+  });
   org.put("/agents/:id/connections", async (c) => {
     const actor = c.get("member");
     const agentId = id(c.req.param("id"));

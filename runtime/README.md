@@ -51,9 +51,10 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 3. `403 runtime_revoked` ならジョブの取得を止め、Tool Gateway へのセッションの提供も止めて、5 分ごとに再確認する。
 4. 認証後、`GET /runtime/v1/sessions/active` と実行中のタスク（`ListTasks(startedBy="as/<session_id>")`）を突き合わせて引き継ぐ。
 5. `GET /runtime/v1/jobs/next?wait=20` を繰り返す（ジョブは並行して処理する）。
-   - `start_session`: Browser能力があればRun専用Browser Taskを先に起動し、Private IPをSession Grantへ登録する。続いてSession Workerを`RunTask`し、RUNNINGで`worker_running`（ジョブ成功）。
+   - `start_session`: Browser能力があればRun専用Browser Taskを先に起動し、Private IPをSession Grantへ登録する。続いてSession Workerを`RunTask`し、RUNNINGで`worker_running`（ジョブ成功）。Builder Sessionでは同じ契約に非機微なworkspace準備情報を付け、`exec-server`起動前にRepositoryをclone・base SHA固定・専用branch作成までをモデル外で行う。
    - `stop_session`: Session WorkerとBrowser Taskを`StopTask` → 許可情報を消す → `worker_stopped`。何度呼んでも成功する。
    - `rotate_environment_key`: `GET /runtime/v1/environment-key` → Secrets Manager に保存。
+   - `builder_workspace`: 旧standalone executor互換。新規BuilderはEnvironment Keyを正しく扱える`start_session` + Agents API Sessionを使用する。
 6. 30 秒ごとにハートビート。15 秒ごとに両Workerを監視し、片方の終了、最大寿命、active sessionの無い孤児Taskを検出してペアで停止する。
 7. SIGTERM ではジョブの取得をやめ、処理中のジョブを最大 20 秒待って終了する。**実行中の Session Worker は止めない**。
 
@@ -80,6 +81,9 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 | `SESSION_WORKER_CONTAINER_NAME` | `session-worker` | |
 | `BROWSER_LAUNCHER` | `disabled` | `ecs` / `docker` / `noop` / `disabled` |
 | `BROWSER_WORKER_TASK_DEFINITION` / `BROWSER_WORKER_SUBNETS` / `BROWSER_WORKER_SECURITY_GROUPS` | （Browserのecs時に必須） | RunごとのBrowser Task起動設定 |
+| `BUILDER_WORKSPACE_EXECUTOR` | `disabled` | 旧standalone Docker Executorの互換スイッチ。新規Builder Sessionでは使用しないため`disabled`を維持する |
+| `BUILDER_WORKSPACE_IMAGE` / `BUILDER_WORKSPACE_DOCKER_NETWORK` | | `BUILDER_WORKSPACE_EXECUTOR=docker`のときのイメージと任意ネットワーク。Session Workerイメージのworkspace entrypointを再利用する |
+| `BUILDER_WORKSPACE_TIMEOUT_MINUTES` | `30` | 1つの生成・検証ジョブの上限（5〜120分） |
 | `GATEWAY_PUBLIC_URL` | （必須） | Session Worker から見た MCP の URL（ハートビートで報告） |
 | `GATEWAY_CATALOG_URL` | `http://127.0.0.1:8082/internal/catalog` | |
 | `CONTROLLER_INTERNAL_PORT` | `8081` | |
@@ -134,6 +138,7 @@ Agent Studio（Control Plane）とは **Runtime から Agent Studio へのアウ
 `codex exec-server --remote "$REMOTE_URL" --environment-id "$ENVIRONMENT_ID"` を実行するだけのイメージです（`@openai/codex` **0.155.1** に固定）。
 
 - `REMOTE_URL` / `ENVIRONMENT_ID` は Controller が RunTask の containerOverrides で、`CODEX_API_KEY`（環境キー）はタスク定義の `secrets` で渡す。どれかが無ければ終了コード 64 で終わる。キーはログに出さない。
+- Builder Sessionの場合は、ControllerがRepository URL、base/専用branch、Adapter pathだけを追加で渡す。entrypointがモデル起動前にcloneとbase SHA固定を行い、Code Agentは`/workspace/repo`を変更し、型付き結果を`/workspace/outputs/builder-result.json`へ書く。Dockerでは`/workspace`をtmpfsにしてコンテナ停止時に破棄する。
 - uid 10001 の一般ユーザー、`HOME=/home/worker`、作業ディレクトリ `/workspace`。git・python3・ripgrep・curl を入れている。
 - `codex` を上げるときは `codex exec-server --help` で `--remote` と `--environment-id` があることを確認してから `CODEX_VERSION` を変える。
 
@@ -238,6 +243,7 @@ yarn workspace @agent-studio/demo-factoring-api db:load                   # デ�
    - `ENVIRONMENT_KEY_STORE=memory` で再起動した場合、docker の Worker を起動するときに環境キーを Agent Studio（`/runtime/v1/environment-key`）から取り直す。
    - Worker を起動せずに Controller と Tool Gateway だけを試すときは `SESSION_LAUNCHER=noop`。
    - `BROWSER_LAUNCHER=docker` のとき、Browser Task は Run に Browser ツールが含まれるときだけ起動する。`BROWSER_WORKER_DOCKER_NETWORK` を指定しなければコンテナの 8931 が loopback の空きポートへ公開され、手元の Tool Gateway から `127.0.0.1:<公開ポート>` で届く。Tool Gateway も docker で動かすなら、同じネットワーク名を両方に指定する。
+   - Code Workspaceのジョブ・隔離volume・証跡プロトコルは実装済みだが、登録済みEnvironment Keyはstandalone `codex exec`の認証に使えない。個人Codex認証や長期API Keyを生成対象コンテナへ渡さず、Agents API Session + `codex exec-server`のジョブ限定認証へ接続するまでは`BUILDER_WORKSPACE_EXECUTOR=disabled`のままにする。
    - 開けるサイトは Run ごとの allowlist で決まる。Agent の Variables に `BROWSER_ALLOWED_DOMAINS`（カンマ区切り）を入れるか、`https://...` 形式の Variable を置く（ホスト名が自動で allowlist に入る）。
    - Agent Studio 側が `AGENTS_API_MODE=fake` のときは `remote_url` が実在しないため、docker の Worker は接続できずに終了する（`worker_failed` になる）。
 

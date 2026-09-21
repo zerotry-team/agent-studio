@@ -61,6 +61,7 @@ export default function WorkflowDetailPage({ params }: { params: { id: string } 
     }
     return <WorkflowDetailSkeleton />;
   }
+  const hasAdvancedSteps = workflow.definition.steps.some((step) => step.type !== "agent" && step.type !== "approval");
 
   return (
     <>
@@ -98,10 +99,15 @@ export default function WorkflowDetailPage({ params }: { params: { id: string } 
         hidden={tab !== "definition"}
         className="pt-6 focus:outline-none"
       >
+        {hasAdvancedSteps ? (
+          <p className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+            Builder Agentが生成したWorkflow v2です。条件分岐・Tool・待機・補償Stepを保護するため、この画面では読み取り専用です。
+          </p>
+        ) : null}
         <WorkflowDefinitionForm
           key={workflow.version}
           workflow={workflow}
-          editable={can("workflow.edit")}
+          editable={can("workflow.edit") && !hasAdvancedSteps}
           onSaved={(saved) => query.setData(saved)}
         />
       </div>
