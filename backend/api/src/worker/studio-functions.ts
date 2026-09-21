@@ -504,7 +504,11 @@ export class StudioFunctionExecutor {
         },
       });
     });
-    if (!response.ok) throw new Error(`連携サービスがエラーを返しました（HTTP ${response.status}）: ${text.slice(0, 500)}`);
+    // 社内APIではerror bodyも境界外のraw dataとして扱い、モデルやRun logへ流さない。
+    if (!response.ok) {
+      const detail = boundary ? "" : `: ${text.slice(0, 500)}`;
+      throw new Error(`連携サービスがエラーを返しました（HTTP ${response.status}）${detail}`);
+    }
     if (read.truncated) throw new Error("連携サービスの応答が許可されたサイズ上限を超えています");
     if (!text) return JSON.stringify({ accepted: response.status === 202, status: response.status });
     if (boundary || tool.output_schema !== undefined) {

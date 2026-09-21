@@ -1052,13 +1052,11 @@ export class BuilderOrchestrator {
     answered: AnsweredBuilderQuestion[],
   ): Promise<GenerateManifestResultDto | null> {
     return this.deps.db.org(organizationId, async (tx) => {
-      const [browserFlow, latest] = await Promise.all([
-        tx.builder_change_sets.findFirst({
-          where: { project_id: projectId, kind: "browser_flow", status: { in: ["planned", "applied"] } },
-          orderBy: { created_at: "desc" },
-        }),
-        tx.capability_plans.findFirst({ where: { project_id: projectId }, orderBy: { version: "desc" } }),
-      ]);
+      const browserFlow = await tx.builder_change_sets.findFirst({
+        where: { project_id: projectId, kind: "browser_flow", status: { in: ["planned", "applied"] } },
+        orderBy: { created_at: "desc" },
+      });
+      const latest = await tx.capability_plans.findFirst({ where: { project_id: projectId }, orderBy: { version: "desc" } });
       if (!browserFlow || !latest) return null;
       const requirements = ensureAnsweredSourceRequirements(
         answered,
@@ -1437,13 +1435,11 @@ export class BuilderOrchestrator {
         // OpenAPI/MCP適用と初回Preview生成は並行し得るため、created_atの前後ではなく
         // 「適用済みToolがBuildへ固定済みか」で旧Buildを判定する。
         if (activeRelease?.status === "preview_running") {
-          const [connectorChanges, activeBuild] = await Promise.all([
-            tx.builder_change_sets.findMany({
-              where: { project_id: run.project_id, kind: "declarative_connector", status: "applied" },
-              select: { artifacts: true },
-            }),
-            tx.agent_builds.findUnique({ where: { id: activeRelease.build_id }, select: { compiled_config: true } }),
-          ]);
+          const connectorChanges = await tx.builder_change_sets.findMany({
+            where: { project_id: run.project_id, kind: "declarative_connector", status: "applied" },
+            select: { artifacts: true },
+          });
+          const activeBuild = await tx.agent_builds.findUnique({ where: { id: activeRelease.build_id }, select: { compiled_config: true } });
           const config = activeBuild?.compiled_config && typeof activeBuild.compiled_config === "object" && !Array.isArray(activeBuild.compiled_config)
             ? activeBuild.compiled_config as Record<string, unknown>
             : {};
@@ -1973,14 +1969,16 @@ export class BuilderOrchestrator {
         value.toolNames.push(tool.name);
         byConnector.set(tool.connector_id, value);
       }
-      return Promise.all([...byConnector.values()].map(async (value) => {
+      const resolved = [];
+      for (const value of byConnector.values()) {
         const connection = await tx.connections.findFirst({
           where: { organization_id: actor.organizationId, connector_id: value.connectorId, status: "connected", revoked_at: null },
           orderBy: { last_validated_at: "desc" },
         });
         if (!connection) throw new Error("Preview用Connectionが見つかりません");
-        return { ...value, connectionId: connection.id };
-      }));
+        resolved.push({ ...value, connectionId: connection.id });
+      }
+      return resolved;
     });
     for (const link of connectorLinks) {
       await this.agents.linkConnection(actor, agent.id, { connector_id: link.connectorId, connection_id: link.connectionId, stage: "staging", allowed_capabilities: link.toolNames });

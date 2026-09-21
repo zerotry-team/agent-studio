@@ -4,12 +4,18 @@ import { createHarness, type Harness } from "./harness.js";
 describe("organization auto approval policy", () => {
   let h: Harness;
   let owner: { email: string; org: string };
+  let admin: { email: string; org: string };
 
   beforeAll(async () => {
     h = createHarness();
     const email = `auto-approval-${h.suffix}@example.com`;
-    const org = await h.createOrg("auto-approval", [{ email, role: "owner", approver: true }]);
+    const adminEmail = `auto-approval-admin-${h.suffix}@example.com`;
+    const org = await h.createOrg("auto-approval", [
+      { email, role: "owner", approver: true },
+      { email: adminEmail, role: "admin", approver: true },
+    ]);
     owner = { email, org: org.id };
+    admin = { email: adminEmail, org: org.id };
   });
 
   afterAll(async () => h.close());
@@ -53,5 +59,25 @@ describe("organization auto approval policy", () => {
       "auto_approval_policy.emergency_stop",
       "auto_approval_policy.resume",
     ]));
+  });
+
+  it("完全自律運転はOwnerだけが設定できる", async () => {
+    const config = {
+      mode: "full_autonomy",
+      environments: ["staging", "production"],
+      allowed_hosts: [],
+      allowed_operations: [],
+      allowed_methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+      denied_methods: [],
+      limits: { requests_per_minute: 100, daily_cost_jpy: null, max_records_per_call: 100 },
+      production_promotion: true,
+      automatic_retry: true,
+      automatic_rollback: true,
+      expires_at: null,
+    };
+    expect((await h.request("PUT", "/api/v1/organization/auto-approval-policy", { ...admin, body: config })).status).toBe(403);
+    const saved = await h.request("PUT", "/api/v1/organization/auto-approval-policy", { ...owner, body: config });
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+    expect(saved.body.config.mode).toBe("full_autonomy");
   });
 });

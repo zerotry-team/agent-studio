@@ -2,7 +2,7 @@ import { z } from "zod";
 import { toolNameSchema } from "./common.js";
 import { toolRiskSchema } from "./tools.js";
 
-export const autoApprovalModeSchema = z.enum(["manual", "safe_operations", "all_within_policy"]);
+export const autoApprovalModeSchema = z.enum(["manual", "safe_operations", "all_within_policy", "full_autonomy"]);
 export type AutoApprovalMode = z.infer<typeof autoApprovalModeSchema>;
 
 const exactHostnameSchema = z
@@ -40,7 +40,7 @@ export const autoApprovalPolicyConfigSchema = z
     for (const method of value.allowed_methods) {
       if (denied.has(method)) ctx.addIssue({ code: "custom", path: ["allowed_methods"], message: `${method}は拒否リストにも含まれています` });
     }
-    if (value.mode !== "manual" && value.allowed_operations.length === 0) {
+    if (value.mode !== "manual" && value.mode !== "full_autonomy" && value.allowed_operations.length === 0) {
       ctx.addIssue({ code: "custom", path: ["allowed_operations"], message: "自動承認する操作を1つ以上指定してください" });
     }
   });
@@ -77,33 +77,12 @@ export type AutoApprovalDecision =
   | { action: "auto_approve"; reason: string }
   | { action: "manual_required"; reason: string };
 
-/**
- * 「すべて自動」は無条件承認ではない。完全一致のPolicy内だけを許可し、
- * 判定材料が欠ける場合は必ず手動承認へフォールバックする。
- */
+/** Policy内自動化と、登録済み能力を包括承認する完全自律運転を判定する。 */
 export function evaluateAutoApproval(policy: AutoApprovalPolicyConfig, context: AutoApprovalContext): AutoApprovalDecision {
   if (policy.mode === "manual") return { action: "manual_required", reason: "組織Policyは個別承認モードです" };
   if (context.emergencyStoppedAt) return { action: "manual_required", reason: "自動承認は緊急停止中です" };
   if (policy.expires_at && Date.parse(policy.expires_at) <= context.now.getTime()) {
     return { action: "manual_required", reason: "自動承認Policyの有効期限が切れています" };
-  }
-  if (!policy.environments.includes(context.stage)) {
-    return { action: "manual_required", reason: `${context.stage}は自動承認対象ではありません` };
-  }
-  if (context.actionKind === "production_promotion" && !policy.production_promotion) {
-    return { action: "manual_required", reason: "Production自動昇格が許可されていません" };
-  }
-  if (context.actionKind === "retry" && !policy.automatic_retry) {
-    return { action: "manual_required", reason: "自動再試行が許可されていません" };
-  }
-  if (context.actionKind === "rollback" && !policy.automatic_rollback) {
-    return { action: "manual_required", reason: "自動Rollbackが許可されていません" };
-  }
-  if (!policy.allowed_operations.includes(context.operation)) {
-    return { action: "manual_required", reason: `${context.operation}は許可済み操作ではありません` };
-  }
-  if (policy.mode === "safe_operations" && context.risk !== "read") {
-    return { action: "manual_required", reason: "安全操作モードでは読み取り操作だけを自動承認します" };
   }
   if (context.actionKind === "api_call" && !context.method) {
     return { action: "manual_required", reason: "接続先のHTTP methodを確認できません" };
@@ -111,13 +90,34 @@ export function evaluateAutoApproval(policy: AutoApprovalPolicyConfig, context: 
   if (context.actionKind === "api_call" && !context.host) {
     return { action: "manual_required", reason: "接続先hostを確認できません" };
   }
-  if (context.method) {
-    if (policy.denied_methods.includes(context.method)) return { action: "manual_required", reason: `${context.method}は常に手動承認です` };
-    if (!policy.allowed_methods.includes(context.method)) return { action: "manual_required", reason: `${context.method}は許可済みmethodではありません` };
-  }
-  if (context.host) {
-    const host = context.host.toLowerCase().replace(/\.$/, "");
-    if (!policy.allowed_hosts.includes(host)) return { action: "manual_required", reason: `${host}は許可済みhostではありません` };
+  const fullAutonomy = policy.mode === "full_autonomy";
+  if (!fullAutonomy) {
+    if (!policy.environments.includes(context.stage)) {
+      return { action: "manual_required", reason: `${context.stage}は自動承認対象ではありません` };
+    }
+    if (context.actionKind === "production_promotion" && !policy.production_promotion) {
+      return { action: "manual_required", reason: "Production自動昇格が許可されていません" };
+    }
+    if (context.actionKind === "retry" && !policy.automatic_retry) {
+      return { action: "manual_required", reason: "自動再試行が許可されていません" };
+    }
+    if (context.actionKind === "rollback" && !policy.automatic_rollback) {
+      return { action: "manual_required", reason: "自動Rollbackが許可されていません" };
+    }
+    if (!policy.allowed_operations.includes(context.operation)) {
+      return { action: "manual_required", reason: `${context.operation}は許可済み操作ではありません` };
+    }
+    if (policy.mode === "safe_operations" && context.risk !== "read") {
+      return { action: "manual_required", reason: "安全操作モードでは読み取り操作だけを自動承認します" };
+    }
+    if (context.method) {
+      if (policy.denied_methods.includes(context.method)) return { action: "manual_required", reason: `${context.method}は常に手動承認です` };
+      if (!policy.allowed_methods.includes(context.method)) return { action: "manual_required", reason: `${context.method}は許可済みmethodではありません` };
+    }
+    if (context.host) {
+      const host = context.host.toLowerCase().replace(/\.$/, "");
+      if (!policy.allowed_hosts.includes(host)) return { action: "manual_required", reason: `${host}は許可済みhostではありません` };
+    }
   }
   if (context.callsLastMinute >= policy.limits.requests_per_minute) {
     return { action: "manual_required", reason: "1分あたりの自動承認上限に達しました" };
@@ -135,7 +135,7 @@ export function evaluateAutoApproval(policy: AutoApprovalPolicyConfig, context: 
   }
   return {
     action: "auto_approve",
-    reason: `組織Policy内: ${context.stage} / ${context.operation}${context.method ? ` / ${context.method}` : ""}${context.host ? ` / ${context.host}` : ""}`,
+    reason: `${fullAutonomy ? "完全自律Policy" : "組織Policy内"}: ${context.stage} / ${context.operation}${context.method ? ` / ${context.method}` : ""}${context.host ? ` / ${context.host}` : ""}`,
   };
 }
 

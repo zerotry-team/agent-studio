@@ -149,7 +149,9 @@ export async function executeHttpTool(
   const boundary = tool.http.response_boundary;
   const { text, truncated } = await readLimited(res, boundary?.max_bytes ?? MAX_RESPONSE_BYTES);
   if (res.status < 200 || res.status >= 300) {
-    const snippet = text.replace(/\s+/g, " ").trim().slice(0, ERROR_SNIPPET_CHARS);
+    // 社内APIのerror bodyにも個人情報や内部診断情報が含まれ得る。
+    // response boundary付きのToolではstatusだけをモデルへ返し、raw bodyは破棄する。
+    const snippet = boundary ? "" : text.replace(/\s+/g, " ").trim().slice(0, ERROR_SNIPPET_CHARS);
     return { result: textResult(MESSAGES.httpError(res.status, snippet), true), auditDetail: `HTTP ${res.status}` };
   }
   if (truncated && boundary) {

@@ -69,6 +69,13 @@ describe("OpenAPI Connector Builder", () => {
     expect(() => inspectOpenApi({ document, internal_api: true, selected_operation_ids: ["getInvoice"] })).toThrow(/field/);
   });
 
+  it("社内APIは認証設定を必須にする", () => {
+    const unauthenticated = structuredClone(document);
+    delete (unauthenticated as { security?: unknown }).security;
+    (unauthenticated.paths["/invoices/{invoice_id}"].get as Record<string, unknown>)["x-agent-studio-response-fields"] = ["amount"];
+    expect(() => inspectOpenApi({ document: unauthenticated, internal_api: true, selected_operation_ids: ["getInvoice"] })).toThrow(/認証/);
+  });
+
   it("operation単位のsecurityも認証必須として扱う", () => {
     const operationSecurity = structuredClone(document);
     delete (operationSecurity as { security?: unknown }).security;

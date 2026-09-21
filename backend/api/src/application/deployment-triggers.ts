@@ -116,10 +116,9 @@ export class DeploymentTriggerService {
       if (!deployment) throw conflict("Production Deploymentがhealthyではありません");
       const minute = new Date(Date.now() - 60_000);
       const day = new Date(Date.now() - 24 * 60 * 60_000);
-      const [perMinute, perDay] = await Promise.all([
-        tx.deployment_trigger_invocations.count({ where: { credential_type: credentialType, credential_id: credential.id, created_at: { gte: minute }, status: "accepted" } }),
-        tx.deployment_trigger_invocations.count({ where: { credential_type: credentialType, credential_id: credential.id, created_at: { gte: day }, status: "accepted" } }),
-      ]);
+      // interactive transactionは同じpg clientを使うため、queryを並列発行しない。
+      const perMinute = await tx.deployment_trigger_invocations.count({ where: { credential_type: credentialType, credential_id: credential.id, created_at: { gte: minute }, status: "accepted" } });
+      const perDay = await tx.deployment_trigger_invocations.count({ where: { credential_type: credentialType, credential_id: credential.id, created_at: { gte: day }, status: "accepted" } });
       if (perMinute >= credential.rate_limit_per_minute) throw new AppError("rate_limit_exceeded", 429, "1分あたりの実行上限を超えました");
       if (perDay >= credential.max_runs_per_day) throw new AppError("usage_cap_exceeded", 429, "24時間あたりのusage capを超えました");
       const run = await createRunInTx(tx, credential.organization_id, credential.deployment_id, input.trim(), null);

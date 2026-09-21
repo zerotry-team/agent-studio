@@ -351,8 +351,8 @@ export class OrganizationService {
   }
 
   async setAutoApprovalPolicy(actor: MemberActor, raw: UpdateAutoApprovalPolicyInput): Promise<AutoApprovalPolicyDto> {
-    requireRole(actor, "admin");
     const config = autoApprovalPolicyConfigSchema.parse(raw);
+    requireRole(actor, config.mode === "full_autonomy" ? "owner" : "admin");
     return this.deps.db.run(scopeOf(actor), async (tx) => {
       const existing = await tx.organization_auto_approval_policies.findUnique({ where: { organization_id: actor.organizationId } });
       const version = (existing?.version ?? 0) + 1;
