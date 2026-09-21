@@ -287,4 +287,38 @@ describe("ToolCallService: Run専用Browser endpoint", () => {
     const authenticated = { ...publicGrant, browser: { ...publicGrant.browser!, mode: "authenticated_restricted" as const } };
     expect(catalog.visibleFor(authenticated).map((tool) => tool.name)).toEqual(["browser_snapshot"]);
   });
+
+  it("browser_uploadはpolicy欠落時もGatewayが承認を強制し、承認消費後だけ実行する", async () => {
+    const dynamicConfig = runtimeToolConfigSchema.parse({
+      upstream_mcp: [{
+        name: "browser", url: "http://browser-session.invalid/mcp", dynamic_session_endpoint: "browser",
+        tools: [{ name: "browser_upload", description: "upload", input_schema: { type: "object" }, risk: "external_send", reads_untrusted_content: true }],
+      }],
+    });
+    const catalog = new ToolCatalog(dynamicConfig, async () => [], logger);
+    await catalog.refreshUpstreams();
+    const upstream = { callTool: vi.fn(async () => textResult("uploaded", false)) };
+    const controller = {
+      createApproval: vi.fn(async () => ({ approval_id: APPROVAL_ID, status: "approved" as const })),
+      getApproval: vi.fn(),
+      consumeApproval: vi.fn(async () => ({ approval_id: APPROVAL_ID, status: "consumed" as const })),
+    };
+    const service = new ToolCallService({
+      catalog, controller, audit: { record: vi.fn() }, executeHttp: vi.fn(), upstream,
+      approvalWaitMs: 0, approvalPollIntervalMs: 1, logger,
+    });
+    const browserGrant: SessionGrant = {
+      ...grant([]),
+      allowed_tools: ["browser_upload"],
+      browser: { endpoint: "http://10.40.1.25:8931/mcp/run-token", mode: "authenticated_restricted", allow_public_web: false, allowed_domains: ["example.com"] },
+    };
+    const args = { selector: "#file", artifact_id: "artifact-1", destination: "https://example.com/upload", filename: "report.csv", sha256: "a".repeat(64) };
+    await service.call(browserGrant, "browser_upload", args);
+    expect(controller.createApproval).toHaveBeenCalledWith(expect.objectContaining({
+      tool: "browser_upload", args_preview: canonicalJson(args), risk: "external_send",
+      reason: "外部への送信には実行直前の承認が必要です",
+    }));
+    expect(controller.consumeApproval.mock.invocationCallOrder[0]!).toBeLessThan(upstream.callTool.mock.invocationCallOrder[0]!);
+    expect(upstream.callTool).toHaveBeenCalledTimes(1);
+  });
 });

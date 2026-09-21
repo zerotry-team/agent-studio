@@ -212,6 +212,7 @@ jobs:
           CLUSTER=$(terraform -chdir="$ROOT" output -raw cluster_name)
           aws ecs wait services-stable --cluster "$CLUSTER" --services \
             "$(terraform -chdir="$ROOT" output -raw api_service_name)" \
+            "$(terraform -chdir="$ROOT" output -raw relay_service_name)" \
             "$(terraform -chdir="$ROOT" output -raw worker_service_name)" \
             "$(terraform -chdir="$ROOT" output -raw web_service_name)"
 
@@ -232,6 +233,7 @@ jobs:
           CLUSTER=$(terraform -chdir="$ROOT" output -raw cluster_name)
           for SERVICE in \
             "$(terraform -chdir="$ROOT" output -raw api_service_name)" \
+            "$(terraform -chdir="$ROOT" output -raw relay_service_name)" \
             "$(terraform -chdir="$ROOT" output -raw worker_service_name)" \
             "$(terraform -chdir="$ROOT" output -raw web_service_name)"; do
             TASK=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --desired-status RUNNING --query 'taskArns[0]' --output text)

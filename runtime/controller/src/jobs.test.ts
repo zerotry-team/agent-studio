@@ -87,6 +87,12 @@ function setup(statuses: Array<Partial<Task>>, opts: { maxConcurrentSessions?: n
       events.push({ sessionId, ...body });
     }),
     environmentKey: vi.fn(async () => "ek-rotated"),
+    browserProfile: vi.fn(async (profileId: string) => ({
+      profile_id: profileId,
+      runtime_object_key: `profiles/${profileId}/2099-01-01T00-00-00.000Z.json`,
+      allowed_domains: ["example.com"],
+      expires_at: "2099-01-01T00:00:00.000Z",
+    })),
   };
   const secrets = { saveEnvironmentKey: vi.fn(async () => undefined) };
   const grants = new GrantStore();

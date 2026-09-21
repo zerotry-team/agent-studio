@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { redactLogText } from "@agent-studio/contracts";
 import { ECSClient } from "@aws-sdk/client-ecs";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { S3Client } from "@aws-sdk/client-s3";
 import { ConfigError, loadConfig, type ControllerConfig } from "./config.js";
 import { Controller } from "./controller.js";
 import { GrantStore } from "./grants.js";
@@ -20,6 +21,8 @@ import {
 import { DisabledWorkspaceExecutor, DockerWorkspaceExecutor, type WorkspaceExecutor } from "./workspace-executor.js";
 import { DisabledGitPublisher, DockerGitPublisher } from "./git-publisher.js";
 import { DisabledBuilderResultCollector, DockerBuilderResultCollector } from "./builder-result-collector.js";
+import { createBrowserProfileStore } from "./browser-profile-store.js";
+import { BrowserProfileBroker } from "./browser-profile-broker.js";
 
 function readVersion(): string {
   try {
@@ -127,6 +130,11 @@ async function main(): Promise<void> {
   const grants = new GrantStore();
   const launcher = createLauncher(config, secrets, studio, logger);
   const browserLauncher = createBrowserLauncher(config, logger);
+  const browserProfileStore = createBrowserProfileStore(
+    config.browserProfileStore,
+    config.browserProfileStore.type === "s3" ? new S3Client({ region: config.region }) : undefined,
+  );
+  const browserProfileBroker = new BrowserProfileBroker(browserLauncher, browserProfileStore, auth, config.agentStudioUrl, logger);
   const workspaceExecutor = createWorkspaceExecutor(config, secrets, studio, logger);
   const gitPublisher = config.launcher.type === "docker"
     ? new DockerGitPublisher(config.launcher.image, studio, logger, config.launcher.network)
@@ -149,7 +157,7 @@ async function main(): Promise<void> {
     "設定を読み込みました",
   );
 
-  const controller = new Controller({ config, logger, auth, studio, grants, launcher, browserLauncher, workspaceExecutor, gitPublisher, builderResultCollector, secrets, controllerVersion: version });
+  const controller = new Controller({ config, logger, auth, studio, grants, launcher, browserLauncher, workspaceExecutor, gitPublisher, builderResultCollector, browserProfileBroker, secrets, controllerVersion: version });
   await controller.start();
 
   const shutdown = (signal: string) => {

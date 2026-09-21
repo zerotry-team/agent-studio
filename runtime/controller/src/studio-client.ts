@@ -4,6 +4,7 @@ import {
   approvalResponseSchema,
   environmentKeyResponseSchema,
   gitCredentialResponseSchema,
+  runtimeBrowserProfileSchema,
   registerResponseSchema,
   runtimeJobSchema,
   tokenResponseSchema,
@@ -16,6 +17,7 @@ import {
   type SessionGrant,
   type ToolAuditEvent,
   type GitCredentialResponse,
+  type RuntimeBrowserProfile,
 } from "@agent-studio/contracts";
 import type { z } from "zod";
 import type { IdentitySigner } from "./identity.js";
@@ -293,6 +295,7 @@ export interface StudioApi {
   sendAudit(events: ToolAuditEvent[]): Promise<void>;
   environmentKey(): Promise<string | null>;
   gitCredential(jobId: string): Promise<GitCredentialResponse>;
+  browserProfile(profileId: string): Promise<RuntimeBrowserProfile>;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -357,6 +360,14 @@ export class AgentStudioClient implements StudioApi {
 
   async gitCredential(jobId: string): Promise<GitCredentialResponse> {
     return parseResponse(gitCredentialResponseSchema, await this.call("POST", RUNTIME_API.gitCredential(jobId), { body: {} }), "git credential");
+  }
+
+  async browserProfile(profileId: string): Promise<RuntimeBrowserProfile> {
+    return parseResponse(
+      runtimeBrowserProfileSchema,
+      await this.call("GET", RUNTIME_API.browserProfile(profileId)),
+      "browser profile",
+    );
   }
 
   async sessionEvent(sessionId: string, body: SessionEventRequest): Promise<void> {

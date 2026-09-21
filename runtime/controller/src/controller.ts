@@ -20,6 +20,7 @@ import type { ControllerSecrets } from "./secrets.js";
 import type { WorkspaceExecutor } from "./workspace-executor.js";
 import type { GitPublisher } from "./git-publisher.js";
 import type { BuilderResultCollector } from "./builder-result-collector.js";
+import type { BrowserProfileBroker } from "./browser-profile-broker.js";
 import {
   RegistrationFailedError,
   RuntimeNotRegisteredError,
@@ -40,6 +41,7 @@ export interface ControllerDeps {
   workspaceExecutor: WorkspaceExecutor;
   gitPublisher: GitPublisher;
   builderResultCollector: BuilderResultCollector;
+  browserProfileBroker: BrowserProfileBroker;
   secrets: ControllerSecrets;
   controllerVersion: string;
   fetchImpl?: typeof fetch;
@@ -78,7 +80,7 @@ export class Controller {
   private stopping = false;
 
   constructor(private readonly deps: ControllerDeps) {
-    const { config, logger, grants, launcher, browserLauncher, workspaceExecutor, gitPublisher, builderResultCollector, studio, secrets } = deps;
+    const { config, logger, grants, launcher, browserLauncher, workspaceExecutor, gitPublisher, builderResultCollector, browserProfileBroker, studio, secrets } = deps;
     this.jobs = new JobHandler({
       grants,
       launcher,
@@ -86,6 +88,7 @@ export class Controller {
       workspaceExecutor,
       gitPublisher,
       builderResultCollector,
+      browserProfileBroker,
       studio,
       secrets,
       logger,

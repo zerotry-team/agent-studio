@@ -54,6 +54,10 @@ const envSchema = z
     BROWSER_WORKER_CONTAINER_NAME: z.string().min(1).default("browser-session-worker"),
     BROWSER_WORKER_IMAGE: z.string().min(1).optional(),
     BROWSER_WORKER_DOCKER_NETWORK: z.string().min(1).optional(),
+    BROWSER_PROFILE_STORE: z.enum(["s3", "filesystem", "disabled"]).default("disabled"),
+    BROWSER_PROFILE_BUCKET: z.string().min(3).max(255).optional(),
+    BROWSER_PROFILE_KMS_KEY_ARN: z.string().min(20).optional(),
+    BROWSER_PROFILE_DIRECTORY: z.string().min(1).default("/tmp/agent-studio-browser-profiles"),
 
     BUILDER_WORKSPACE_EXECUTOR: z.enum(["disabled", "docker"]).default("disabled"),
     BUILDER_WORKSPACE_IMAGE: z.string().min(1).optional(),
@@ -97,6 +101,13 @@ const envSchema = z
       need("BROWSER_WORKER_SECURITY_GROUPS", "BROWSER_LAUNCHER=ecs");
     }
     if (env.BROWSER_LAUNCHER === "docker") need("BROWSER_WORKER_IMAGE", "BROWSER_LAUNCHER=docker");
+    if (env.BROWSER_PROFILE_STORE === "s3") {
+      need("BROWSER_PROFILE_BUCKET", "BROWSER_PROFILE_STORE=s3");
+      need("BROWSER_PROFILE_KMS_KEY_ARN", "BROWSER_PROFILE_STORE=s3");
+    }
+    if (env.NODE_ENV === "production" && env.BROWSER_LAUNCHER !== "disabled" && env.BROWSER_PROFILE_STORE !== "s3") {
+      ctx.addIssue({ code: "custom", path: ["BROWSER_PROFILE_STORE"], message: "本番のBrowser ProfileはS3 SSE-KMSへ保存してください" });
+    }
     if (env.BUILDER_WORKSPACE_EXECUTOR === "docker") need("BUILDER_WORKSPACE_IMAGE", "BUILDER_WORKSPACE_EXECUTOR=docker");
   });
 
@@ -144,6 +155,10 @@ export interface ControllerConfig {
   };
   launcher: LauncherConfig;
   browserLauncher: BrowserLauncherConfig;
+  browserProfileStore:
+    | { type: "s3"; bucket: string; kmsKeyArn: string }
+    | { type: "filesystem"; directory: string }
+    | { type: "disabled" };
   workspaceExecutor: WorkspaceExecutorConfig;
   gatewayPublicUrl: string;
   gatewayCatalogUrl: string;
@@ -224,6 +239,11 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ControllerC
     },
     launcher,
     browserLauncher,
+    browserProfileStore: e.BROWSER_PROFILE_STORE === "s3"
+      ? { type: "s3", bucket: e.BROWSER_PROFILE_BUCKET!, kmsKeyArn: e.BROWSER_PROFILE_KMS_KEY_ARN! }
+      : e.BROWSER_PROFILE_STORE === "filesystem"
+        ? { type: "filesystem", directory: e.BROWSER_PROFILE_DIRECTORY }
+        : { type: "disabled" },
     workspaceExecutor: e.BUILDER_WORKSPACE_EXECUTOR === "docker"
       ? {
           type: "docker",

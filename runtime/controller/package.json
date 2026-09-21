@@ -17,6 +17,7 @@
     "@agent-studio/contracts": "workspace:^",
     "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/client-ecs": "^3.900.0",
+    "@aws-sdk/client-s3": "^3.900.0",
     "@aws-sdk/client-secrets-manager": "^3.900.0",
     "@aws-sdk/credential-providers": "^3.900.0",
     "@hono/node-server": "^1.19.17",
@@ -24,10 +25,12 @@
     "@smithy/signature-v4": "^5.7.3",
     "hono": "^4.13.8",
     "pino": "^10.3.1",
+    "ws": "^8.18.3",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.23.13",
     "typescript": "5.9.3",
     "vitest": "^3.2.7"

@@ -22,6 +22,7 @@ __metadata:
     "@prisma/client": "npm:^7.0.0"
     "@types/node": "npm:^22.10.0"
     "@types/pg": "npm:^8.23.1"
+    "@types/ws": "npm:^8.18.1"
     aws-jwt-verify: "npm:^5.2.1"
     dotenv: "npm:^17.2.3"
     hono: "npm:^4.13.8"
@@ -34,6 +35,7 @@ __metadata:
     tsx: "npm:^4.23.13"
     typescript: "npm:5.9.3"
     vitest: "npm:^3.2.7"
+    ws: "npm:^8.18.3"
     yaml: "npm:^2.8.1"
     zod: "npm:^4.3.6"
   languageName: unknown
@@ -129,17 +131,20 @@ __metadata:
     "@agent-studio/contracts": "workspace:^"
     "@aws-crypto/sha256-js": "npm:^5.2.0"
     "@aws-sdk/client-ecs": "npm:^3.900.0"
+    "@aws-sdk/client-s3": "npm:^3.900.0"
     "@aws-sdk/client-secrets-manager": "npm:^3.900.0"
     "@aws-sdk/credential-providers": "npm:^3.900.0"
     "@hono/node-server": "npm:^1.19.17"
     "@smithy/protocol-http": "npm:^5.6.2"
     "@smithy/signature-v4": "npm:^5.7.3"
     "@types/node": "npm:^22.10.0"
+    "@types/ws": "npm:^8.18.1"
     hono: "npm:^4.13.8"
     pino: "npm:^10.3.1"
     tsx: "npm:^4.23.13"
     typescript: "npm:5.9.3"
     vitest: "npm:^3.2.7"
+    ws: "npm:^8.18.3"
     zod: "npm:^4.3.6"
   languageName: unknown
   linkType: soft
@@ -2018,6 +2023,15 @@ __metadata:
     "@types/prop-types": "npm:*"
     csstype: "npm:^3.2.2"
   checksum: 10c0/44180549dd045f536ececd39e39aacdf828e76adc1c4a90b132f453e23cc370c4648d9102ae401172ebd8fd8b1977a901a39e214e53ec77171b27514b588c179
+  languageName: node
+  linkType: hard
+
+"@types/ws@npm:^8.18.1":
+  version: 8.18.1
+  resolution: "@types/ws@npm:8.18.1"
+  dependencies:
+    "@types/node": "npm:*"
+  checksum: 10c0/61aff1129143fcc4312f083bc9e9e168aa3026b7dd6e70796276dcfb2c8211c4292603f9c4864fae702f2ed86e4abd4d38aa421831c2fd7f856c931a481afbab
   languageName: node
   linkType: hard
 
@@ -8250,6 +8264,21 @@ __metadata:
   version: 1.0.2
   resolution: "wrappy@npm:1.0.2"
   checksum: 10c0/56fece1a4018c6a6c8e28fbc88c87e0fbf4ea8fd64fc6c63b18f4acc4bd13e0ad2515189786dd2c30d3eec9663d70f4ecf699330002f8ccb547e4a18231fc9f0
+  languageName: node
+  linkType: hard
+
+"ws@npm:^8.18.3":
+  version: 8.21.3
+  resolution: "ws@npm:8.21.3"
+  peerDependencies:
+    bufferutil: ^4.0.1
+    utf-8-validate: ">=5.0.2"
+  peerDependenciesMeta:
+    bufferutil:
+      optional: true
+    utf-8-validate:
+      optional: true
+  checksum: 10c0/7b28dc2863ea0e2cece68d142a3eee90361021b73f750431e6d8076bb7dede5fdfdb75b3d29534b62f411261147b76b1bc80fb5cc63ab0aabd467280e85b22e0
   languageName: node
   linkType: hard
 

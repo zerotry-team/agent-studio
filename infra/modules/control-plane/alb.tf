@@ -44,6 +44,26 @@ resource "aws_lb_target_group" "api" {
   }
 }
 
+# Human Loginのuser/runtime WebSocketを同じprocess内でpairする専用target。
+# 通常APIを複数台へscaleしても、Relayは単一serviceへ集約する。
+resource "aws_lb_target_group" "relay" {
+  name                 = "${local.name}-relay"
+  port                 = 3200
+  protocol             = "HTTP"
+  target_type          = "ip"
+  vpc_id               = module.network.vpc_id
+  deregistration_delay = 30
+
+  health_check {
+    path                = "/health"
+    matcher             = "200"
+    interval            = 15
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+}
+
 resource "aws_lb_target_group" "web" {
   name                 = "${local.name}-web"
   port                 = 3201
@@ -98,6 +118,29 @@ resource "aws_lb_listener_rule" "api" {
   condition {
     path_pattern {
       values = local.api_path_patterns
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "relay" {
+  listener_arn = aws_lb_listener.this.arn
+  priority     = 5
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.relay.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Origin-Verify"
+      values           = [random_password.origin_verify.result]
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = ["/relay/*"]
     }
   }
 }

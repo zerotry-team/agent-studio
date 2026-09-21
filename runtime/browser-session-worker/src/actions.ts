@@ -23,6 +23,8 @@ export const BROWSER_TOOLS: Tool[] = [
   { name: "browser_select_option", description: "select要素の値を変更します", inputSchema: object({ selector: { type: "string" }, value: { type: "string" } }, ["selector", "value"]) },
   { name: "browser_hover", description: "要素へホバーします", inputSchema: object({ selector: { type: "string" }, text: { type: "string" } }) },
   { name: "browser_drag", description: "要素間をドラッグします", inputSchema: object({ source_selector: { type: "string" }, target_selector: { type: "string" } }, ["source_selector", "target_selector"]) },
+  { name: "browser_download", description: "クリックで開始されるDownloadをこのRun専用Artifactとして安全検査し、本文をモデルへ返さずメタデータだけを返します", inputSchema: object({ selector: { type: "string" }, text: { type: "string" } }) },
+  { name: "browser_upload", description: "このRunで取得したArtifact IDだけを現在の許可済みWeb画面へUploadします。Download時のfilenameとSHA-256の一致を必須にします", inputSchema: object({ selector: { type: "string" }, artifact_id: { type: "string" }, destination: { type: "string" }, filename: { type: "string" }, sha256: { type: "string" } }, ["selector", "artifact_id", "destination", "filename", "sha256"]) },
   { name: "computer_action", description: "許可されたBrowser window内でclick、type、scroll、dragを実行し、操作後のScreenshotを返します", inputSchema: object({ action: { type: "string", enum: ["click", "type", "scroll", "drag"] }, x: { type: "number" }, y: { type: "number" }, to_x: { type: "number" }, to_y: { type: "number" }, value: { type: "string" }, delta_x: { type: "number" }, delta_y: { type: "number" } }, ["action"]) },
   { name: "browser_exec_js", description: "公開ページを制限付きPlaywrightコードで操作します", inputSchema: object({ code: { type: "string" }, timeout_ms: { type: "number" }, expects: { type: "string" } }, ["code"]) },
 ];
@@ -112,6 +114,27 @@ export async function callBrowserTool(session: BrowserSession, name: string, arg
       case "browser_drag":
         await page.locator(String(args.source_selector)).first().dragTo(page.locator(String(args.target_selector)).first());
         return afterAction(session, "dragged");
+      case "browser_download": {
+        const [download] = await Promise.all([
+          page.waitForEvent("download", { timeout: session.config.actionTimeoutMs }),
+          locator(session, args).click(),
+        ]);
+        return text(await session.saveDownload(download));
+      }
+      case "browser_upload": {
+        const destination = new URL(String(args.destination ?? ""));
+        const current = new URL(page.url());
+        if (destination.protocol !== "https:" && destination.protocol !== "http:") throw new Error("Upload先URLが不正です");
+        if (destination.hostname.toLowerCase() !== current.hostname.toLowerCase()) throw new Error("Upload先が現在の画面と一致しません");
+        assertUrlAllowed(destination.toString(), session.config.allowedDomains, session.config.allowPublicWeb);
+        const artifact = session.artifactForUpload({
+          artifactId: String(args.artifact_id ?? ""),
+          filename: String(args.filename ?? ""),
+          sha256: String(args.sha256 ?? ""),
+        });
+        await page.locator(String(args.selector)).first().setInputFiles({ name: artifact.filename, mimeType: artifact.mime_type, buffer: artifact.body });
+        return afterAction(session, `uploaded artifact ${artifact.artifact_id} (${artifact.filename}, ${artifact.sha256}) to ${destination.origin}`);
+      }
       case "computer_action": {
         if (!session.config.computerActionsEnabled) throw new Error("このSessionではComputer Actionが許可されていません");
         const point = (name: "x" | "y" | "to_x" | "to_y", max: number, required = true) => {

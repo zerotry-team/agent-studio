@@ -55,6 +55,7 @@ export function createRuntimeRoutes(service: RuntimeApiService) {
     return c.body(null, 204);
   });
   authed.get("/environment-key", async (c) => c.json(await service.environmentKey(c.get("runtime"))));
+  authed.get("/browser-profiles/:id", async (c) => c.json(await service.browserProfile(c.get("runtime"), uuid.parse(c.req.param("id")))));
 
   app.route("/", authed);
   return app;

@@ -194,6 +194,43 @@ resource "aws_ecs_service" "api" {
   depends_on = [aws_lb_listener_rule.api]
 }
 
+# Human Login Relayはprocess内でWebSocket peerをpairするため常に1 task。
+# max=100/min=0で更新中の旧新task同時稼働を避け、split-brainを防ぐ。
+# 切断したRuntimeと利用者は新taskへ自動再接続する。
+resource "aws_ecs_service" "relay" {
+  name                   = "${local.name}-relay"
+  cluster                = aws_ecs_cluster.this.id
+  task_definition        = aws_ecs_task_definition.api.arn
+  desired_count          = local.services_enabled ? 1 : 0
+  launch_type            = "FARGATE"
+  platform_version       = "LATEST"
+  enable_execute_command = false
+  propagate_tags         = "SERVICE"
+
+  health_check_grace_period_seconds  = 60
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  network_configuration {
+    subnets          = module.network.private_subnet_ids
+    security_groups  = [aws_security_group.api.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.relay.arn
+    container_name   = "api"
+    container_port   = 3200
+  }
+
+  depends_on = [aws_lb_listener_rule.relay]
+}
+
 # ---- worker（api イメージを command で切り替える。コンテナ名は契約 §4.2 に合わせて api） ----
 
 resource "aws_ecs_task_definition" "worker" {

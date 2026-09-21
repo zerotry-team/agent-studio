@@ -18,7 +18,7 @@ import type {
   ToolVersionSpec,
   GitCredentialResponse,
 } from "@agent-studio/contracts";
-import { adapterDescriptorSchema, browserLoginResultSchema, builderWorkspaceResultSchema, canonicalJson, gitPublishResultSchema } from "@agent-studio/contracts";
+import { adapterDescriptorSchema, browserLoginResultSchema, builderWorkspaceResultSchema, canonicalJson, gitPublishResultSchema, type RuntimeBrowserProfile } from "@agent-studio/contracts";
 import { AppError, notFound } from "../domain/errors.js";
 import { evaluateOrganizationAutoApproval } from "../domain/organization-auto-approval.js";
 import { recordAudit } from "../infrastructure/audit.js";
@@ -501,6 +501,28 @@ export class RuntimeApiService {
     return row ? ({ ...row.payload, job_id: row.id } as RuntimeJob) : null;
   }
 
+  async browserProfile(ctx: RuntimeContext, profileId: string): Promise<RuntimeBrowserProfile> {
+    return this.deps.db.org(ctx.organizationId, async (tx) => {
+      await tx.browser_profiles.updateMany({
+        where: { id: profileId, runtime_id: ctx.runtimeId, status: "active", expires_at: { lte: new Date() } },
+        data: { status: "expired" },
+      });
+      const profile = await tx.browser_profiles.findFirst({
+        where: { id: profileId, runtime_id: ctx.runtimeId, status: "active", expires_at: { gt: new Date() } },
+      });
+      if (!profile?.runtime_object_key || !profile.expires_at) throw notFound("有効なBrowser Profile");
+      const domains = Array.isArray(profile.allowed_domains)
+        ? profile.allowed_domains.filter((value): value is string => typeof value === "string")
+        : [];
+      return {
+        profile_id: profile.id,
+        runtime_object_key: profile.runtime_object_key,
+        allowed_domains: domains,
+        expires_at: profile.expires_at.toISOString(),
+      };
+    });
+  }
+
   async jobResult(ctx: RuntimeContext, jobId: string, req: JobResultRequest): Promise<void> {
     let autoMergeChangeSetId: string | null = null;
     await this.deps.db.org(ctx.organizationId, async (tx) => {
@@ -522,6 +544,14 @@ export class RuntimeApiService {
         if (!login) throw notFound("Browser Login Session");
         const profile = await tx.browser_profiles.findFirst({ where: { id: login.profile_id, runtime_id: ctx.runtimeId } });
         if (!profile) throw notFound("Browser Profile");
+        if (login.status === "cancelled") {
+          await recordAudit(tx, {
+            organizationId: ctx.organizationId, actorType: "runtime", actorId: ctx.runtimeId,
+            action: "browser_profile.login.result_ignored", targetType: "browser_profile", targetId: profile.id,
+            sourceIp: ctx.sourceIp, result: "success", detail: { login_session_id: login.id, reason: "cancelled_by_user" },
+          });
+          return;
+        }
         if (req.status === "succeeded") {
           const output = browserLoginResultSchema.safeParse(req.output);
           const allowed = Array.isArray(profile.allowed_domains) ? profile.allowed_domains.filter((value): value is string => typeof value === "string").sort() : [];
@@ -537,6 +567,14 @@ export class RuntimeApiService {
             status: "active", runtime_object_key: output.data.runtime_object_key,
             last_verified_at: now, expires_at: new Date(output.data.expires_at), revoked_at: null,
           } });
+          if (profile.runtime_object_key && profile.runtime_object_key !== output.data.runtime_object_key) {
+            await tx.runtime_jobs.create({ data: {
+              organization_id: ctx.organizationId,
+              runtime_id: ctx.runtimeId,
+              type: "revoke_browser_profile",
+              payload: { type: "revoke_browser_profile", profile_id: profile.id, runtime_object_key: profile.runtime_object_key },
+            } });
+          }
           await tx.browser_login_sessions.update({ where: { id: login.id }, data: { status: "succeeded", completed_at: now, error: null } });
           if (login.human_action_id) await tx.human_actions.updateMany({
             where: { id: login.human_action_id, status: "pending" }, data: { status: "completed", completed_at: now },
@@ -560,7 +598,11 @@ export class RuntimeApiService {
             }
           }
         } else {
-          await tx.browser_login_sessions.update({ where: { id: login.id }, data: { status: "failed", completed_at: new Date(), error: (req.error ?? "RuntimeでHuman Loginを完了できませんでした").slice(0, 2000) } });
+          const expired = login.expires_at <= new Date();
+          await tx.browser_login_sessions.update({ where: { id: login.id }, data: {
+            status: expired ? "expired" : "failed", completed_at: new Date(),
+            error: expired ? "Human Login Sessionの有効期限が切れました" : (req.error ?? "RuntimeでHuman Loginを完了できませんでした").slice(0, 2000),
+          } });
         }
         await recordAudit(tx, {
           organizationId: ctx.organizationId, actorType: "runtime", actorId: ctx.runtimeId,
@@ -568,6 +610,18 @@ export class RuntimeApiService {
           sourceIp: ctx.sourceIp, result: req.status === "succeeded" ? "success" : "failure",
           detail: { login_session_id: login.id, profile_body_returned_to_control_plane: false, auto_resumed: req.status === "succeeded" && Boolean(login.project_id) },
         });
+      }
+      if (job.type === "revoke_browser_profile" && req.status === "succeeded") {
+        const payload = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)
+          ? job.payload as Record<string, unknown> : {};
+        const profileId = typeof payload.profile_id === "string" ? payload.profile_id : null;
+        const objectKey = typeof payload.runtime_object_key === "string" ? payload.runtime_object_key : null;
+        if (profileId && objectKey) {
+          await tx.browser_profiles.updateMany({
+            where: { id: profileId, runtime_id: ctx.runtimeId, status: "revoked", runtime_object_key: objectKey },
+            data: { runtime_object_key: null },
+          });
+        }
       }
       if (req.status === "failed" && job.type === "start_session") {
         if (job.session_id) {
