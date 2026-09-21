@@ -25,6 +25,20 @@ describe("parseToolConfig", () => {
     expect(config.upstream_mcp).toEqual([]);
   });
 
+  it("署名済みAdapterのdelivery証跡を保持する", () => {
+    const delivery = {
+      connector_key: "contract-lookup",
+      contract_hash: "a".repeat(64),
+      image_digest: `sha256:${"b".repeat(64)}`,
+      source_commit: "c".repeat(40),
+      package_signature: "signed-package-evidence",
+    };
+    const config = parseToolConfig(JSON.stringify({
+      tools: [{ ...httpTool("http://127.0.0.1:8092/lookup", "lookup_contract"), delivery }],
+    }), "delivery");
+    expect(config.tools[0]!.delivery).toEqual(delivery);
+  });
+
   it("接続先のホストに {引数} を使う設定は拒否する", () => {
     expect(() => parseToolConfig(JSON.stringify({ tools: [httpTool("https://{host}/products")] }), "t")).toThrow(ToolConfigError);
     expect(() => parseToolConfig(JSON.stringify({ tools: [httpTool("https://api.internal:{port}/x")] }), "t")).toThrow(/ホスト/);

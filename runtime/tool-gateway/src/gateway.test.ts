@@ -105,6 +105,13 @@ describe("Tool Gateway（MCP over HTTP）", () => {
           description: "商品を取得します",
           risk: "read",
           input_schema: { type: "object", properties: { product_id: { type: "string" } }, required: ["product_id"] },
+          delivery: {
+            connector_key: "product-adapter",
+            contract_hash: "a".repeat(64),
+            image_digest: `sha256:${"b".repeat(64)}`,
+            source_commit: "c".repeat(40),
+            package_signature: "signed-product-adapter",
+          },
           http: { method: "GET", url: "http://demo.internal/products/{product_id}" },
         },
         {
@@ -250,8 +257,9 @@ describe("Tool Gateway（MCP over HTTP）", () => {
 
   it("内部のカタログ（Controller のハートビート用）", async () => {
     const res = await fetch(`${internalUrl}/internal/catalog`);
-    const entries = (await res.json()) as Array<{ name: string; risk: string; reads_untrusted_content: boolean }>;
+    const entries = (await res.json()) as Array<{ name: string; risk: string; reads_untrusted_content: boolean; delivery?: unknown }>;
     expect(entries.map((e) => e.name)).toEqual(["get_product", "update_price", "browser_open", "browser_snapshot"]);
+    expect(entries.find((e) => e.name === "get_product")?.delivery).toMatchObject({ connector_key: "product-adapter" });
     expect(entries.find((e) => e.name === "browser_open")).toMatchObject({ risk: "read", reads_untrusted_content: true });
   });
 });

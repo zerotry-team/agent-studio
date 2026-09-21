@@ -29,6 +29,27 @@ describe("classifyCapabilityFulfillment", () => {
     expect(result).toMatchObject({ mode: "organization_tool", owner: "organization", execution_location: "runtime" });
   });
 
+  it("登録済み企業専用Toolの再利用先をStudioではなくRuntimeに保つ", () => {
+    const requirement: CapabilityRequirementDto = {
+      ...missing("社内契約DBを照会する"),
+      state: "resolved",
+      connector_name: "company contract lookup",
+      tool_names: ["lookup_contract"],
+      fulfillment: {
+        mode: "reuse",
+        owner: "organization",
+        execution_location: "runtime",
+        reason: "署名済みAdapter packageを企業専用Runtimeから再利用します",
+        availability_target_minutes: null,
+      },
+    };
+    expect(classifyCapabilityFulfillment("社内契約DBを照会する", requirement)).toMatchObject({
+      mode: "reuse",
+      owner: "organization",
+      execution_location: "runtime",
+    });
+  });
+
   it("GitHubが実装先として書かれていても社内DB能力は共有Toolにしない", () => {
     const result = classifyCapabilityFulfillment(
       "会社のGitHubリポジトリへ専用バックエンドを作り、社内サーバーへ接続する",

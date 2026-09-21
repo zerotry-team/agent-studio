@@ -398,6 +398,9 @@ export class RunDriver {
           `OpenAIエラー [${diagnostic.code ?? "unknown"}] ${diagnostic.message}${diagnostic.request_id ? `（Request ID: ${diagnostic.request_id}）` : ""}`,
           diagnostic,
         ));
+        // Toolが成功していても、その後にモデル/streamが失敗したターンを成功扱いしない。
+        // 再接続後にidleならonIdleがこのエラーでRunをfailedへ確定する。
+        state.lastTurnError = diagnostic.message;
         await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** attempt, 15_000)));
       } finally {
         clearInterval(watchdog);
