@@ -740,6 +740,10 @@ export class BuilderProjectService {
       if (!release) throw conflict("承認待ちのProduction候補がありません");
       const action = await tx.human_actions.findFirst({ where: { project_id: id, type: "production_approval", status: "pending" } });
       if (!action) throw conflict("Production承認操作が見つかりません");
+      const previewRun = release.preview_run_id
+        ? await tx.runs.findFirst({ where: { id: release.preview_run_id, organization_id: actor.organizationId } })
+        : null;
+      if (!previewRun?.input.trim()) throw conflict("Previewで成功した代表入力が見つかりません");
 
       const previous = await tx.deployments.findFirst({
         where: { organization_id: actor.organizationId, agent_id: release.agent_id, stage: "production", status: "active" },
@@ -771,7 +775,7 @@ export class BuilderProjectService {
           update: { variables: stagingVariables.variables as Prisma.InputJsonValue },
         });
       }
-      return { release, action, previousId: previous?.id ?? null };
+      return { release, action, previousId: previous?.id ?? null, previewInput: previewRun.input.trim() };
     });
 
     const production = await this.environments.promote(actor, candidate.release.preview_deployment_id);
@@ -780,7 +784,7 @@ export class BuilderProjectService {
     const testCall = this.deps.env.NODE_ENV === "test" && toolName ? `\n[[call:${toolName} {}]]` : "";
     const run = await this.runs.create(actor, {
       deployment_id: production.id,
-      input: `Builder AgentのProduction限定確認です。依頼に必要な読み取り操作を1回だけ実行し、結果を日本語で簡潔に報告してください。書き込みや外部送信は行わないでください。${testCall}`,
+      input: `Builder AgentのProduction限定確認です。Previewで成功した次の代表入力を、同じ条件で1回だけ再実行してください。結果を日本語で簡潔に報告し、書き込みや外部送信は行わないでください。\n\n${candidate.previewInput}${testCall}`,
     });
     await this.deps.db.run(scopeOf(actor), async (tx) => {
       await tx.builder_releases.update({

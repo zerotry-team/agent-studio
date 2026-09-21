@@ -760,6 +760,11 @@ describe("Builder Project", () => {
       expect(approved.status, JSON.stringify(approved.body)).toBe(200);
       expect(approved.body.releases[0]).toMatchObject({ status: "production_running", production_deployment_id: expect.any(String), production_run_id: expect.any(String) });
       expect(approved.body.releases[0].build_id).toBe(pending.body.releases[0].build_id);
+      const [previewRun, productionRun] = await Promise.all([
+        h.admin.runs.findUniqueOrThrow({ where: { id: pending.body.releases[0].preview_run_id } }),
+        h.admin.runs.findUniqueOrThrow({ where: { id: approved.body.releases[0].production_run_id } }),
+      ]);
+      expect(productionRun.input).toContain(previewRun.input);
 
       const completed = await h.waitFor(
         () => h.request("GET", `/api/v1/builder-projects/${created.body.id}`, { email, org: org.id }),

@@ -7,7 +7,7 @@ import { approveBuilderProductionAction, completeBuilderHumanActionAction, resum
 import { provisionIntegrationRepositoryAction } from "@/actions/connections";
 import { builderActionDestination } from "@/components/builder-projects/action-destination";
 import { presentBuilderAction } from "@/components/builder-projects/action-presentation";
-import { buildEtaLabel, buildLogEntries, buildProgressPercent, buildProgressPhases, type BuildPhase } from "@/components/builder-projects/build-progress";
+import { buildEtaLabel, buildLogEntries, buildProgressPercent, buildProgressPhases, primaryBuilderRelease, type BuildPhase } from "@/components/builder-projects/build-progress";
 import { BuilderProjectStatusBadge } from "@/components/builder-projects/status";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -227,7 +227,7 @@ export function AgentBuildStatus({ project, onChanged }: { project: BuilderProje
   const { can } = useSession();
   const resume = useActionMutation(resumeBuilderProjectAction, { successMessage: "作成を再実行しました", onSuccess: onChanged });
   const pending = project.human_actions.find((action) => action.status === "pending");
-  const release = project.releases[0];
+  const release = primaryBuilderRelease(project);
   const canResume = can("builder.edit") && ["planning", "failed", "blocked"].includes(project.status);
   return <div className="space-y-5">
     {pending ? <NextAction action={pending} projectId={project.id} projectRequest={project.request} onChanged={onChanged} /> : null}

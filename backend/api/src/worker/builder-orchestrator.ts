@@ -2080,10 +2080,15 @@ export class BuilderOrchestrator {
         });
         const succeeded = run.status === "completed" && run.outcome === "succeeded" && usedExpectedTool && !hasRunError;
         const now = new Date();
+        const validationError = succeeded ? null : run.error ?? (hasRunError
+          ? "Production限定Runの実行中にエラーが記録されました"
+          : run.status === "completed" && !usedExpectedTool
+            ? "Production限定Runで必須Toolが実行されませんでした"
+            : `Production限定Runが${run.status}/${run.outcome}で終了しました`);
         await tx.builder_releases.update({ where: { id: release.id }, data: { status: succeeded ? "production_succeeded" : "production_failed", finished_at: now } });
         await tx.builder_validation_runs.updateMany({
           where: { project_id: release.project_id, environment: "production", status: "running" },
-          data: { status: succeeded ? "passed" : "failed", evidence: { release_id: release.id, deployment_id: release.production_deployment_id, run_id: run.id, build_id: release.build_id, config_hash: release.config_hash, same_build: true, limited_run: true, used_expected_tool: usedExpectedTool }, error_class: succeeded ? null : "production_limited_run", error: succeeded ? null : run.error ?? "Production限定Runが成功しませんでした", finished_at: now },
+          data: { status: succeeded ? "passed" : "failed", evidence: { release_id: release.id, deployment_id: release.production_deployment_id, run_id: run.id, build_id: release.build_id, config_hash: release.config_hash, same_build: true, limited_run: true, used_expected_tool: usedExpectedTool }, error_class: succeeded ? null : "production_limited_run", error: validationError, finished_at: now },
         });
         await tx.builder_projects.update({ where: { id: release.project_id }, data: succeeded ? { status: "completed", completed_at: now } : { status: "failed" } });
         await tx.audit_logs.createMany({ data: [{ organization_id: item.organization_id, actor_type: "system", actor_label: "Builder Orchestrator", action: "builder.production.complete", target_type: "builder_release", target_id: release.id, result: succeeded ? "success" : "failure", detail: { run_id: run.id, build_id: release.build_id, same_build: true, used_expected_tool: usedExpectedTool } }] });

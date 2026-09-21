@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BuilderProjectDto } from "@agent-studio/contracts";
-import { buildEtaLabel, buildProgressPercent, buildProgressPhases } from "./build-progress";
+import { buildEtaLabel, buildProgressPercent, buildProgressPhases, primaryBuilderRelease } from "./build-progress";
 
 function project(overrides: Partial<BuilderProjectDto> = {}): BuilderProjectDto {
   return {
@@ -13,6 +13,15 @@ function project(overrides: Partial<BuilderProjectDto> = {}): BuilderProjectDto 
       { id: "step-3", kind: "prepare_human_actions", status: "pending", attempts: 0, error_class: null, error: null, started_at: null, finished_at: null },
     ] }],
     ...overrides,
+  };
+}
+
+function release(status: BuilderProjectDto["releases"][number]["status"], id: string, createdAt: string): BuilderProjectDto["releases"][number] {
+  return {
+    id, status, agent_id: "agent-1", build_id: `build-${id}`, preview_deployment_id: `preview-${id}`, preview_run_id: `run-${id}`,
+    production_deployment_id: status === "production_succeeded" ? `production-${id}` : null,
+    production_run_id: status === "production_succeeded" ? `production-run-${id}` : null,
+    rollback_target_deployment_id: null, config_hash: "hash", required_tools: [], created_at: createdAt, finished_at: createdAt,
   };
 }
 
@@ -35,6 +44,21 @@ describe("Builder progress", () => {
     });
     expect(buildEtaLabel(waiting, Date.parse("2026-09-21T12:10:00.000Z"))).toBe("承認後 約1〜3分");
     expect(buildProgressPhases(waiting).at(-1)?.status).toBe("waiting");
+  });
+
+  it("完了後は新しい中止Previewより成功したProductionを進捗へ使う", () => {
+    const completed = project({
+      status: "completed",
+      completed_at: "2026-09-21T12:10:00.000Z",
+      releases: [
+        release("preview_cancelled", "duplicate", "2026-09-21T12:11:00.000Z"),
+        release("production_succeeded", "production", "2026-09-21T12:10:00.000Z"),
+      ],
+    });
+    expect(primaryBuilderRelease(completed)?.id).toBe("production");
+    expect(buildProgressPhases(completed).find((phase) => phase.key === "preview")?.status).toBe("completed");
+    expect(buildProgressPhases(completed).find((phase) => phase.key === "production")?.status).toBe("completed");
+    expect(buildProgressPhases(completed).some((phase) => phase.status === "failed")).toBe(false);
   });
 
   it("カスタム実装の確認待ちは確認後の所要時間を表示する", () => {
