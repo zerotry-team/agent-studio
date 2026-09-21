@@ -6,6 +6,7 @@ import type { Deps } from "./deps.js";
 import { parseGitHubAppMetadata, parseGitHubAppSecret, verifyGitHubWebhookSignature } from "../infrastructure/git/github-app.js";
 import { AppError } from "../domain/errors.js";
 import { verifyAdapterPackageSignature } from "../infrastructure/git/adapter-signature.js";
+import { BuilderGitAutomationService } from "./builder-git-automation.js";
 
 const deploymentEvidenceSchema = z.object({
   change_set_id: z.uuid(),
@@ -25,7 +26,11 @@ const deploymentEvidenceSchema = z.object({
 type WebhookHeaders = { delivery: string | null; event: string | null; signature: string | null };
 
 export class GitWebhookService {
-  constructor(private readonly deps: Deps) {}
+  private readonly automation: BuilderGitAutomationService;
+
+  constructor(private readonly deps: Deps) {
+    this.automation = new BuilderGitAutomationService(deps);
+  }
 
   async handle(headers: WebhookHeaders, rawBody: string): Promise<{ accepted: true; duplicate?: boolean }> {
     if (!headers.delivery || !headers.event) throw new AppError("invalid_webhook", 400, "GitHub webhook headersがありません");
@@ -49,7 +54,20 @@ export class GitWebhookService {
       if (duplicate) return { accepted: true, duplicate: true };
       const metadata = parseGitHubAppMetadata(connection.metadata);
       if (metadata.repository_id !== repositoryId) throw new AppError("repository_not_allowed", 403, "repository allowlist外です");
-      if (headers.event === "pull_request") await this.handlePullRequest(candidate.organization_id, metadata, secret, payload);
+      if (headers.event === "pull_request") {
+        await this.handlePullRequest(candidate.organization_id, metadata, secret, payload);
+        const rawPull = payload.pull_request && typeof payload.pull_request === "object" ? payload.pull_request as Record<string, unknown> : {};
+        const rawHead = rawPull.head && typeof rawPull.head === "object" ? rawPull.head as Record<string, unknown> : {};
+        if (["opened", "reopened", "synchronize"].includes(String(payload.action)) && typeof rawHead.sha === "string") {
+          await this.automation.tryAutoMergeByHead(candidate.organization_id, metadata.repository_url, rawHead.sha, null);
+        }
+      }
+      if ((headers.event === "check_suite" || headers.event === "check_run") && payload.action === "completed") {
+        const rawCheck = payload[headers.event] && typeof payload[headers.event] === "object" ? payload[headers.event] as Record<string, unknown> : {};
+        const nestedSuite = rawCheck.check_suite && typeof rawCheck.check_suite === "object" ? rawCheck.check_suite as Record<string, unknown> : {};
+        const headSha = typeof rawCheck.head_sha === "string" ? rawCheck.head_sha : typeof nestedSuite.head_sha === "string" ? nestedSuite.head_sha : null;
+        if (headSha) await this.automation.tryAutoMergeByHead(candidate.organization_id, metadata.repository_url, headSha, null);
+      }
       if (headers.event === "deployment_status") await this.handleDeployment(candidate.organization_id, metadata, payload);
       await this.deps.db.org(candidate.organization_id, (tx) => tx.git_webhook_deliveries.create({ data: {
         organization_id: candidate.organization_id,

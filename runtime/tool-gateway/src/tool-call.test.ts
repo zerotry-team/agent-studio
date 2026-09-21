@@ -167,6 +167,9 @@ describe("ToolCallService: 承認", () => {
       args_preview: canonicalJson(args),
       reason: "500 円を超える価格変更には承認が必要です",
       timeout_minutes: 60,
+      risk: "financial",
+      destination_host: "demo.internal",
+      method: "POST",
     });
     expect(controller.getApproval).toHaveBeenCalledTimes(2);
     expect(controller.consumeApproval).toHaveBeenCalledWith(APPROVAL_ID);

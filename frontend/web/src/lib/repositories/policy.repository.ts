@@ -1,5 +1,5 @@
 import "server-only";
-import type { Policy, PolicyDto } from "@agent-studio/contracts";
+import type { AutoApprovalPolicyDto, Policy, PolicyDto, SetAutoApprovalEmergencyStopInput, UpdateAutoApprovalPolicyInput } from "@agent-studio/contracts";
 import { ApiRepository } from "./base";
 
 export class PolicyRepository extends ApiRepository {
@@ -17,5 +17,17 @@ export class PolicyRepository extends ApiRepository {
 
   remove(id: string): Promise<void> {
     return this.api.delete(`/policies/${encodeURIComponent(id)}`);
+  }
+
+  getAutoApproval(): Promise<AutoApprovalPolicyDto> {
+    return this.api.get<AutoApprovalPolicyDto>("/organization/auto-approval-policy");
+  }
+
+  setAutoApproval(input: UpdateAutoApprovalPolicyInput): Promise<AutoApprovalPolicyDto> {
+    return this.api.put<AutoApprovalPolicyDto>("/organization/auto-approval-policy", input);
+  }
+
+  setAutoApprovalEmergencyStop(input: SetAutoApprovalEmergencyStopInput): Promise<AutoApprovalPolicyDto> {
+    return this.api.post<AutoApprovalPolicyDto>("/organization/auto-approval-policy/emergency-stop", input);
   }
 }

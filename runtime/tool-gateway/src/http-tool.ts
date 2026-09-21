@@ -1,4 +1,4 @@
-import type { HttpToolAuth, RuntimeHttpTool } from "@agent-studio/contracts";
+import { filterResponseFields, validateJsonSchema, type HttpToolAuth, type RuntimeHttpTool } from "@agent-studio/contracts";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { MESSAGES } from "./messages.js";
 import type { ConnectionSecretProvider } from "./secrets.js";
@@ -146,10 +146,29 @@ export async function executeHttpTool(
     throw err;
   }
 
-  const { text, truncated } = await readLimited(res, MAX_RESPONSE_BYTES);
+  const boundary = tool.http.response_boundary;
+  const { text, truncated } = await readLimited(res, boundary?.max_bytes ?? MAX_RESPONSE_BYTES);
   if (res.status < 200 || res.status >= 300) {
     const snippet = text.replace(/\s+/g, " ").trim().slice(0, ERROR_SNIPPET_CHARS);
     return { result: textResult(MESSAGES.httpError(res.status, snippet), true), auditDetail: `HTTP ${res.status}` };
+  }
+  if (truncated && boundary) {
+    return { result: textResult("社内APIの応答が許可されたサイズ上限を超えています", true), auditDetail: `HTTP ${res.status}; response_limit_exceeded` };
+  }
+  if (text.length > 0 && (boundary || tool.http.output_schema !== undefined)) {
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return { result: textResult("社内APIの応答がJSONではありません", true), auditDetail: `HTTP ${res.status}; invalid_json` };
+    }
+    try {
+      if (tool.http.output_schema !== undefined) validateJsonSchema(value, tool.http.output_schema);
+      if (boundary) value = filterResponseFields(value, boundary);
+    } catch (error) {
+      return { result: textResult(`社内APIのresponse contractに違反しています: ${(error as Error).message}`, true), auditDetail: `HTTP ${res.status}; response_contract_failed` };
+    }
+    return { result: textResult(JSON.stringify(value), false), auditDetail: `HTTP ${res.status}` };
   }
   const body = text.length > 0 ? text : `（HTTP ${res.status}、本文なし）`;
   return { result: textResult(truncated ? body + MESSAGES.truncated : body, false), auditDetail: `HTTP ${res.status}` };

@@ -168,6 +168,7 @@ export class ToolCatalog {
       if (tool.target.kind === "upstream" && tool.target.upstream.dynamic_session_endpoint === "browser") {
         if (!grant.browser) continue;
         if (grant.browser.mode === "authenticated_restricted" && tool.target.toolName === "browser_exec_js") continue;
+        if (tool.target.toolName === "computer_action" && !grant.allowed_tools.includes("computer_action")) continue;
       }
       out.push(tool);
     }

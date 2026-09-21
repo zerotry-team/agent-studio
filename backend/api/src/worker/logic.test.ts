@@ -50,9 +50,9 @@ describe("Builder factoring workflow", () => {
     expect(resolution.selected_tools).toContain("web_search");
     expect(resolution.requirements).toEqual(expect.arrayContaining([
       expect.objectContaining({ state: "resolved", tool_names: ["web_search"] }),
-      expect.objectContaining({ state: "missing", requirement: expect.stringMatching(/画像/) }),
+      expect.objectContaining({ state: "resolved", tool_names: ["generate_image"], requirement: expect.stringMatching(/画像/) }),
     ]));
-    expect(resolution.ready).toBe(false);
+    expect(resolution.ready).toBe(true);
   });
 
   it("曖昧な公開情報の調査にもWeb Searchを自動で割り当てる", () => {
@@ -67,24 +67,24 @@ describe("Builder factoring workflow", () => {
     ]));
   });
 
-  it("共通画像Toolが登録済みなら不足扱いせず、接続状態まで能力計画へ反映する", () => {
+  it("標準画像Toolが登録済みならConnectionなしで能力計画へ反映する", () => {
     const resolution = ensureRequiredScenarioTools(
       "ニュース用の挿絵画像を生成する",
       { requirements: [], selected_tools: [], missing_variables: [], ready: true },
       [{
-        name: "generate_social_image",
-        displayName: "投稿用画像を生成",
-        description: "OpenAIで画像を生成しSocial Routerへ保存する",
-        connectorId: "social-router",
-        connectorName: "Social Router",
-        ready: false,
+        name: "generate_image",
+        displayName: "画像を生成",
+        description: "OpenAIで画像を生成しRun Artifactへ保存する",
+        connectorId: null,
+        connectorName: "OpenAI標準機能",
+        ready: true,
       }],
     );
-    expect(resolution.selected_tools).toContain("generate_social_image");
+    expect(resolution.selected_tools).toContain("generate_image");
     expect(resolution.requirements).toEqual(expect.arrayContaining([
-      expect.objectContaining({ state: "needs_connection", tool_names: ["generate_social_image"] }),
+      expect.objectContaining({ state: "resolved", tool_names: ["generate_image"] }),
     ]));
-    expect(resolution.ready).toBe(false);
+    expect(resolution.ready).toBe(true);
   });
 
   it("ファクタリングとX投稿の必須Toolをモデルの候補漏れから補完する", () => {
@@ -133,9 +133,10 @@ describe("Builder factoring workflow", () => {
     expect(workflowDefinitionSchema.parse(workflow).version).toBe(2);
     expect(workflow?.steps).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "transform", key: "public-summary", output_template: expect.not.stringContaining("company") }),
-      expect.objectContaining({ type: "approval", key: "approve-publication", message: expect.stringContaining("最終本文") }),
+      expect.objectContaining({ type: "approval", key: "approve-publication", message: expect.stringContaining("最終本文"), on_denied: "stop-publication-denied" }),
       expect.objectContaining({ type: "condition", key: "route-publication", condition: expect.objectContaining({ path: "decision_code", operator: "ne", value: "reject" }) }),
       expect.objectContaining({ type: "tool", key: "publish-result", tool_name: "publish_post", arguments_template: expect.stringContaining("workflow_run_id") }),
+      expect.objectContaining({ type: "transform", key: "stop-publication-denied", output_template: expect.stringContaining('"recorded":true') }),
     ]));
     expect(JSON.stringify(workflow)).not.toContain("customer_name");
   });
@@ -193,7 +194,7 @@ describe("Builder conversational intake", () => {
       reason: "既存Toolなし",
       variables: [],
       fulfillment: {
-        mode: "organization_tool",
+        mode: "organization_private_adapter",
         owner: "organization",
         execution_location: "runtime",
         reason: "企業専用Runtimeへ実装",
@@ -252,7 +253,7 @@ describe("Builder conversational intake", () => {
       reason: "企業専用Toolを生成する",
       confidence: 1,
       variables: [],
-      fulfillment: { mode: "organization_tool" as const, owner: "organization" as const, execution_location: "runtime" as const, reason: "企業専用Runtimeへ実装", availability_target_minutes: null },
+      fulfillment: { mode: "organization_private_adapter" as const, owner: "organization" as const, execution_location: "runtime" as const, reason: "企業専用Runtimeへ実装", availability_target_minutes: null },
     }];
     expect(humanCapabilityRequirements(gaps, [])).toEqual([]);
   });

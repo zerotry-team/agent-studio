@@ -110,6 +110,11 @@ export const toBuilderRunDto = (run: builder_runs & { steps: builder_steps[] }):
   correlation_id: run.correlation_id,
   error_class: run.error_class,
   error: run.error,
+  error_fingerprint: run.error_fingerprint,
+  retryable: run.retryable,
+  next_action: run.next_action,
+  not_before: iso(run.not_before),
+  last_evidence_id: run.last_evidence_id,
   started_at: iso(run.started_at),
   finished_at: iso(run.finished_at),
   created_at: run.created_at.toISOString(),
@@ -528,7 +533,8 @@ export const toRunEventDto = (e: run_events): RunEventDto => ({
 
 export const toApprovalDto = (a: approvals, agent: { id: string; name: string } | null): ApprovalDto => ({
   id: a.id,
-  run_id: a.run_id ?? "",
+  run_id: a.run_id,
+  source: a.source,
   tool: a.tool,
   args_preview: a.args_preview,
   reason: a.reason,
@@ -538,6 +544,10 @@ export const toApprovalDto = (a: approvals, agent: { id: string; name: string } 
   decided_by: a.decided_by,
   decided_at: iso(a.decided_at),
   comment: a.comment,
+  auto_approved: a.auto_approved,
+  auto_approval_policy_id: a.auto_approval_policy_id,
+  auto_approval_policy_version: a.auto_approval_policy_version,
+  auto_approval_reason: a.auto_approval_reason,
   agent,
 });
 

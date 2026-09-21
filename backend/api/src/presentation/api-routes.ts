@@ -43,6 +43,10 @@ import {
   builderOpenApiInputSchema,
   builderMcpInputSchema,
   completeBuilderHumanActionSchema,
+  createDeploymentCredentialSchema,
+  createBrowserProfileSchema,
+  autoApprovalPolicyConfigSchema,
+  setAutoApprovalEmergencyStopSchema,
 } from "@agent-studio/contracts";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -108,6 +112,13 @@ export function createApiRoutes(deps: Deps, s: Services) {
     await s.organizations.deletePolicy(c.get("member"), id(c.req.param("id")));
     return c.body(null, 204);
   });
+  org.get("/organization/auto-approval-policy", async (c) => c.json(await s.organizations.getAutoApprovalPolicy(c.get("member"))));
+  org.put("/organization/auto-approval-policy", async (c) =>
+    c.json(await s.organizations.setAutoApprovalPolicy(c.get("member"), await json(c, autoApprovalPolicyConfigSchema))),
+  );
+  org.post("/organization/auto-approval-policy/emergency-stop", async (c) =>
+    c.json(await s.organizations.setAutoApprovalEmergencyStop(c.get("member"), await json(c, setAutoApprovalEmergencyStopSchema))),
+  );
 
   org.get("/tools", async (c) => c.json(await s.tools.list(c.get("member"))));
 
@@ -344,6 +355,19 @@ export function createApiRoutes(deps: Deps, s: Services) {
   org.post("/deployments/:id/archive", async (c) => c.json(await s.environments.archiveDeployment(c.get("member"), id(c.req.param("id")))));
   org.post("/deployments/:id/promote", async (c) => c.json(await s.environments.promote(c.get("member"), id(c.req.param("id"))), 201));
   org.post("/deployments/:id/rollback", async (c) => c.json(await s.environments.rollback(c.get("member"), id(c.req.param("id"))), 201));
+  org.get("/deployments/:id/api-keys", async (c) => c.json(await s.deploymentTriggers.listApiKeys(c.get("member"), id(c.req.param("id")))));
+  org.post("/deployments/:id/api-keys", async (c) => c.json(await s.deploymentTriggers.createApiKey(c.get("member"), id(c.req.param("id")), await json(c, createDeploymentCredentialSchema)), 201));
+  org.delete("/deployment-api-keys/:id", async (c) => { await s.deploymentTriggers.revokeApiKey(c.get("member"), id(c.req.param("id"))); return c.body(null, 204); });
+  org.get("/deployments/:id/webhooks", async (c) => c.json(await s.deploymentTriggers.listWebhooks(c.get("member"), id(c.req.param("id")))));
+  org.post("/deployments/:id/webhooks", async (c) => c.json(await s.deploymentTriggers.createWebhook(c.get("member"), id(c.req.param("id")), await json(c, createDeploymentCredentialSchema)), 201));
+  org.delete("/deployment-webhooks/:id", async (c) => { await s.deploymentTriggers.revokeWebhook(c.get("member"), id(c.req.param("id"))); return c.body(null, 204); });
+
+  org.get("/browser-profiles", async (c) => c.json(await s.browserProfiles.list(c.get("member"))));
+  org.post("/browser-profiles", async (c) => c.json(await s.browserProfiles.create(c.get("member"), await json(c, createBrowserProfileSchema)), 201));
+  org.post("/browser-profiles/:id/login-sessions", async (c) => c.json(await s.browserProfiles.startLogin(c.get("member"), id(c.req.param("id"))), 201));
+  org.get("/browser-login-sessions/:id", async (c) => c.json(await s.browserProfiles.getLogin(c.get("member"), id(c.req.param("id")))));
+  org.post("/browser-login-sessions/:id/cancel", async (c) => { await s.browserProfiles.cancelLogin(c.get("member"), id(c.req.param("id"))); return c.body(null, 204); });
+  org.delete("/browser-profiles/:id", async (c) => { await s.browserProfiles.revoke(c.get("member"), id(c.req.param("id"))); return c.body(null, 204); });
 
   org.get("/runs", async (c) => {
     const q = listQuerySchema.parse(c.req.query());

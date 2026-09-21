@@ -203,7 +203,7 @@ export function buildEtaLabel(project: BuilderProjectDto, nowMs: number): string
   if (project.status === "completed") return "完了";
   if (project.status === "failed" || project.status === "blocked" || project.status === "cancelled") return "停止中";
   const customImplementation = project.latest_plan?.requirements.some((requirement) =>
-    requirement.fulfillment?.mode === "organization_tool" || requirement.fulfillment?.mode === "shared_tool",
+    ["organization_private_adapter", "organization_tool", "shared_provider_adapter", "shared_tool"].includes(requirement.fulfillment?.mode ?? ""),
   ) || project.change_sets.some((change) => change.kind === "code_workspace");
   const pending = project.human_actions.find((action) => action.status === "pending");
   if (pending?.type === "production_approval") return "承認後 約1〜3分";
@@ -236,7 +236,21 @@ export function buildEtaLabel(project: BuilderProjectDto, nowMs: number): string
 export function buildLogEntries(project: BuilderProjectDto): BuildLogEntry[] {
   const entries: BuildLogEntry[] = [{ key: "project", at: project.created_at, status: "info", message: "作成リクエストを受け付けました" }];
   for (const run of [...project.runs].reverse()) {
-    entries.push({ key: `run-${run.id}`, at: run.started_at ?? run.created_at, status: run.status === "failed" ? "failed" : run.status === "running" ? "running" : "info", message: `試行 ${run.attempt} を${run.started_at ? "開始" : "待機"}しました` });
+    const retryScheduled = run.status === "queued" && run.not_before && Date.parse(run.not_before) > Date.now();
+    entries.push({
+      key: `run-${run.id}`,
+      at: run.started_at ?? run.created_at,
+      status: run.status === "failed" ? "failed" : run.status === "running" ? "running" : retryScheduled ? "waiting" : "info",
+      message: retryScheduled
+        ? `試行 ${run.attempt} は ${new Date(run.not_before!).toLocaleTimeString("ja-JP")} に自動再開します`
+        : `試行 ${run.attempt} を${run.started_at ? "開始" : "待機"}しました`,
+    });
+    if (run.status === "failed" && run.next_action) entries.push({
+      key: `run-action-${run.id}`,
+      at: run.finished_at ?? run.created_at,
+      status: run.retryable ? "waiting" : "failed",
+      message: `${run.error_class ?? "failure"}: ${run.next_action}`,
+    });
     for (const step of run.steps) {
       if (!step.started_at && step.status === "pending") continue;
       entries.push({

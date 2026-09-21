@@ -317,4 +317,72 @@ describe("GitHub App → signed Adapter delivery", () => {
     expect(await h.admin.builder_runs.count({ where: { project_id: projectId } })).toBe(builderRunsAfterRegistration);
     expect(await h.admin.builder_validation_runs.count({ where: { project_id: projectId, suite: "tool_catalog" } })).toBe(validationsAfterRegistration);
   });
+
+  it("組織Policy内ならPR作成後にRequired Checksを固定して自動mergeする", async () => {
+    mergeRequested = false;
+    const project = await h.admin.builder_projects.create({ data: {
+      organization_id: orgId,
+      request: "許可済みの企業専用Adapterを自動反映する",
+      status: "implementing",
+    } });
+    const change = await h.admin.builder_change_sets.create({ data: {
+      organization_id: orgId,
+      project_id: project.id,
+      kind: "code_workspace",
+      status: "applied",
+      summary: "許可済みAdapter",
+      risk: "read",
+      base_sha: baseSha,
+      head_sha: headSha,
+      artifacts: [
+        { type: "repository", id: "https://github.com/example/private-adapters.git" },
+        { type: "base_branch", id: "develop" },
+        { type: "git_branch", id: "builder/agent/check/1" },
+        { type: "diff", id: "d".repeat(64) },
+      ],
+    } });
+    await h.admin.builder_validation_runs.create({ data: {
+      organization_id: orgId,
+      project_id: project.id,
+      suite: "builder_session",
+      environment: "builder",
+      status: "passed",
+      evidence: { change_set_id: change.id, commit_sha: headSha, tests: [{ command: "unit", status: "passed", exit_code: 0 }] },
+      finished_at: new Date(),
+    } });
+    const policy = await h.request("PUT", "/api/v1/organization/auto-approval-policy", {
+      email: "owner-git@example.com",
+      org: orgId,
+      body: {
+        mode: "all_within_policy",
+        environments: ["staging"],
+        allowed_hosts: [],
+        allowed_operations: ["pull_request_merge"],
+        allowed_methods: ["GET"],
+        denied_methods: ["DELETE"],
+        limits: { requests_per_minute: 100, daily_cost_jpy: null, max_records_per_call: 100 },
+        production_promotion: false,
+        automatic_retry: true,
+        automatic_rollback: true,
+        expires_at: null,
+      },
+    });
+    expect(policy.status, JSON.stringify(policy.body)).toBe(200);
+    const job = await h.admin.runtime_jobs.create({ data: {
+      organization_id: orgId,
+      runtime_id: runtimeId,
+      type: "publish_builder_branch",
+      status: "leased",
+      payload: { type: "publish_builder_branch", project_id: project.id, change_set_id: change.id, connection_id: connectionId, repository_url: "https://github.com/example/private-adapters.git", base_branch: "develop", branch: "builder/agent/check/1", base_sha: baseSha, commit_sha: headSha },
+    } });
+    await service.jobResult(
+      { runtimeId, organizationId: orgId, sourceIp: "127.0.0.1" },
+      job.id,
+      { status: "succeeded", output: { change_set_id: change.id, branch: "builder/agent/check/1", base_sha: baseSha, head_sha: headSha, remote_ref: "refs/heads/builder/agent/check/1" } },
+    );
+    expect(await h.admin.builder_change_sets.findUniqueOrThrow({ where: { id: change.id } })).toMatchObject({ status: "merged", merge_sha: mergeSha });
+    expect(await h.admin.human_actions.findFirstOrThrow({ where: { project_id: project.id, type: "repository_merge" } })).toMatchObject({ status: "completed" });
+    expect(await h.admin.approvals.findFirstOrThrow({ where: { organization_id: orgId, tool: "pull_request_merge", args_preview: { contains: change.id } } })).toMatchObject({ auto_approved: true, status: "consumed" });
+    expect(await h.admin.audit_logs.findFirstOrThrow({ where: { organization_id: orgId, action: "builder.repository_merge.auto_approve", target_id: change.id } })).toMatchObject({ result: "success" });
+  });
 });

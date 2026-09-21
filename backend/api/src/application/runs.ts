@@ -12,7 +12,6 @@ import {
 import { conflict, notFound, preconditionFailed } from "../domain/errors.js";
 import { recordAudit } from "../infrastructure/audit.js";
 import type { Tx } from "../infrastructure/db/tenant-db.js";
-import { artifactPrefix } from "../infrastructure/storage/object-store.js";
 import { auditBy, requireApprover, requireRole, scopeOf, type MemberActor } from "./context.js";
 import type { Deps } from "./deps.js";
 import { runInclude, toApprovalDto, toRunDto, toRunEventDto, type RunWithRelations } from "./dto.js";
@@ -80,19 +79,26 @@ export class RunService {
     });
   }
 
-  /** 成果物の一覧（RUN-06）。組織と実行で決まるプレフィックスの中だけを返す */
+  /** 成果物の一覧（RUN-06）。検査済みメタデータをtenant DBから読み、合格品だけ短期URLを返す。 */
   async artifacts(actor: MemberActor, id: string): Promise<RunArtifactDto[]> {
-    const run = await this.deps.db.run(scopeOf(actor), (tx) => tx.runs.findFirst({ where: { id, organization_id: actor.organizationId } }));
+    const { run, artifacts } = await this.deps.db.run(scopeOf(actor), async (tx) => ({
+      run: await tx.runs.findFirst({ where: { id, organization_id: actor.organizationId } }),
+      artifacts: await tx.run_artifacts.findMany({ where: { run_id: id, organization_id: actor.organizationId }, orderBy: { created_at: "asc" } }),
+    }));
     if (!run) throw notFound("実行");
     const bucket = this.deps.env.ARTIFACTS_BUCKET;
-    if (!bucket) return [];
-    const prefix = artifactPrefix(actor.organizationId, id);
-    const objects = await this.deps.objects.list(bucket, prefix);
     return Promise.all(
-      objects.map(async (o) => ({
-        path: o.key.slice(prefix.length),
-        size_bytes: o.size,
-        download_url: await this.deps.objects.presignGet(bucket, o.key, 300),
+      artifacts.map(async (artifact) => ({
+        id: artifact.id,
+        path: artifact.path,
+        mime_type: artifact.mime_type,
+        size_bytes: artifact.size_bytes,
+        sha256: artifact.sha256,
+        scan_status: artifact.scan_status as RunArtifactDto["scan_status"],
+        retained_until: artifact.retained_until.toISOString(),
+        download_url: bucket && artifact.scan_status === "passed" && artifact.retained_until > new Date()
+          ? await this.deps.objects.presignGet(bucket, artifact.object_key, 300)
+          : null,
       })),
     );
   }

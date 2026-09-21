@@ -97,7 +97,7 @@ export class WorkflowEngine {
   constructor(private readonly deps: Deps) {}
 
   async tick(): Promise<void> {
-    const items = await this.deps.system.listActiveWorkflowRuns(20);
+    const items = await this.deps.system.listActiveWorkflowRuns(this.deps.env.WORKER_ID, 20);
     for (const item of items) {
       await this.deps.db
         .org(item.organization_id, (tx) => this.advance(tx, item.workflow_run_id))
@@ -293,7 +293,7 @@ export class EvalEngine {
   constructor(private readonly deps: Deps) {}
 
   async tick(): Promise<void> {
-    const items = await this.deps.system.listRunningEvalRuns(20);
+    const items = await this.deps.system.listRunningEvalRuns(this.deps.env.WORKER_ID, 20);
     for (const item of items) {
       await this.deps.db
         .org(item.organization_id, (tx) => this.evaluate(tx, item.eval_run_id))

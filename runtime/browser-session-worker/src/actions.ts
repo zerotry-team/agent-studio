@@ -23,6 +23,7 @@ export const BROWSER_TOOLS: Tool[] = [
   { name: "browser_select_option", description: "select要素の値を変更します", inputSchema: object({ selector: { type: "string" }, value: { type: "string" } }, ["selector", "value"]) },
   { name: "browser_hover", description: "要素へホバーします", inputSchema: object({ selector: { type: "string" }, text: { type: "string" } }) },
   { name: "browser_drag", description: "要素間をドラッグします", inputSchema: object({ source_selector: { type: "string" }, target_selector: { type: "string" } }, ["source_selector", "target_selector"]) },
+  { name: "computer_action", description: "許可されたBrowser window内でclick、type、scroll、dragを実行し、操作後のScreenshotを返します", inputSchema: object({ action: { type: "string", enum: ["click", "type", "scroll", "drag"] }, x: { type: "number" }, y: { type: "number" }, to_x: { type: "number" }, to_y: { type: "number" }, value: { type: "string" }, delta_x: { type: "number" }, delta_y: { type: "number" } }, ["action"]) },
   { name: "browser_exec_js", description: "公開ページを制限付きPlaywrightコードで操作します", inputSchema: object({ code: { type: "string" }, timeout_ms: { type: "number" }, expects: { type: "string" } }, ["code"]) },
 ];
 
@@ -111,6 +112,40 @@ export async function callBrowserTool(session: BrowserSession, name: string, arg
       case "browser_drag":
         await page.locator(String(args.source_selector)).first().dragTo(page.locator(String(args.target_selector)).first());
         return afterAction(session, "dragged");
+      case "computer_action": {
+        if (!session.config.computerActionsEnabled) throw new Error("このSessionではComputer Actionが許可されていません");
+        const point = (name: "x" | "y" | "to_x" | "to_y", max: number, required = true) => {
+          const value = Number(args[name]);
+          if ((!Number.isFinite(value) || value < 0 || value > max) && required) throw new Error(`${name}がViewport外です`);
+          return value;
+        };
+        const action = String(args.action ?? "");
+        if (action === "click") {
+          await page.mouse.click(point("x", session.config.viewport.width), point("y", session.config.viewport.height));
+        } else if (action === "type") {
+          const focused = await page.evaluate<{ type: string; autocomplete: string }>(
+            `(() => { const element = document.activeElement; return element && element.tagName === "INPUT"
+              ? { type: element.type || "", autocomplete: element.autocomplete || "" }
+              : { type: "", autocomplete: "" }; })()`,
+          );
+          if (focused.type === "password" || /(?:one-time-code|current-password|new-password)/i.test(focused.autocomplete)) {
+            throw new Error("password、MFAコードの入力は人間の操作が必要です");
+          }
+          await page.keyboard.type(String(args.value ?? ""));
+        } else if (action === "scroll") {
+          await page.mouse.wheel(Number(args.delta_x ?? 0), Number(args.delta_y ?? 0));
+        } else if (action === "drag") {
+          const x = point("x", session.config.viewport.width);
+          const y = point("y", session.config.viewport.height);
+          const toX = point("to_x", session.config.viewport.width);
+          const toY = point("to_y", session.config.viewport.height);
+          await page.mouse.move(x, y);
+          await page.mouse.down();
+          await page.mouse.move(toX, toY, { steps: 10 });
+          await page.mouse.up();
+        } else throw new Error("許可されていないComputer Actionです");
+        return afterAction(session, `computer ${action}`);
+      }
       case "browser_exec_js": {
         const timeout = Math.min(Math.max(Number(args.timeout_ms ?? 30_000), 100), 30_000);
         const result = await executeRestrictedCode(session, String(args.code ?? ""), timeout);

@@ -14,6 +14,7 @@
     "dev:api": "yarn workspace @agent-studio/api dev",
     "dev:worker": "yarn workspace @agent-studio/api dev:worker",
     "dev:web": "yarn workspace @agent-studio/web dev",
+    "dev:factoring": "yarn workspace @agent-studio/factoring-portal dev",
     "build": "yarn workspaces foreach -At run build",
     "type-check": "yarn workspaces foreach -At run type-check",
     "test": "yarn workspaces foreach -At run test",

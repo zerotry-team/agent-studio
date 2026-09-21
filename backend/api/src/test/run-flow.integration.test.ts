@@ -76,7 +76,11 @@ describe("実行の流れ（擬似 OpenAI）", () => {
     const done = await h.waitFor(() => runStatus(run.body.id), (r) => r.status === "completed" || r.status === "failed");
     expect(done.status).toBe("completed");
     const artifacts = await h.request("GET", `/api/v1/runs/${run.body.id}/artifacts`, owner);
-    expect(artifacts.body).toEqual([{ path: "report.csv", size_bytes: expect.any(Number), download_url: expect.stringContaining(`orgs/${org.id}/runs/${run.body.id}/report.csv`) }]);
+    expect(artifacts.body).toEqual([expect.objectContaining({
+      id: expect.any(String), path: "report.csv", mime_type: "text/csv", size_bytes: expect.any(Number),
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/), scan_status: "passed", retained_until: expect.any(String),
+      download_url: expect.stringContaining(`orgs/${org.id}/runs/${run.body.id}/report.csv`),
+    })]);
   });
 
   it("viewer は実行できない（operator 以上）", async () => {

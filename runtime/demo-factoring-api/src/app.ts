@@ -41,9 +41,10 @@ type InternalHistory = {
   applicant_id: string;
   past_inquiry: boolean;
   internal_denied: boolean;
-  inquiries: unknown[];
-  active_risk_flags: unknown[];
-  source: "factoring_demo.internal_records";
+  inquiry_count: number;
+  active_risk_flag_count: number;
+  risk_reason_codes: string[];
+  source: "company_internal_api";
 };
 
 async function loadInternalHistory(db: Db, applicantId: string): Promise<InternalHistory> {
@@ -54,7 +55,7 @@ async function loadInternalHistory(db: Db, applicantId: string): Promise<Interna
       ORDER BY inquired_on DESC, id`,
     [applicantId],
   );
-  const activeRiskFlags = await db.query<{ flag_type: string }>(
+  const activeRiskFlags = await db.query<{ flag_type: string; reason_code?: string }>(
     `SELECT id, flag_type, reason_code, summary, recorded_on
        FROM internal_risk_flags
       WHERE applicant_id = $1 AND status = 'active'
@@ -65,9 +66,10 @@ async function loadInternalHistory(db: Db, applicantId: string): Promise<Interna
     applicant_id: applicantId,
     past_inquiry: inquiries.length > 0,
     internal_denied: activeRiskFlags.some((flag) => flag.flag_type === "denied"),
-    inquiries,
-    active_risk_flags: activeRiskFlags,
-    source: "factoring_demo.internal_records",
+    inquiry_count: inquiries.length,
+    active_risk_flag_count: activeRiskFlags.length,
+    risk_reason_codes: [...new Set(activeRiskFlags.flatMap((flag) => typeof flag.reason_code === "string" ? [flag.reason_code] : []))],
+    source: "company_internal_api",
   };
 }
 
@@ -226,7 +228,7 @@ export function createApp(opts: FactoringApiOptions): Hono {
       same_invoice_number,
       past_screenings: screenings,
       internal_history,
-      data_sources: ["factoring_demo.applications", "factoring_demo.internal_records"],
+      data_sources: ["company_application_api", "company_internal_api"],
     });
   });
 

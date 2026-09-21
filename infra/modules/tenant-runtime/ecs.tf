@@ -93,6 +93,8 @@ locals {
     BROWSER_WORKER_SUBNETS         = local.browser_enabled ? join(",", module.network.private_subnet_ids) : ""
     BROWSER_WORKER_SECURITY_GROUPS = local.browser_enabled ? aws_security_group.browser_worker[0].id : ""
     BROWSER_WORKER_CONTAINER_NAME  = "browser-session-worker"
+    BROWSER_PROFILE_BUCKET         = local.browser_enabled ? aws_s3_bucket.browser_profiles[0].id : ""
+    BROWSER_PROFILE_KMS_KEY_ARN    = local.browser_enabled ? aws_kms_key.this.arn : ""
   }
 
   tool_gateway_environment = {

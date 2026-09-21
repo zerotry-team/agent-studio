@@ -88,19 +88,31 @@ export class SystemDb {
       SELECT * FROM system_claim_builder_workspace_sessions(${owner}, ${leaseSeconds}::integer, ${limit}::integer)`;
   }
 
-  listActiveBuilderPreviews(limit: number) {
-    return this.prisma.$queryRaw<{ builder_release_id: string; organization_id: string }[]>`
-      SELECT * FROM system_list_active_builder_previews(${limit}::integer)`;
+  async resolveDeploymentApiKey(keyHash: string) {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; organization_id: string; deployment_id: string; rate_limit_per_minute: number; max_runs_per_day: number }>>`
+      SELECT * FROM system_resolve_deployment_api_key(${keyHash})`;
+    return rows[0] ?? null;
   }
 
-  listActiveBuilderProductionRuns(limit: number) {
-    return this.prisma.$queryRaw<{ builder_release_id: string; organization_id: string }[]>`
-      SELECT * FROM system_list_active_builder_production_runs(${limit}::integer)`;
+  async resolveDeploymentWebhook(id: string) {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; organization_id: string; deployment_id: string; secret_locator: string; rate_limit_per_minute: number; max_runs_per_day: number }>>`
+      SELECT * FROM system_resolve_deployment_webhook(${id}::uuid)`;
+    return rows[0] ?? null;
   }
 
-  listBuilderReleasesForDrift(limit: number) {
+  listActiveBuilderPreviews(owner: string, limit: number) {
     return this.prisma.$queryRaw<{ builder_release_id: string; organization_id: string }[]>`
-      SELECT * FROM system_list_builder_releases_for_drift(${limit}::integer)`;
+      SELECT * FROM system_list_active_builder_previews(${owner}, ${limit}::integer)`;
+  }
+
+  listActiveBuilderProductionRuns(owner: string, limit: number) {
+    return this.prisma.$queryRaw<{ builder_release_id: string; organization_id: string }[]>`
+      SELECT * FROM system_list_active_builder_production_runs(${owner}, ${limit}::integer)`;
+  }
+
+  listBuilderReleasesForDrift(owner: string, limit: number) {
+    return this.prisma.$queryRaw<{ builder_release_id: string; organization_id: string }[]>`
+      SELECT * FROM system_list_builder_releases_for_drift(${owner}, ${limit}::integer)`;
   }
 
   expireApprovals() {
@@ -126,19 +138,43 @@ export class SystemDb {
     return Number(rows[0]?.n ?? 0);
   }
 
-  listActiveWorkflowRuns(limit: number) {
+  async heartbeatWorker(workerId: string, activeRuns: number, activeSessions: number): Promise<void> {
+    await this.prisma.worker_heartbeats.upsert({
+      where: { worker_id: workerId },
+      create: { worker_id: workerId, active_runs: activeRuns, active_sessions: activeSessions },
+      update: { active_runs: activeRuns, active_sessions: activeSessions, last_seen_at: new Date() },
+    });
+  }
+
+  async readinessSnapshot() {
+    const [worker, staleRuntimes, unhealthyDeployments, failedRuntimeJobs] = await Promise.all([
+      this.prisma.worker_heartbeats.findFirst({ orderBy: { last_seen_at: "desc" } }),
+      this.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) AS count FROM runtimes WHERE status NOT IN ('revoked', 'pending') AND (last_heartbeat_at IS NULL OR last_heartbeat_at < now() - interval '3 minutes')`,
+      this.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) AS count FROM deployments WHERE stage = 'production' AND status = 'active' AND health_status <> 'ready'`,
+      this.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) AS count FROM runtime_jobs WHERE status = 'failed' AND updated_at >= now() - interval '15 minutes'`,
+    ]);
+    const workerAgeMs = worker ? Date.now() - worker.last_seen_at.getTime() : null;
+    return {
+      worker: { healthy: workerAgeMs !== null && workerAgeMs <= 45_000, last_seen_at: worker?.last_seen_at.toISOString() ?? null, active_runs: worker?.active_runs ?? 0, active_sessions: worker?.active_sessions ?? 0 },
+      stale_runtimes: Number(staleRuntimes[0]?.count ?? 0),
+      unhealthy_production_deployments: Number(unhealthyDeployments[0]?.count ?? 0),
+      recent_failed_runtime_jobs: Number(failedRuntimeJobs[0]?.count ?? 0),
+    };
+  }
+
+  listActiveWorkflowRuns(owner: string, limit: number) {
     return this.prisma.$queryRaw<{ workflow_run_id: string; organization_id: string }[]>`
-      SELECT * FROM system_list_active_workflow_runs(${limit}::integer)`;
+      SELECT * FROM system_list_active_workflow_runs(${owner}, ${limit}::integer)`;
   }
 
-  listSessionsToCleanup(limit: number) {
+  listSessionsToCleanup(owner: string, limit: number) {
     return this.prisma.$queryRaw<{ session_id: string; organization_id: string }[]>`
-      SELECT * FROM system_list_sessions_to_cleanup(${limit}::integer)`;
+      SELECT * FROM system_list_sessions_to_cleanup(${owner}, ${limit}::integer)`;
   }
 
-  listExternalJobs(limit: number) {
+  listExternalJobs(owner: string, limit: number) {
     return this.prisma.$queryRaw<{ job_id: string; organization_id: string }[]>`
-      SELECT * FROM system_list_external_jobs(${limit}::integer)`;
+      SELECT * FROM system_list_external_jobs(${owner}, ${limit}::integer)`;
   }
 
   listGitHubConnections(repositoryId: string) {
@@ -146,14 +182,14 @@ export class SystemDb {
       SELECT * FROM system_list_github_connections(${repositoryId})`;
   }
 
-  claimDueSchedules(leaseSeconds: number, limit: number) {
+  claimDueSchedules(owner: string, leaseSeconds: number, limit: number) {
     return this.prisma.$queryRaw<{ schedule_id: string; organization_id: string }[]>`
-      SELECT * FROM system_claim_due_schedules(${leaseSeconds}::integer, ${limit}::integer)`;
+      SELECT * FROM system_claim_due_schedules(${owner}, ${leaseSeconds}::integer, ${limit}::integer)`;
   }
 
-  listRunningEvalRuns(limit: number) {
+  listRunningEvalRuns(owner: string, limit: number) {
     return this.prisma.$queryRaw<{ eval_run_id: string; organization_id: string }[]>`
-      SELECT * FROM system_list_running_eval_runs(${limit}::integer)`;
+      SELECT * FROM system_list_running_eval_runs(${owner}, ${limit}::integer)`;
   }
 
   exportAuditLogs(from: Date, to: Date) {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import {
+  autoApprovalPolicyConfigSchema,
   hasRoleAtLeast,
   type CreateOrganizationInput,
   type CreatePolicyInput,
@@ -14,6 +15,9 @@ import {
   type SetOpenAiCredentialsInput,
   type UpdateMemberInput,
   type UpdatePolicyInput,
+  type AutoApprovalPolicyDto,
+  type SetAutoApprovalEmergencyStopInput,
+  type UpdateAutoApprovalPolicyInput,
   policySchema,
 } from "@agent-studio/contracts";
 import { conflict, forbidden, notFound, preconditionFailed } from "../domain/errors.js";
@@ -316,6 +320,105 @@ export class OrganizationService {
       if (!existing) throw notFound("ポリシー");
       await tx.policies.delete({ where: { id } });
       await recordAudit(tx, auditBy(actor, { action: "policy.delete", targetType: "policy", targetId: id, detail: { name: existing.name } }));
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 組織の自動承認Policy
+  // ---------------------------------------------------------------------------
+  async getAutoApprovalPolicy(actor: MemberActor): Promise<AutoApprovalPolicyDto> {
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const policy = await tx.organization_auto_approval_policies.findUnique({ where: { organization_id: actor.organizationId } });
+      if (!policy) {
+        return {
+          id: null,
+          version: 0,
+          config: autoApprovalPolicyConfigSchema.parse({}),
+          emergency_stopped_at: null,
+          created_at: null,
+          updated_at: null,
+        };
+      }
+      return {
+        id: policy.id,
+        version: policy.version,
+        config: autoApprovalPolicyConfigSchema.parse(policy.config),
+        emergency_stopped_at: policy.emergency_stopped_at?.toISOString() ?? null,
+        created_at: policy.created_at.toISOString(),
+        updated_at: policy.updated_at.toISOString(),
+      };
+    });
+  }
+
+  async setAutoApprovalPolicy(actor: MemberActor, raw: UpdateAutoApprovalPolicyInput): Promise<AutoApprovalPolicyDto> {
+    requireRole(actor, "admin");
+    const config = autoApprovalPolicyConfigSchema.parse(raw);
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const existing = await tx.organization_auto_approval_policies.findUnique({ where: { organization_id: actor.organizationId } });
+      const version = (existing?.version ?? 0) + 1;
+      const policy = existing
+        ? await tx.organization_auto_approval_policies.update({
+            where: { id: existing.id },
+            data: { version, config: config as Prisma.InputJsonValue, updated_by: actor.userId },
+          })
+        : await tx.organization_auto_approval_policies.create({
+            data: {
+              organization_id: actor.organizationId,
+              version,
+              config: config as Prisma.InputJsonValue,
+              created_by: actor.userId,
+              updated_by: actor.userId,
+            },
+          });
+      await tx.organization_auto_approval_policy_versions.create({
+        data: {
+          organization_id: actor.organizationId,
+          policy_id: policy.id,
+          version,
+          config: config as Prisma.InputJsonValue,
+          created_by: actor.userId,
+        },
+      });
+      await recordAudit(tx, auditBy(actor, {
+        action: "auto_approval_policy.update",
+        targetType: "auto_approval_policy",
+        targetId: policy.id,
+        detail: { version, mode: config.mode, environments: config.environments, allowed_operations: config.allowed_operations },
+      }));
+      return {
+        id: policy.id,
+        version: policy.version,
+        config,
+        emergency_stopped_at: policy.emergency_stopped_at?.toISOString() ?? null,
+        created_at: policy.created_at.toISOString(),
+        updated_at: policy.updated_at.toISOString(),
+      };
+    });
+  }
+
+  async setAutoApprovalEmergencyStop(actor: MemberActor, input: SetAutoApprovalEmergencyStopInput): Promise<AutoApprovalPolicyDto> {
+    requireRole(actor, "admin");
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const existing = await tx.organization_auto_approval_policies.findUnique({ where: { organization_id: actor.organizationId } });
+      if (!existing) throw preconditionFailed("自動承認Policyを先に保存してください");
+      const policy = await tx.organization_auto_approval_policies.update({
+        where: { id: existing.id },
+        data: { emergency_stopped_at: input.stopped ? new Date() : null, updated_by: actor.userId },
+      });
+      await recordAudit(tx, auditBy(actor, {
+        action: input.stopped ? "auto_approval_policy.emergency_stop" : "auto_approval_policy.resume",
+        targetType: "auto_approval_policy",
+        targetId: policy.id,
+        detail: { version: policy.version },
+      }));
+      return {
+        id: policy.id,
+        version: policy.version,
+        config: autoApprovalPolicyConfigSchema.parse(policy.config),
+        emergency_stopped_at: policy.emergency_stopped_at?.toISOString() ?? null,
+        created_at: policy.created_at.toISOString(),
+        updated_at: policy.updated_at.toISOString(),
+      };
     });
   }
 }

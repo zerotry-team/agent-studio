@@ -248,6 +248,25 @@ export const publishBuilderBranchJobSchema = z.object({
 }).strict();
 export type PublishBuilderBranchJob = z.infer<typeof publishBuilderBranchJobSchema>;
 
+export const startBrowserLoginJobSchema = z.object({
+  type: z.literal("start_browser_login"),
+  job_id: z.uuid(),
+  login_session_id: z.uuid(),
+  profile_id: z.uuid(),
+  provider_key: z.string().min(1).max(100),
+  allowed_domains: z.array(z.string().min(1).max(253)).min(1).max(20),
+  expires_at: z.iso.datetime(),
+}).strict();
+
+export const browserLoginResultSchema = z.object({
+  login_session_id: z.uuid(),
+  profile_id: z.uuid(),
+  runtime_object_key: z.string().min(1).max(1000),
+  verified_domains: z.array(z.string().min(1).max(253)).min(1).max(20),
+  expires_at: z.iso.datetime(),
+}).strict();
+export type BrowserLoginResult = z.infer<typeof browserLoginResultSchema>;
+
 export const gitCredentialResponseSchema = z.object({
   username: z.literal("x-access-token"),
   token: z.string().min(20),
@@ -304,6 +323,7 @@ export const runtimeJobSchema = z.discriminatedUnion("type", [
   builderWorkspaceJobSchema,
   collectBuilderSessionResultJobSchema,
   publishBuilderBranchJobSchema,
+  startBrowserLoginJobSchema,
 ]);
 export type RuntimeJob = z.infer<typeof runtimeJobSchema>;
 export type StartSessionJob = z.infer<typeof startSessionJobSchema>;
@@ -316,7 +336,7 @@ export const jobResultRequestSchema = z
     error: z.string().max(2000).optional(),
     // builderSessionResultはbuilderWorkspaceResultの上位互換なので先に評価し、
     // base_shaがstripされないようにする。
-    output: z.union([builderSessionResultSchema, builderWorkspaceResultSchema, gitPublishResultSchema]).optional(),
+    output: z.union([browserLoginResultSchema, builderSessionResultSchema, builderWorkspaceResultSchema, gitPublishResultSchema]).optional(),
   })
   .strict()
   .superRefine((result, ctx) => {
@@ -347,6 +367,11 @@ export const approvalRequestSchema = z
     args_preview: z.string().max(4000),
     reason: z.string().max(1000),
     timeout_minutes: z.number().int().min(1).max(10080),
+    /** 自動承認Policyの実行直前評価に使う。古いRuntimeとの互換のため省略可だが、省略時はfail closed。 */
+    risk: z.enum(["read", "write", "external_send", "financial", "destructive"]).optional(),
+    destination_host: z.string().trim().min(1).max(253).optional(),
+    method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
+    requested_records: z.number().int().nonnegative().max(100_000).optional(),
   })
   .strict();
 export type ApprovalRequest = z.infer<typeof approvalRequestSchema>;

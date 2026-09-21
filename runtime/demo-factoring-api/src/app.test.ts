@@ -58,9 +58,10 @@ describe("demo-factoring-api", () => {
       applicant_id: "A-1",
       past_inquiry: true,
       internal_denied: false,
-      inquiries: [{ id: "INQ-1", requested_amount: 800000 }],
-      active_risk_flags: [],
-      source: "factoring_demo.internal_records",
+      inquiry_count: 1,
+      active_risk_flag_count: 0,
+      risk_reason_codes: [],
+      source: "company_internal_api",
     });
   });
 
@@ -76,9 +77,10 @@ describe("demo-factoring-api", () => {
       applicant_id: "A-3",
       past_inquiry: true,
       internal_denied: true,
-      inquiries: [{ id: "INQ-7", requested_amount: 1200000 }],
-      active_risk_flags: [{ id: "RISK-7", flag_type: "denied", reason_code: "DEMO_DENIED" }],
-      source: "factoring_demo.internal_records",
+      inquiry_count: 1,
+      active_risk_flag_count: 1,
+      risk_reason_codes: ["DEMO_DENIED"],
+      source: "company_internal_api",
     });
     expect(db.calls.some(({ sql, params }) => sql.includes("FROM inquiry_history") && params[0] === "A-3")).toBe(true);
     expect(db.calls.some(({ sql, params }) => sql.includes("FROM internal_risk_flags") && params[0] === "A-3")).toBe(true);

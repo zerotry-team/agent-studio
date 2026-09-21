@@ -198,6 +198,17 @@ jobs:
           aws ecs wait services-stable \
             --cluster "$(terraform -chdir="$ROOT" output -raw cluster_name)" \
             --services "$(terraform -chdir="$ROOT" output -raw runtime_core_service_name)"
+      - name: Runtime稼働imageのcommit SHAを照合
+        if: steps.configured.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          CLUSTER=$(terraform -chdir="$ROOT" output -raw cluster_name)
+          SERVICE=$(terraform -chdir="$ROOT" output -raw runtime_core_service_name)
+          TASK=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --desired-status RUNNING --query 'taskArns[0]' --output text)
+          [ "$TASK" != "None" ] || { echo "::error::RuntimeにRUNNING taskがありません"; exit 1; }
+          DEF=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" --query 'tasks[0].taskDefinitionArn' --output text)
+          IMAGES=$(aws ecs describe-task-definition --task-definition "$DEF" --query 'taskDefinition.containerDefinitions[].image' --output text)
+          grep -Fq ":${GITHUB_SHA}" <<< "$IMAGES" || { echo "::error::Runtimeの稼働imageが${GITHUB_SHA}ではありません"; exit 1; }
       - name: 次の手順
         if: steps.configured.outputs.ok == 'true'
         run: |

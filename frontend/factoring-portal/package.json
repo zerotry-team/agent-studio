@@ -1,0 +1,31 @@
+{
+  "name": "@agent-studio/factoring-portal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Studioで生成したファクタリング審査Agentを利用する独立申込ポータル",
+  "scripts": {
+    "dev": "next dev -p ${PORT:-3210}",
+    "build": "next build",
+    "start": "next start -p ${PORT:-3210}",
+    "type-check": "tsc --noEmit",
+    "lint": "next lint",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf .next"
+  },
+  "dependencies": {
+    "@agent-studio/contracts": "workspace:^",
+    "lucide-react": "^1.47.0",
+    "next": "14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "14.2.35",
+    "typescript": "5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

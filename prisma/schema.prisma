@@ -13,11 +13,23 @@ datasource db {
   provider = "postgresql"
 }
 
+/// Control Plane Workerの生存確認。組織データを持たない運用メタデータ。
+model worker_heartbeats {
+  worker_id        String   @id
+  version          String?
+  active_runs      Int      @default(0)
+  active_sessions  Int      @default(0)
+  last_seen_at     DateTime @default(now()) @db.Timestamptz(6)
+  started_at       DateTime @default(now()) @db.Timestamptz(6)
+}
+
 model organizations {
   id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   slug       String   @unique
   name       String
   status     String   @default("active")
+  /// production / test。通常Workerとintegration workerのqueueをDB境界で分離する。
+  worker_pool String  @default("production")
   created_at DateTime @default(now()) @db.Timestamptz(6)
   updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
@@ -33,6 +45,8 @@ model organizations {
   environment_configs agent_environment_configs[]
   builds              agent_builds[]
   policies            policies[]
+  auto_approval_policy organization_auto_approval_policies?
+  auto_approval_policy_versions organization_auto_approval_policy_versions[]
   runtimes            runtimes[]
   bootstrap_tokens    runtime_bootstrap_tokens[]
   runtime_profiles    runtime_profiles[]
@@ -62,6 +76,12 @@ model organizations {
   builder_releases    builder_releases[]
   adapter_packages    builder_adapter_packages[]
   git_webhook_events  git_webhook_deliveries[]
+  deployment_api_keys deployment_api_keys[]
+  deployment_webhooks deployment_webhooks[]
+  deployment_trigger_invocations deployment_trigger_invocations[]
+  run_artifacts        run_artifacts[]
+  browser_profiles     browser_profiles[]
+  browser_login_sessions browser_login_sessions[]
 }
 
 /// 組織ごとの OpenAI Project とキーの保管場所（SEC-11）。キーの値は持たない
@@ -314,6 +334,41 @@ model policies {
   @@unique([organization_id, name])
 }
 
+/// 組織Policyが承認者になる自動承認設定。Secretや認証情報は保持しない。
+model organization_auto_approval_policies {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id      String    @unique @db.Uuid
+  version              Int       @default(1)
+  config               Json
+  emergency_stopped_at DateTime? @db.Timestamptz(6)
+  created_by           String?   @db.Uuid
+  updated_by           String?   @db.Uuid
+  created_at           DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  versions     organization_auto_approval_policy_versions[]
+
+  @@unique([organization_id, id])
+}
+
+/// 自動承認Policyの変更履歴。実行時の承認記録からversionを追跡できるようsnapshotを保持する。
+model organization_auto_approval_policy_versions {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  policy_id       String   @db.Uuid
+  version         Int
+  config          Json
+  created_by      String?  @db.Uuid
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  organization organizations                      @relation(fields: [organization_id], references: [id], onDelete: Cascade, map: "organization_auto_approval_policy_versions_organization_id_fkey")
+  policy       organization_auto_approval_policies @relation(fields: [organization_id, policy_id], references: [organization_id, id], onDelete: Cascade, map: "organization_auto_approval_policy_versions_policy_fkey")
+
+  @@unique([policy_id, version])
+  @@unique([organization_id, id])
+}
+
 /// 登録済みの Runtime（企業 × 環境の Execution Plane）
 model runtimes {
   id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -347,6 +402,7 @@ model runtimes {
   builder_sessions builder_workspace_sessions[]
   adapter_packages builder_adapter_packages[]
   jobs             runtime_jobs[]
+  browser_profiles browser_profiles[]
 
   /// 1つの AWS プリンシパルは、全組織を通じて1つの Runtime にしか対応しない
   @@unique([aws_account_id, expected_role_name])
@@ -417,6 +473,89 @@ model agent_builds {
   @@unique([organization_id, id])
 }
 
+/// Run専用Artifact。本文はS3に置き、Control Plane DBには検証済みメタデータだけを保持する。
+model run_artifacts {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  run_id          String    @db.Uuid
+  path            String
+  object_key      String
+  mime_type       String
+  size_bytes      Int
+  sha256          String
+  /// pending / passed / rejected / failed
+  scan_status     String    @default("pending")
+  scan_engine     String?
+  source          String
+  retained_until  DateTime  @db.Timestamptz(6)
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  run          runs          @relation(fields: [organization_id, run_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, run_id, path])
+  @@unique([organization_id, id])
+  @@index([run_id, scan_status])
+  @@index([retained_until])
+}
+
+/// Cookieやstorage state本文を持たない、Runtime Browser ProfileのControl Planeメタデータ。
+model browser_profiles {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id    String    @db.Uuid
+  runtime_id          String    @db.Uuid
+  project_id          String?   @db.Uuid
+  provider_key        String
+  display_name        String
+  environment         String
+  allowed_domains     Json
+  /// pending / active / expired / revoked
+  status              String    @default("pending")
+  /// Runtime内の暗号化Objectを指すopaque key。内容や署名URLは保持しない。
+  runtime_object_key  String?
+  last_verified_at    DateTime? @db.Timestamptz(6)
+  expires_at          DateTime? @db.Timestamptz(6)
+  revoked_at          DateTime? @db.Timestamptz(6)
+  created_by          String?   @db.Uuid
+  created_at          DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations       @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  runtime      runtimes            @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
+  project      builder_projects?   @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Restrict)
+  login_sessions browser_login_sessions[]
+
+  @@unique([organization_id, id])
+  @@index([organization_id, provider_key, environment, status])
+}
+
+/// 15分で失効するHuman Login orchestration。password/MFA/cookie本文は保存しない。
+model browser_login_sessions {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id  String    @db.Uuid
+  profile_id        String    @db.Uuid
+  runtime_id        String    @db.Uuid
+  project_id        String?   @db.Uuid
+  human_action_id   String?   @db.Uuid
+  runtime_job_id    String?   @db.Uuid
+  /// pending / running / succeeded / failed / cancelled / expired
+  status            String    @default("pending")
+  relay_token_hash  String
+  expires_at        DateTime  @db.Timestamptz(6)
+  completed_at      DateTime? @db.Timestamptz(6)
+  error             String?
+  created_by        String?   @db.Uuid
+  created_at        DateTime  @default(now()) @db.Timestamptz(6)
+
+  organization organizations   @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  profile      browser_profiles @relation(fields: [organization_id, profile_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, id])
+  @@unique([runtime_job_id])
+  @@index([profile_id, status])
+  @@index([expires_at])
+}
+
 model deployments {
   id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   organization_id    String   @db.Uuid
@@ -442,9 +581,80 @@ model deployments {
   build            agent_builds?      @relation(fields: [organization_id, build_id], references: [organization_id, id], onDelete: Restrict)
   runs             runs[]
   builder_releases builder_releases[]
+  api_keys         deployment_api_keys[]
+  webhooks         deployment_webhooks[]
+  trigger_invocations deployment_trigger_invocations[]
 
   @@unique([organization_id, id])
   @@index([organization_id, agent_id, stage, status])
+}
+
+/// Production Deploymentを外部から呼び出すための、表示一回限りのAPI Key。DBにはhashだけを保持する。
+model deployment_api_keys {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id       String    @db.Uuid
+  deployment_id         String    @db.Uuid
+  name                  String
+  key_prefix            String
+  key_hash              String    @unique
+  status                String    @default("active")
+  rate_limit_per_minute Int       @default(60)
+  max_runs_per_day      Int       @default(1000)
+  last_used_at          DateTime? @db.Timestamptz(6)
+  expires_at            DateTime? @db.Timestamptz(6)
+  revoked_at            DateTime? @db.Timestamptz(6)
+  created_by            String?   @db.Uuid
+  created_at            DateTime  @default(now()) @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  deployment   deployments   @relation(fields: [organization_id, deployment_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, id])
+  @@index([deployment_id, status])
+}
+
+/// Webhook署名secretはSecret Storeへ置き、DBには参照だけを保持する。
+model deployment_webhooks {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id       String    @db.Uuid
+  deployment_id         String    @db.Uuid
+  name                  String
+  secret_locator        String
+  status                String    @default("active")
+  rate_limit_per_minute Int       @default(60)
+  max_runs_per_day      Int       @default(1000)
+  last_used_at          DateTime? @db.Timestamptz(6)
+  revoked_at            DateTime? @db.Timestamptz(6)
+  created_by            String?   @db.Uuid
+  created_at            DateTime  @default(now()) @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  deployment   deployments   @relation(fields: [organization_id, deployment_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, id])
+  @@index([deployment_id, status])
+}
+
+/// rate limit、usage cap、Webhook replay protectionの共通台帳。
+model deployment_trigger_invocations {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  deployment_id   String   @db.Uuid
+  credential_type String
+  credential_id   String   @db.Uuid
+  delivery_id     String?
+  request_hash    String
+  status          String
+  run_id          String?  @db.Uuid
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  deployment   deployments   @relation(fields: [organization_id, deployment_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, id])
+  @@unique([credential_type, credential_id, delivery_id])
+  @@index([credential_id, created_at(sort: Desc)])
+  @@index([deployment_id, created_at(sort: Desc)])
 }
 
 model runs {
@@ -478,6 +688,7 @@ model runs {
   inputs           run_inputs[]
   external_jobs    external_jobs[]
   builder_releases builder_releases[]
+  artifacts        run_artifacts[]
 
   @@unique([organization_id, id])
   @@index([organization_id, created_at(sort: Desc)])
@@ -611,7 +822,7 @@ model approvals {
   run_id          String?   @db.Uuid
   session_id      String?   @db.Uuid
   workflow_run_id String?   @db.Uuid
-  /// runtime_gateway（Tool Gateway のツール）/ studio_function（Agent Studio のツール）/ workflow（Workflow の承認ステップ）
+  /// runtime_gateway（Tool Gateway）/ studio_function（Agent Studio）/ workflow（Workflow）/ builder（自動昇格・merge・retry・rollback）
   source          String    @default("runtime_gateway")
   /// studio_function のとき、承認後に結果を返す function call の ID
   call_id         String?
@@ -627,6 +838,11 @@ model approvals {
   decided_at      DateTime? @db.Timestamptz(6)
   comment         String?
   consumed_at     DateTime? @db.Timestamptz(6)
+  /// 組織Policyによる承認でも通常のApproval台帳を残す。
+  auto_approved               Boolean @default(false)
+  auto_approval_policy_id     String? @db.Uuid
+  auto_approval_policy_version Int?
+  auto_approval_reason        String?
 
   organization organizations   @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   run          runs?           @relation(fields: [organization_id, run_id], references: [organization_id, id], onDelete: Cascade)
@@ -767,6 +983,7 @@ model builder_projects {
   validation_runs    builder_validation_runs[]
   releases           builder_releases[]
   adapter_packages   builder_adapter_packages[]
+  browser_profiles   browser_profiles[]
 
   @@unique([organization_id, id])
   @@index([organization_id, agent_id, updated_at(sort: Desc)])
@@ -786,6 +1003,14 @@ model builder_runs {
   lease_until     DateTime? @db.Timestamptz(6)
   error_class     String?
   error           String?
+  /// 同じ原因の無限反復を防ぐ、正規化済みエラーのSHA-256
+  error_fingerprint String?
+  retryable       Boolean?
+  next_action     String?
+  /// 自動再試行のbackoffが終わる時刻
+  not_before      DateTime? @db.Timestamptz(6)
+  /// 直近のValidation/Audit等の証跡ID
+  last_evidence_id String?  @db.Uuid
   started_at      DateTime? @db.Timestamptz(6)
   finished_at     DateTime? @db.Timestamptz(6)
   created_at      DateTime  @default(now()) @db.Timestamptz(6)
@@ -798,7 +1023,7 @@ model builder_runs {
 
   @@unique([organization_id, id])
   @@unique([project_id, attempt])
-  @@index([status, lease_until, created_at])
+  @@index([status, not_before, lease_until, created_at])
 }
 
 /// 冪等に再開する最小単位。input_hash は後続フェーズで成功 Step を再利用するときの判定に使う。

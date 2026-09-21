@@ -90,7 +90,7 @@ tools:
       timeout_ms: 5000
 
   - name: lookup_internal_history
-    description: "社内DBを申込者IDで照会し、過去問い合わせと有効な社内否決・注意フラグを取得します。任意SQLやDB資格情報はAgentへ渡しません。"
+    description: "会社が用意した社内APIを申込者IDで照会し、最小化済みの過去問い合わせ・社内否決フラグを取得します。"
     risk: read
     input_schema:
       type: object
@@ -103,6 +103,21 @@ tools:
       url: "http://localhost:8091/internal-history/{applicant_id}"
       auth: { type: bearer, secret: factoring-demo-api }
       timeout_ms: 5000
+      output_schema:
+        type: object
+        required: [applicant_id, past_inquiry, internal_denied, inquiry_count, active_risk_flag_count, risk_reason_codes, source]
+        properties:
+          applicant_id: { type: string }
+          past_inquiry: { type: boolean }
+          internal_denied: { type: boolean }
+          inquiry_count: { type: integer }
+          active_risk_flag_count: { type: integer }
+          risk_reason_codes: { type: array, items: { type: string } }
+          source: { type: string }
+      response_boundary:
+        allowed_fields: [applicant_id, past_inquiry, internal_denied, inquiry_count, active_risk_flag_count, risk_reason_codes, source]
+        max_bytes: 65536
+        max_records: 1
 
   - name: list_counterparty_payments
     description: "売掛先ごとの入金実績を、申込をまたいで取得します。支払いの遅れ方を見るのに使います。"
@@ -323,6 +338,23 @@ upstream_mcp:
             timeout_ms: { type: number }
             expects: { type: string }
           required: [code]
+          additionalProperties: false
+      - name: computer_action
+        risk: external_send
+        reads_untrusted_content: true
+        description: "許可されたBrowser window内で限定Computer Actionを実行し、Screenshotを返します"
+        input_schema:
+          type: object
+          properties:
+            action: { type: string, enum: [click, type, scroll, drag] }
+            x: { type: number }
+            y: { type: number }
+            to_x: { type: number }
+            to_y: { type: number }
+            value: { type: string }
+            delta_x: { type: number }
+            delta_y: { type: number }
+          required: [action]
           additionalProperties: false
 
 policies: []

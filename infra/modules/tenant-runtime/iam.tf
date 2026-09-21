@@ -108,6 +108,15 @@ data "aws_iam_policy_document" "runtime" {
     resources = [aws_ssm_parameter.tool_config.arn]
   }
 
+  dynamic "statement" {
+    for_each = local.browser_enabled ? [1] : []
+    content {
+      sid       = "BrowserProfileObjects"
+      actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:GetObjectVersion", "s3:ListBucket"]
+      resources = [aws_s3_bucket.browser_profiles[0].arn, "${aws_s3_bucket.browser_profiles[0].arn}/profiles/*"]
+    }
+  }
+
   # PutSecretValue（環境キーの書き込み）で暗号化にも使うため、Decrypt に加えて GenerateDataKey を許可する。
   # Secrets Manager 経由の利用に限る
   statement {
@@ -118,6 +127,20 @@ data "aws_iam_policy_document" "runtime" {
       test     = "StringEquals"
       variable = "kms:ViaService"
       values   = ["secretsmanager.${var.region}.amazonaws.com"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.browser_enabled ? [1] : []
+    content {
+      sid       = "BrowserProfileKms"
+      actions   = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey", "kms:DescribeKey"]
+      resources = [aws_kms_key.this.arn]
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["s3.${var.region}.amazonaws.com"]
+      }
     }
   }
 }

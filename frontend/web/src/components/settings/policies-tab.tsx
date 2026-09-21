@@ -21,6 +21,7 @@ import { formatDateTime } from "@/lib/utils/format";
 import { POLICY_TYPE_LABELS, type Tone } from "@/lib/utils/labels";
 import { describePolicyRule } from "./policy-describe";
 import { CreatePolicyDialog } from "./policy-form-dialog";
+import { AutoApprovalCard } from "./auto-approval-card";
 
 const TYPE_TONES: Record<PolicyDto["rule"]["type"], Tone> = {
   approval: "warning",
@@ -123,6 +124,7 @@ export function PoliciesTab() {
 
   return (
     <div className="space-y-4">
+      <AutoApprovalCard />
       <Alert tone="info" title="組織全体のポリシー">
         組織のすべてのエージェントに適用されます。エージェントごとのポリシーと重なる場合は、より厳しいほうが優先されます。
       </Alert>

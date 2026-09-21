@@ -229,15 +229,37 @@ jobs:
           set -euo pipefail
           URL=$(terraform -chdir="$ROOT" output -raw public_url)
           for _ in $(seq 1 30); do
-            if curl -fsS "${URL}/health"; then echo; exit 0; fi
+            if curl -fsS "${URL}/health/ready"; then echo; exit 0; fi
             sleep 10
           done
-          echo "::error::${URL}/health が応答しません"
+          echo "::error::${URL}/health/ready がDB・Worker・Runtime・Deploymentをreadyと判定しません"
           exit 1
+
+      - name: 稼働中タスクのcommit SHAを照合
+        if: steps.configured.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          CLUSTER=$(terraform -chdir="$ROOT" output -raw cluster_name)
+          for SERVICE in \
+            "$(terraform -chdir="$ROOT" output -raw api_service_name)" \
+            "$(terraform -chdir="$ROOT" output -raw worker_service_name)" \
+            "$(terraform -chdir="$ROOT" output -raw web_service_name)"; do
+            TASK=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" --desired-status RUNNING --query 'taskArns[0]' --output text)
+            [ "$TASK" != "None" ] || { echo "::error::${SERVICE}にRUNNING taskがありません"; exit 1; }
+            DEF=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" --query 'tasks[0].taskDefinitionArn' --output text)
+            IMAGES=$(aws ecs describe-task-definition --task-definition "$DEF" --query 'taskDefinition.containerDefinitions[].image' --output text)
+            grep -Fq ":${NEW_TAG}" <<< "$IMAGES" || { echo "::error::${SERVICE}の稼働imageが${NEW_TAG}ではありません"; exit 1; }
+            echo "${SERVICE}: ${DEF} / ${NEW_TAG}"
+          done
 
       - name: デプロイしたタグを記録
         if: steps.configured.outputs.ok == 'true'
-        run: aws ssm put-parameter --name "/as/${STAGE}/deployed-image-tag" --value "${NEW_TAG}" --type String --overwrite
+        run: |
+          set -euo pipefail
+          aws ssm put-parameter --name "/as/${STAGE}/deployed-image-tag" --value "${NEW_TAG}" --type String --overwrite
+          aws ssm put-parameter --name "/as/${STAGE}/migration-sha" --value "${NEW_TAG}" --type String --overwrite
+          aws ssm put-parameter --name "/as/${STAGE}/api-sha" --value "${NEW_TAG}" --type String --overwrite
+          aws ssm put-parameter --name "/as/${STAGE}/web-sha" --value "${NEW_TAG}" --type String --overwrite
 
       - name: まとめ
         if: steps.configured.outputs.ok == 'true'

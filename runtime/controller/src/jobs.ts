@@ -76,6 +76,9 @@ export class JobHandler {
         case "publish_builder_branch":
           if (!this.deps.gitPublisher) return fail("このRuntimeではGit branch公開が有効になっていません");
           return { status: "succeeded", output: await this.deps.gitPublisher.publish(job) };
+        case "start_browser_login":
+          // password、MFA、CAPTCHAをControllerが代行してはならない。Relay/Brokerが設定されるまでfail closed。
+          return fail("このRuntimeではHuman Login Relay / Browser Profile Brokerが有効になっていません");
       }
     } catch (err) {
       log.error({ err: errorInfo(err) }, "ジョブの処理に失敗しました");

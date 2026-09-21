@@ -61,7 +61,7 @@ export class WorkerScheduler {
   }
 
   private async runDueSchedules() {
-    const items = await this.deps.system.claimDueSchedules(60, 20);
+    const items = await this.deps.system.claimDueSchedules(this.deps.env.WORKER_ID, 60, 20);
     for (const item of items) {
       await this.deps.db.org(item.organization_id, async (tx) => {
         const schedule = await tx.agent_schedules.findUnique({ where: { id: item.schedule_id } });
@@ -89,7 +89,7 @@ export class WorkerScheduler {
 
   /** publish_postは再実行せず、返されたJob IDをget_jobで確認するだけに限定する。 */
   private async pollExternalJobs() {
-    const items = await this.deps.system.listExternalJobs(20);
+    const items = await this.deps.system.listExternalJobs(this.deps.env.WORKER_ID, 20);
     for (const item of items) {
       try {
         const context = await this.deps.db.org(item.organization_id, (tx) =>
@@ -213,6 +213,7 @@ export class WorkerScheduler {
   }
 
   private async maintenance() {
+    await this.deps.system.heartbeatWorker(this.deps.env.WORKER_ID, this.active.size, this.activeBuilderSessions.size);
     const expired = await this.deps.system.expireApprovals();
     for (const a of expired) {
       await this.deps.db.org(a.organization_id, async (tx) => {
@@ -230,7 +231,7 @@ export class WorkerScheduler {
 
   /** 終了した Run のセッション: OpenAI のセッションを削除し、Runtime に Worker の停止を依頼する */
   private async cleanupSessions() {
-    const items = await this.deps.system.listSessionsToCleanup(20);
+    const items = await this.deps.system.listSessionsToCleanup(this.deps.env.WORKER_ID, 20);
     for (const item of items) {
       try {
         const session = await this.deps.db.org(item.organization_id, (tx) =>

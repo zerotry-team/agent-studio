@@ -24,6 +24,8 @@ import { discoverMcpTools } from "./infrastructure/mcp/discover.js";
 import type { Logger } from "./logger.js";
 import { GitHubAppProvider } from "./infrastructure/git/github-app.js";
 import { GitWebhookService } from "./application/git-webhooks.js";
+import { DeploymentTriggerService } from "./application/deployment-triggers.js";
+import { BrowserProfileService } from "./application/browser-profiles.js";
 
 export interface Services {
   organizations: OrganizationService;
@@ -38,6 +40,8 @@ export interface Services {
   builderProjects: BuilderProjectService;
   builderConnectors: BuilderConnectorService;
   gitWebhooks: GitWebhookService;
+  deploymentTriggers: DeploymentTriggerService;
+  browserProfiles: BrowserProfileService;
 }
 
 export function buildDeps(env: Env, logger: Logger, database: Database, overrides: Partial<Deps> = {}): Deps {
@@ -80,5 +84,7 @@ export function buildServices(deps: Deps): Services {
     builderProjects: new BuilderProjectService(deps),
     builderConnectors: new BuilderConnectorService(deps),
     gitWebhooks: new GitWebhookService(deps),
+    deploymentTriggers: new DeploymentTriggerService(deps),
+    browserProfiles: new BrowserProfileService(deps),
   };
 }

@@ -25,8 +25,8 @@
 | `screenings` | 審査結果の書き戻し用。**読むだけの構成では使わない** | 0 |
 
 `GET /applications/:invoice_id` は申込情報とあわせて `internal_history` を返します。デモで社内DB照会を明示したい場合は
-`GET /internal-history/:applicant_id`（Tool名 `lookup_internal_history`）を使います。どちらも実際にPostgreSQLを参照します。
-AgentへDB接続文字列や任意SQLは渡しません。
+`GET /internal-history/:applicant_id`（Tool名 `lookup_internal_history`）を使います。Agent Studioから見える境界は常にこのHTTP APIです。
+DB接続文字列・任意SQL・生の行データはAgent Studioへ渡しません。
 
 ### 4 件が別々の結論になる
 
@@ -213,18 +213,11 @@ curl -s -H "Authorization: Bearer local-factoring-token" localhost:8091/applicat
 
 ## 6. 実データに切り替えるとき
 
-顧客の実システムを使う場合も、AgentからDBへ直接SQLを許可しません。Self-host Runtime内のAdapterだけが、
-読み取り専用DBユーザーで社内PostgreSQLへ接続します。現在のAdapterは `FACTORING_DATABASE_URL` を差し替えれば
-PostgreSQL互換の社内DBへ接続できます。接続元Runtimeを社内LAN/VPN/VPC内に置き、DB側はそのRuntimeからの通信だけを許可します。
+顧客の実システムを使う場合、Agent Studioから社内DBへ直接接続しません。会社側で、必要な業務操作だけを公開するHTTP APIを用意します。
+そのAPI内部でどのDBを使うかは会社側の責任範囲で、DB資格情報は会社側のSecret Storeだけに保存します。
+非公開APIは企業Runtimeから呼び、Control Planeからprivate IPへ接続しません。ProductionではOpenAPI 3.0/3.1とresponse field allowlistを固定します。
 
-```bash
-FACTORING_DATABASE_URL='postgresql://agent_reader:***@internal-db.example.local:5432/factoring?sslmode=require'
-```
-
-資格情報はSecrets ManagerなどRuntime側のSecret Storeから注入し、Control Plane、Git、Agentの指示文には保存しません。
-MySQL、SQL Server、Oracleの場合は、このAPIの返却契約を維持したままDBドライバー部分だけを専用Adapterへ交換します。
-
-既存の社内HTTP APIを使う場合は、**このデータもこの API も本番には出しません**。
+このデモAPIとデータは本番には出しません。既存の社内HTTP APIへ置き換える場合は、
 [tool-config](../tool-gateway/examples/tool-config.local.yaml) のツール定義をコピーして、
 `infra/company/<tenant>/config.yaml` の `runtime.tools` に URL を実システム向けで書くだけです。
 

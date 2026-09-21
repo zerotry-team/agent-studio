@@ -248,6 +248,12 @@ export function inspectOpenApi(input: BuilderOpenApiInput): BuilderOpenApiPropos
       const upperMethod = method.toUpperCase() as Uppercase<typeof method>;
       const risk = inferRisk(upperMethod, operation, path);
       const outputSchema = outputSchemaForOperation(root, operation);
+      const responseFields = Array.isArray(operation["x-agent-studio-response-fields"])
+        ? operation["x-agent-studio-response-fields"].filter((value): value is string => typeof value === "string")
+        : [];
+      if (responseFields.length === 0 && outputSchema !== undefined) {
+        warnings.push(`${upperMethod} ${path}: モデルへ返すfieldをx-agent-studio-response-fieldsで明示してください`);
+      }
       if (method === "post") {
         const properties = built.schema.properties as JsonObject;
         if (!Object.hasOwn(properties, "idempotency_key")) {
@@ -266,11 +272,20 @@ export function inspectOpenApi(input: BuilderOpenApiInput): BuilderOpenApiPropos
         risk,
         input_schema: built.schema as BuilderOpenApiOperationDto["input_schema"],
         ...(outputSchema !== undefined ? { output_schema: outputSchema } : {}),
+        ...(responseFields.length > 0
+          ? { response_boundary: { allowed_fields: responseFields, max_bytes: 64 * 1024, max_records: 100, allow_sensitive_fields: false } }
+          : {}),
       });
     }
   }
   if (operations.length === 0) throw validationError("安全に生成できるOpenAPI Operationがありません");
   if (!operations.some((operation) => operation.selected)) throw validationError("生成対象のOperationを1つ以上選んでください");
+  if (input.internal_api) {
+    const unsafe = operations.filter((operation) => operation.selected && (!operation.output_schema || !operation.response_boundary));
+    if (unsafe.length > 0) {
+      throw validationError(`社内APIのProduction契約にはresponse schemaとx-agent-studio-response-fieldsが必要です: ${unsafe.map((operation) => operation.operation_id).join(", ")}`);
+    }
+  }
   const sourceUrl = input.source_url ?? (typeof root.externalDocs === "object" ? optionalObject(root.externalDocs)?.url : undefined);
   return {
     source: {
@@ -283,7 +298,7 @@ export function inspectOpenApi(input: BuilderOpenApiInput): BuilderOpenApiPropos
       key: connectorKey,
       name: connectorName,
       description: String(info.description ?? `${title}のOpenAPIから生成`).slice(0, 1000),
-      adapter: "http_openapi",
+      adapter: input.internal_api ? "internal_http_api" : "http_openapi",
       base_url: baseUrl,
       auth_type: authentication.authType,
     },

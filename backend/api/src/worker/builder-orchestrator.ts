@@ -5,6 +5,7 @@ import {
   isBrowserCapability,
   parseManifest,
   stringifyManifest,
+  toolCallHash,
   type CapabilityRequirementDto,
   type CapabilityGapDto,
   type CapabilityResolutionDto,
@@ -12,9 +13,10 @@ import {
   type ToolRisk,
   type WorkflowDefinition,
 } from "@agent-studio/contracts";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { AgentService } from "../application/agents.js";
 import { BuilderConnectorService } from "../application/builder-connectors.js";
+import { BuilderProjectService } from "../application/builder-projects.js";
 import type { MemberActor } from "../application/context.js";
 import type { Deps } from "../application/deps.js";
 import { annotateCapabilityFulfillment } from "../domain/capability-fulfillment.js";
@@ -25,6 +27,9 @@ import { EnvironmentService } from "../application/environments.js";
 import { setRunStatus } from "../application/run-events.js";
 import { RunService } from "../application/runs.js";
 import { builderPromptHash, newBuilderSessionTokenHash } from "./builder-session-driver.js";
+import { builderRetryDelayMs, classifyBuilderFailure } from "../domain/builder-failure.js";
+import { inferModelCapabilities } from "../domain/model-capabilities.js";
+import { evaluateOrganizationAutoApproval } from "../domain/organization-auto-approval.js";
 
 type Strategy = CapabilityGapDto["resolution_strategy"];
 
@@ -199,10 +204,11 @@ export function ensureRequiredScenarioTools(
   available: ScenarioToolInfo[],
 ): CapabilityResolutionDto {
   const required = new Set<string>();
-  const requiresFreshWeb = /(?:最新|今日|直近|現在|ニュース|トレンド|web|ウェブ|インターネット|公開情報|市場調査|競合.*(?:調査|比較)|おすすめ|評判|口コミ|価格比較|recent|latest|current|news)/i.test(request);
-  const requiresGeneratedImage = GENERATED_IMAGE_REQUEST.test(request);
+  const modelCapabilities = inferModelCapabilities(request);
+  const requiresFreshWeb = modelCapabilities.some((decision) => decision.capability === "web_search");
+  const requiresGeneratedImage = modelCapabilities.some((decision) => decision.capability === "image_generation");
   if (requiresFreshWeb) required.add("web_search");
-  if (requiresGeneratedImage) required.add("generate_social_image");
+  if (requiresGeneratedImage) required.add("generate_image");
   if (/ファクタリング|買取申込|審査.*(?:可|否|保留)/i.test(request)) {
     ["list_applications", "get_application", "analyze_bank_statement", "check_compliance", "evaluate_factoring_rules", "record_screening"]
       .forEach((name) => required.add(name));
@@ -217,12 +223,13 @@ export function ensureRequiredScenarioTools(
     ...resolution.selected_tools,
     ...tools.map((tool) => tool.name),
     ...(requiresFreshWeb ? ["web_search"] : []),
+    ...(requiresGeneratedImage ? ["generate_image"] : []),
   ])];
   const requirements = [...resolution.requirements];
   for (const tool of tools) {
     const existing = requirements.findIndex((requirement) =>
       requirement.tool_names.includes(tool.name)
-      || (tool.name === "generate_social_image" && /画像|挿絵|イラスト|サムネイル/i.test(requirement.requirement)),
+      || (tool.name === "generate_image" && /画像|挿絵|イラスト|サムネイル/i.test(requirement.requirement)),
     );
     const requirement: CapabilityRequirementDto = {
       requirement: tool.description || tool.displayName,
@@ -231,7 +238,7 @@ export function ensureRequiredScenarioTools(
       connector_name: tool.connectorName,
       tool_names: [tool.name],
       confidence: 1,
-      reason: tool.name === "generate_social_image"
+      reason: tool.name === "generate_image"
         ? "Agent Studio共通の画像生成Toolを自動で割り当てました"
         : "業務要件の必須契約として固定しました",
       variables: [],
@@ -254,12 +261,12 @@ export function ensureRequiredScenarioTools(
   if (requiresGeneratedImage && !requirements.some((requirement) => /画像|挿絵|イラスト|サムネイル/i.test(requirement.requirement))) {
     requirements.push({
       requirement: "依頼内容に合う画像を生成し、後続の投稿Toolへ渡す",
-      state: "missing",
+      state: "resolved",
       connector_id: null,
-      connector_name: null,
-      tool_names: [],
+      connector_name: "OpenAI標準機能",
+      tool_names: ["generate_image"],
       confidence: 1,
-      reason: "画像生成と成果物受け渡しを行う共通Toolがまだありません",
+      reason: "組織のOpenAI Projectを使う標準画像生成能力を割り当てました",
       variables: [],
     });
   }
@@ -437,7 +444,7 @@ export function organizationCodeWorkspaceQuestionsFor(
   }));
   const pendingIntake = intakeQuestionsFor(projectRequest).filter((question) => !completedTopics.has(question.topic));
   return requirements.flatMap((requirement) => {
-    if (requirement.state === "resolved" || requirement.fulfillment?.mode !== "organization_tool") return [];
+    if (requirement.state === "resolved" || !["organization_private_adapter", "organization_tool"].includes(requirement.fulfillment?.mode ?? "")) return [];
     if (coveredByIntake(requirement.requirement, pendingIntake)) return [];
     const topic = `organization_${createHash("sha256").update(requirement.requirement).digest("hex").slice(0, 12)}`;
     if (plannedTopics.has(topic)) return [];
@@ -476,7 +483,7 @@ export function intakeQuestionsFor(request: string): IntakeQuestion[] {
     title: "過去の問い合わせ履歴の参照先を教えてください",
     reason: "既存顧客か新規顧客かを、どの業務システムのどの識別子で判定するかを固定するためです",
     fields: [
-      { name: "system", label: "履歴を管理するシステム・接続方式", secret: false, required: true, placeholder: "例: CRM / PostgreSQL / 社内API" },
+      { name: "system", label: "履歴を提供する社内API", secret: false, required: true, placeholder: "例: 契約管理API / CRM参照API", description: "DB名や接続文字列は入力しません。会社が用意したAPIだけを指定してください。" },
       { name: "lookup_key", label: "顧客を特定する照合項目", secret: false, required: true, placeholder: "例: 法人番号、顧客ID、電話番号" },
       { name: "runtime_tool", label: "既存Runtime Tool名", secret: false, required: false, placeholder: "例: get_application", description: "Heartbeatで報告済みのToolを再利用する場合だけ入力してください。" },
       { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, placeholder: "例: https://api.example.com/openapi.json または https://mcp.example.com/mcp", description: "分かる場合だけ入力してください。公開HTTPSの仕様は自動検査してConnectorを生成します。" },
@@ -520,7 +527,7 @@ export function intakeQuestionsFor(request: string): IntakeQuestion[] {
     title: "自社の否決一覧の参照方法を教えてください",
     reason: "どの社内システムを、どの識別子で読み取り照合するかを固定するためです",
     fields: [
-      { name: "system", label: "システム名・接続方式", secret: false, required: true, placeholder: "例: Kintone / PostgreSQL / 社内API" },
+      { name: "system", label: "否決一覧を提供する社内API", secret: false, required: true, placeholder: "例: 審査台帳API / Kintone連携API", description: "DBへの直接接続は使いません。会社が用意したAPIだけを指定してください。" },
       { name: "match_fields", label: "照合項目", secret: false, required: true, placeholder: "例: 法人番号、代表者名、電話番号" },
       { name: "runtime_tool", label: "既存Runtime Tool名", secret: false, required: false, placeholder: "例: get_application", description: "Heartbeatで報告済みのToolを再利用する場合だけ入力してください。" },
       { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, placeholder: "例: https://screening.example.com/openapi.json", description: "公開HTTPSの仕様がある場合だけ入力してください。" },
@@ -592,7 +599,7 @@ export function buildFactoringWorkflow(
         name: "匿名化済みX投稿の最終承認",
         message: `投稿先Xアカウント: ${options.xAccountId}\n公開範囲: public\n最終本文: {{steps.public-summary.output}}`,
         next: "publish-result",
-        on_denied: "stop-denied",
+        on_denied: "stop-publication-denied",
       },
       {
         type: "tool",
@@ -601,6 +608,12 @@ export function buildFactoringWorkflow(
         deployment_id: deploymentId,
         tool_name: publish,
         arguments_template: `{"account_id":${JSON.stringify(options.xAccountId)},"text":{{steps.public-summary.output}},"logical_post_id":{{workflow_run_id}}}`,
+      },
+      {
+        type: "transform",
+        key: "stop-publication-denied",
+        name: "社内記録を保持して外部公開を停止",
+        output_template: '{"recorded":true,"published":false,"reason":"publication_denied"}',
       },
     ]
     : [];
@@ -629,12 +642,14 @@ export function buildFactoringWorkflow(
 export class BuilderOrchestrator {
   private readonly agents: AgentService;
   private readonly builderConnectors: BuilderConnectorService;
+  private readonly builderProjects: BuilderProjectService;
   private readonly environments: EnvironmentService;
   private readonly runs: RunService;
 
   constructor(private readonly deps: Deps) {
     this.agents = new AgentService(deps);
     this.builderConnectors = new BuilderConnectorService(deps);
+    this.builderProjects = new BuilderProjectService(deps);
     this.environments = new EnvironmentService(deps);
     this.runs = new RunService(deps);
   }
@@ -666,18 +681,12 @@ export class BuilderOrchestrator {
   private async ensureSharedPlatformTools(organizationId: string, request: string): Promise<void> {
     if (!GENERATED_IMAGE_REQUEST.test(request)) return;
     await this.deps.db.org(organizationId, async (tx) => {
-      const publishPost = await tx.tools.findUnique({
-        where: { organization_id_name: { organization_id: organizationId, name: "publish_post" } },
-        select: { connector_id: true },
-      });
-      if (!publishPost?.connector_id) return;
       const tool = await tx.tools.upsert({
-        where: { organization_id_name: { organization_id: organizationId, name: "generate_social_image" } },
+        where: { organization_id_name: { organization_id: organizationId, name: "generate_image" } },
         create: {
           organization_id: organizationId,
-          connector_id: publishPost.connector_id,
-          name: "generate_social_image",
-          display_name: "投稿用画像を生成",
+          name: "generate_image",
+          display_name: "画像を生成",
           execution_location: "studio_function",
           risk: "write",
           latest_version: 1,
@@ -693,7 +702,7 @@ export class BuilderOrchestrator {
             version: 1,
             spec: {
               execution_location: "studio_function",
-              description: "OpenAIで投稿用画像を生成し、Social Routerへ保存してmedia_idを返す",
+              description: "組織のOpenAI Projectで画像を生成し、Run専用Artifactとして保存する",
               risk: "write",
               input_schema: {
                 type: "object",
@@ -704,14 +713,17 @@ export class BuilderOrchestrator {
               output_schema: {
                 type: "object",
                 properties: {
-                  media_id: { type: "string" },
+                  artifact_path: { type: "string" },
                   mime_type: { type: "string" },
                   bytes: { type: "number" },
+                  sha256: { type: "string" },
+                  model: { type: "string" },
+                  safety_status: { type: "string" },
                   revised_prompt: { type: "string" },
                 },
-                required: ["media_id", "mime_type", "bytes"],
+                required: ["artifact_path", "mime_type", "bytes", "sha256", "model", "safety_status"],
               },
-              studio_function: { handler: "openai_image_to_social_media", model: "gpt-image-2.5-flare" },
+              studio_function: { handler: "openai_image_artifact", model: "gpt-image-2.5-flare" },
             } as Prisma.InputJsonValue,
           },
         });
@@ -723,7 +735,7 @@ export class BuilderOrchestrator {
           target_type: "tool",
           target_id: tool.id,
           result: "success",
-          detail: { tool_name: tool.name, connector_id: publishPost.connector_id },
+          detail: { tool_name: tool.name, capability: "image_generation", provider: "openai" },
         } });
       }
     });
@@ -928,7 +940,7 @@ export class BuilderOrchestrator {
       ).map((requirement): CapabilityRequirementDto => {
         const organizationTopic = `organization_${createHash("sha256").update(requirement.requirement).digest("hex").slice(0, 12)}`;
         if (registeredAdapterNames.length > 0 && (
-          requirement.fulfillment?.mode === "organization_tool"
+          ["organization_private_adapter", "organization_tool"].includes(requirement.fulfillment?.mode ?? "")
           || registeredAdapterTopics.has(organizationTopic)
         )) {
           const adapterTools = tools.filter((tool) => registeredAdapterNames.includes(tool.name));
@@ -1198,7 +1210,7 @@ export class BuilderOrchestrator {
 
       const strategy = (requirement: CapabilityRequirementDto) => {
         if ([...browserTopics].some((topic) => requirementMatchesTopic(requirement.requirement, topic))) return "browser" as const;
-        if (requirement.fulfillment?.mode === "organization_tool") return "generate_code" as const;
+        if (["organization_private_adapter", "organization_tool"].includes(requirement.fulfillment?.mode ?? "")) return "generate_code" as const;
         if ([...codeTopics].some((topic) => requirementMatchesTopic(requirement.requirement, topic))) return "generate_code" as const;
         return strategyFor(requirement.state);
       };
@@ -1585,7 +1597,7 @@ export class BuilderOrchestrator {
         const resolutionStrategy = (requirement: CapabilityRequirementDto) => {
           const browserTopic = [...browserTopics].find((topic) => requirementMatchesTopic(requirement.requirement, topic));
           if (browserTopic) return "browser" as const;
-          if (requirement.fulfillment?.mode === "organization_tool") return "generate_code" as const;
+          if (["organization_private_adapter", "organization_tool"].includes(requirement.fulfillment?.mode ?? "")) return "generate_code" as const;
           const codeTopic = [...codeTopics].find((topic) => requirementMatchesTopic(requirement.requirement, topic));
           return codeTopic ? "generate_code" as const : strategyFor(requirement.state);
         };
@@ -1759,7 +1771,8 @@ export class BuilderOrchestrator {
           ],
           resume_condition: { type: "browser_runtime_ready", required_tools: [...REQUIRED_BROWSER_FLOW_TOOL_NAMES] },
         } });
-        const previewToolNames = tools.filter((tool) => tool.risk === "read").map((tool) => tool.name);
+        // Agent Studio内だけへArtifactを作る標準画像生成は、外部作用を伴わないためPreviewで許可する。
+        const previewToolNames = tools.filter((tool) => tool.risk === "read" || tool.name === "generate_image").map((tool) => tool.name);
         const actionCount = human.length + intake.length + codeWorkspaceActionCount + discoveryFailures.length + (needsBrowserRuntime ? 1 : 0);
         const materializeAgent = prepared.draft.resolution.ready && actionCount === 0 && gaps.length === 0;
         const modelOnly = prepared.draft.resolution.requirements.every((requirement) => requirement.fulfillment?.mode === "model");
@@ -1795,13 +1808,122 @@ export class BuilderOrchestrator {
         await this.agents.createProjectFromDraft(actor, context.project.request, prepared.draft, project.agent_id ?? undefined);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "作成計画を生成できませんでした";
+      const failure = classifyBuilderFailure(error);
       await this.deps.db.org(organizationId, async (tx) => {
         const run = await tx.builder_runs.findUnique({ where: { id: runId } });
-        if (!run) return;
-        await tx.builder_runs.update({ where: { id: runId }, data: { status: "failed", error_class: "unknown", error: message.slice(0, 2000), finished_at: new Date(), lease_until: null } });
-        await tx.builder_steps.updateMany({ where: { run_id: runId, status: "running" }, data: { status: "failed", error_class: "unknown", error: message.slice(0, 2000), finished_at: new Date() } });
-        await tx.builder_projects.update({ where: { id: run.project_id }, data: { status: "failed" } });
+        // lease切れ後に別Workerが成功させた場合や、同じcatchが再入した場合は古い結果で戻さない。
+        if (!run || run.status !== "running" || run.lease_owner !== this.deps.env.WORKER_ID) return;
+        const sameFailures = await tx.builder_runs.count({
+          where: { project_id: run.project_id, error_fingerprint: failure.fingerprint },
+        });
+        const fingerprintAttempt = sameFailures + 1;
+        const retryEligible = failure.retryable && fingerprintAttempt < failure.maxAttempts;
+        const retryApproval = retryEligible
+          ? await evaluateOrganizationAutoApproval(tx, organizationId, {
+              actionKind: "retry",
+              stage: "staging",
+              operation: "builder_retry",
+              risk: "write",
+              requestedRecords: 1,
+              now: new Date(),
+            })
+          : null;
+        // Policyをまだ作っていない既存組織は従来の自律再試行を維持する。
+        // Policyが存在する組織ではmanual/停止/範囲外を必ず人間へ戻す。
+        const willRetry = retryEligible && (!retryApproval?.policy || retryApproval.decision.action === "auto_approve");
+        const now = new Date();
+        const evidence = await tx.builder_validation_runs.create({ data: {
+          organization_id: organizationId,
+          project_id: run.project_id,
+          suite: "ci",
+          environment: "builder",
+          status: "failed",
+          evidence: {
+            builder_run_id: runId,
+            failure_class: failure.failureClass,
+            error_fingerprint: failure.fingerprint,
+            fingerprint_attempt: fingerprintAttempt,
+            retryable: failure.retryable,
+            will_retry: willRetry,
+          },
+          error_class: failure.failureClass,
+          error: failure.message,
+          finished_at: now,
+        } });
+        await tx.builder_runs.update({ where: { id: runId }, data: {
+          status: "failed",
+          error_class: failure.failureClass,
+          error: failure.message,
+          error_fingerprint: failure.fingerprint,
+          retryable: failure.retryable,
+          next_action: willRetry
+            ? "安全な範囲で自動再試行します"
+            : retryEligible && retryApproval?.policy
+              ? `自動再試行Policyの確認が必要です: ${retryApproval.decision.reason}`
+              : failure.nextAction,
+          last_evidence_id: evidence.id,
+          finished_at: now,
+          lease_until: null,
+        } });
+        await tx.builder_steps.updateMany({ where: { run_id: runId, status: "running" }, data: {
+          status: "failed", error_class: failure.failureClass, error: failure.message, finished_at: now,
+        } });
+        if (willRetry) {
+          if (retryApproval?.policy && retryApproval.decision.action === "auto_approve") {
+            await tx.approvals.create({ data: {
+              organization_id: organizationId,
+              source: "builder",
+              tool: "builder_retry",
+              args_hash: await toolCallHash("builder_retry", { project_id: run.project_id, error_fingerprint: failure.fingerprint, fingerprint_attempt: fingerprintAttempt }),
+              args_preview: canonicalJson({ project_id: run.project_id, failure_class: failure.failureClass, fingerprint_attempt: fingerprintAttempt }).slice(0, 4000),
+              reason: "Builderの修復可能な失敗を再試行",
+              status: "consumed",
+              expires_at: new Date(now.getTime() + 15 * 60_000),
+              decided_at: now,
+              consumed_at: now,
+              auto_approved: true,
+              auto_approval_policy_id: retryApproval.policy.id,
+              auto_approval_policy_version: retryApproval.policy.version,
+              auto_approval_reason: retryApproval.decision.reason,
+            } });
+          }
+          const max = await tx.builder_runs.aggregate({ where: { project_id: run.project_id }, _max: { attempt: true } });
+          const notBefore = new Date(now.getTime() + builderRetryDelayMs(failure, fingerprintAttempt));
+          await tx.builder_runs.create({ data: {
+            organization_id: organizationId,
+            project_id: run.project_id,
+            attempt: (max._max.attempt ?? run.attempt) + 1,
+            correlation_id: randomUUID(),
+            status: "queued",
+            budget: { max_attempts: failure.maxAttempts, failure_fingerprint: failure.fingerprint, fingerprint_attempt: fingerprintAttempt + 1 },
+            not_before: notBefore,
+          } });
+          await tx.builder_projects.update({ where: { id: run.project_id }, data: { status: "analyzing", completed_at: null } });
+        } else {
+          await tx.builder_projects.update({ where: { id: run.project_id }, data: { status: "blocked", completed_at: null } });
+        }
+        await tx.audit_logs.createMany({ data: [{
+          organization_id: organizationId,
+          actor_type: "system",
+          actor_label: "Builder Orchestrator",
+          action: willRetry ? "builder.failure.retry_scheduled" : "builder.failure.blocked",
+          target_type: "builder_project",
+          target_id: run.project_id,
+          result: "failure",
+          detail: {
+            builder_run_id: runId,
+            failure_class: failure.failureClass,
+            error_fingerprint: failure.fingerprint,
+            fingerprint_attempt: fingerprintAttempt,
+            retryable: failure.retryable,
+            next_action: failure.nextAction,
+            evidence_id: evidence.id,
+            auto_approval_policy_id: retryApproval?.policy?.id ?? null,
+            auto_approval_policy_version: retryApproval?.policy?.version ?? null,
+            auto_approval_decision: retryApproval?.decision.action ?? "legacy_default",
+            auto_approval_reason: retryApproval?.decision.reason ?? null,
+          },
+        }] });
       });
       this.deps.logger.error({ err: error, builder_run_id: runId }, "Builder Projectの生成またはPreviewに失敗しました");
     }
@@ -1989,13 +2111,13 @@ export class BuilderOrchestrator {
   }
 
   private async reconcilePreviews(): Promise<void> {
-    const active = await this.deps.system.listActiveBuilderPreviews(20);
+    const active = await this.deps.system.listActiveBuilderPreviews(this.deps.env.WORKER_ID, 20);
     await Promise.all(active.map(async (item) => {
-      await this.deps.db.org(item.organization_id, async (tx) => {
+      const automaticPromotion = await this.deps.db.org(item.organization_id, async (tx) => {
         const release = await tx.builder_releases.findUnique({ where: { id: item.builder_release_id } });
-        if (!release?.preview_run_id || release.status !== "preview_running") return;
+        if (!release?.preview_run_id || release.status !== "preview_running") return null;
         const run = await tx.runs.findUnique({ where: { id: release.preview_run_id } });
-        if (!run || !["completed", "failed", "cancelled"].includes(run.status)) return;
+        if (!run || !["completed", "failed", "cancelled"].includes(run.status)) return null;
         const requiredTools = new Set(release.required_tools);
         const events = await tx.run_events.findMany({ where: { run_id: run.id, type: { in: ["tool.call", "error"] } } });
         const successfulToolNames = events.filter((event) => event.type === "tool.call").flatMap((event) => {
@@ -2027,6 +2149,7 @@ export class BuilderOrchestrator {
           },
         });
         const project = await tx.builder_projects.findUniqueOrThrow({ where: { id: release.project_id } });
+        let autoPromotion: null | { projectId: string; createdBy: string | null; approvalId: string; policyId: string; policyVersion: number; reason: string } = null;
         if (succeeded && project.target === "production") {
           const existing = await tx.human_actions.findFirst({ where: { project_id: project.id, type: "production_approval", status: "pending" } });
           if (!existing) await tx.human_actions.create({ data: {
@@ -2040,6 +2163,42 @@ export class BuilderOrchestrator {
             instructions: ["Previewの結果と構成ハッシュを確認します", "承認すると同じ内容をProductionへ昇格し、最終確認を実行します", "失敗時は直前の正常な状態へ自動で戻します"],
             resume_condition: { type: "production_approval", release_id: release.id, build_id: release.build_id, config_hash: release.config_hash },
           } });
+          const requiredToolRisks = release.required_tools.length > 0
+            ? await tx.tools.findMany({ where: { organization_id: item.organization_id, name: { in: release.required_tools } }, select: { risk: true } })
+            : [];
+          const auto = await evaluateOrganizationAutoApproval(tx, item.organization_id, {
+            actionKind: "production_promotion",
+            stage: "production",
+            operation: "production_promotion",
+            risk: requiredToolRisks.every((tool) => tool.risk === "read") ? "read" : "write",
+            requestedRecords: 1,
+            now,
+          });
+          if (auto.policy && auto.decision.action === "auto_approve") {
+            const approval = await tx.approvals.create({ data: {
+              organization_id: item.organization_id,
+              source: "builder",
+              tool: "production_promotion",
+              args_hash: await toolCallHash("production_promotion", { project_id: project.id, release_id: release.id, build_id: release.build_id, config_hash: release.config_hash }),
+              args_preview: canonicalJson({ project_id: project.id, release_id: release.id, build_id: release.build_id, config_hash: release.config_hash }).slice(0, 4000),
+              reason: "Previewで固定した同一BuildをProductionへ昇格",
+              status: "approved",
+              expires_at: new Date(now.getTime() + 15 * 60_000),
+              decided_at: now,
+              auto_approved: true,
+              auto_approval_policy_id: auto.policy.id,
+              auto_approval_policy_version: auto.policy.version,
+              auto_approval_reason: auto.decision.reason,
+            } });
+            autoPromotion = {
+              projectId: project.id,
+              createdBy: project.created_by,
+              approvalId: approval.id,
+              policyId: auto.policy.id,
+              policyVersion: auto.policy.version,
+              reason: auto.decision.reason,
+            };
+          }
         }
         await tx.builder_projects.update({
           where: { id: project.id },
@@ -2057,15 +2216,49 @@ export class BuilderOrchestrator {
           result: succeeded ? "success" : "failure",
           detail: { project_id: project.id, run_id: run.id, run_status: run.status, run_outcome: run.outcome, used_expected_tool: usedExpectedTool },
         }] });
+        return autoPromotion;
       });
+      if (automaticPromotion) {
+        try {
+          await this.builderProjects.approveProduction(
+            { ...this.actor(item.organization_id, automaticPromotion.createdBy), role: "admin", isApprover: true },
+            automaticPromotion.projectId,
+            {
+              approvalId: automaticPromotion.approvalId,
+              policyId: automaticPromotion.policyId,
+              policyVersion: automaticPromotion.policyVersion,
+              reason: automaticPromotion.reason,
+            },
+          );
+        } catch (error) {
+          await this.deps.db.org(item.organization_id, async (tx) => {
+            await tx.approvals.updateMany({
+              where: { id: automaticPromotion.approvalId, status: "approved" },
+              data: { status: "expired", comment: "Production自動昇格に失敗したため、管理者確認へ戻しました" },
+            });
+            await tx.audit_logs.create({ data: {
+              organization_id: item.organization_id,
+              actor_type: "system",
+              actor_id: automaticPromotion.policyId,
+              actor_label: "Organization Policy",
+              action: "builder.production.auto_promote",
+              target_type: "builder_project",
+              target_id: automaticPromotion.projectId,
+              result: "failure",
+              detail: { approval_id: automaticPromotion.approvalId, policy_version: automaticPromotion.policyVersion, error_class: classifyBuilderFailure(error).failureClass },
+            } });
+          });
+        }
+      }
     }));
   }
 
   private async reconcileProductionRuns(): Promise<void> {
-    const active = await this.deps.system.listActiveBuilderProductionRuns(20);
+    const active = await this.deps.system.listActiveBuilderProductionRuns(this.deps.env.WORKER_ID, 20);
     for (const item of active) {
       let rollbackTarget: string | null = null;
       let failedRelease: string | null = null;
+      let rollbackApproval: null | { id: string; policyId: string; policyVersion: number; reason: string } = null;
       await this.deps.db.org(item.organization_id, async (tx) => {
         const release = await tx.builder_releases.findUnique({ where: { id: item.builder_release_id } });
         if (!release?.production_run_id || release.status !== "production_running") return;
@@ -2090,25 +2283,110 @@ export class BuilderOrchestrator {
           where: { project_id: release.project_id, environment: "production", status: "running" },
           data: { status: succeeded ? "passed" : "failed", evidence: { release_id: release.id, deployment_id: release.production_deployment_id, run_id: run.id, build_id: release.build_id, config_hash: release.config_hash, same_build: true, limited_run: true, used_expected_tool: usedExpectedTool }, error_class: succeeded ? null : "production_limited_run", error: validationError, finished_at: now },
         });
-        await tx.builder_projects.update({ where: { id: release.project_id }, data: succeeded ? { status: "completed", completed_at: now } : { status: "failed" } });
+        // Production Run成功だけでは完成にしない。直後のHealth/drift検証がpassして初めてcompletedへ進める。
+        await tx.builder_projects.update({ where: { id: release.project_id }, data: succeeded ? { status: "validating", completed_at: null } : { status: "failed" } });
         await tx.audit_logs.createMany({ data: [{ organization_id: item.organization_id, actor_type: "system", actor_label: "Builder Orchestrator", action: "builder.production.complete", target_type: "builder_release", target_id: release.id, result: succeeded ? "success" : "failure", detail: { run_id: run.id, build_id: release.build_id, same_build: true, used_expected_tool: usedExpectedTool } }] });
         if (!succeeded && release.rollback_target_deployment_id) {
-          rollbackTarget = release.rollback_target_deployment_id;
-          failedRelease = release.id;
+          const auto = await evaluateOrganizationAutoApproval(tx, item.organization_id, {
+            actionKind: "rollback",
+            stage: "production",
+            operation: "production_rollback",
+            risk: "destructive",
+            requestedRecords: 1,
+            now,
+          });
+          // 設定未導入の既存組織は従来どおり安全側の自動Rollbackを維持する。
+          // Policyがある場合はautomatic_rollbackとoperation allowlistを両方満たす必要がある。
+          if (!auto.policy || auto.decision.action === "auto_approve") {
+            rollbackTarget = release.rollback_target_deployment_id;
+            failedRelease = release.id;
+            if (auto.policy && auto.decision.action === "auto_approve") {
+              const approval = await tx.approvals.create({ data: {
+                organization_id: item.organization_id,
+                source: "builder",
+                tool: "production_rollback",
+                args_hash: await toolCallHash("production_rollback", { release_id: release.id, rollback_target_deployment_id: release.rollback_target_deployment_id }),
+                args_preview: canonicalJson({ release_id: release.id, rollback_target_deployment_id: release.rollback_target_deployment_id }).slice(0, 4000),
+                reason: "Production限定Run失敗時に直前の正常Buildへ戻す",
+                status: "approved",
+                expires_at: new Date(now.getTime() + 15 * 60_000),
+                decided_at: now,
+                auto_approved: true,
+                auto_approval_policy_id: auto.policy.id,
+                auto_approval_policy_version: auto.policy.version,
+                auto_approval_reason: auto.decision.reason,
+              } });
+              rollbackApproval = { id: approval.id, policyId: auto.policy.id, policyVersion: auto.policy.version, reason: auto.decision.reason };
+            }
+          } else {
+            await tx.builder_projects.update({ where: { id: release.project_id }, data: { status: "blocked", completed_at: null } });
+            await tx.audit_logs.create({ data: {
+              organization_id: item.organization_id,
+              actor_type: "system",
+              actor_id: auto.policy.id,
+              actor_label: "Organization Policy",
+              action: "builder.production.rollback_blocked",
+              target_type: "builder_release",
+              target_id: release.id,
+              result: "failure",
+              detail: { rollback_target_id: release.rollback_target_deployment_id, policy_version: auto.policy.version, reason: auto.decision.reason },
+            } });
+          }
         }
       });
       if (rollbackTarget && failedRelease) {
-        const restored = await this.environments.rollback({ ...this.actor(item.organization_id, null), role: "admin" }, rollbackTarget);
-        await this.deps.db.org(item.organization_id, async (tx) => {
-          await tx.builder_releases.update({ where: { id: failedRelease! }, data: { status: "rolled_back" } });
-          await tx.audit_logs.createMany({ data: [{ organization_id: item.organization_id, actor_type: "system", actor_label: "Builder Orchestrator", action: "builder.production.rollback", target_type: "builder_release", target_id: failedRelease!, result: "success", detail: { rollback_target_id: rollbackTarget, restored_deployment_id: restored.id } }] });
-        });
+        try {
+          const restored = await this.environments.rollback({ ...this.actor(item.organization_id, null), role: "admin" }, rollbackTarget);
+          await this.deps.db.org(item.organization_id, async (tx) => {
+            await tx.builder_releases.update({ where: { id: failedRelease! }, data: { status: "rolled_back" } });
+            if (rollbackApproval) {
+              await tx.approvals.update({ where: { id: rollbackApproval.id }, data: { status: "consumed", consumed_at: new Date() } });
+            }
+            await tx.audit_logs.createMany({ data: [{
+              organization_id: item.organization_id,
+              actor_type: "system",
+              actor_id: rollbackApproval?.policyId ?? null,
+              actor_label: rollbackApproval ? "Organization Policy" : "Builder Orchestrator",
+              action: "builder.production.rollback",
+              target_type: "builder_release",
+              target_id: failedRelease!,
+              result: "success",
+              detail: {
+                rollback_target_id: rollbackTarget,
+                restored_deployment_id: restored.id,
+                approval_id: rollbackApproval?.id ?? null,
+                policy_version: rollbackApproval?.policyVersion ?? null,
+                reason: rollbackApproval?.reason ?? "legacy_safe_rollback",
+              },
+            }] });
+          });
+        } catch (error) {
+          await this.deps.db.org(item.organization_id, async (tx) => {
+            if (rollbackApproval) {
+              await tx.approvals.updateMany({
+                where: { id: rollbackApproval.id, status: "approved" },
+                data: { status: "expired", comment: "自動Rollbackの実行に失敗しました" },
+              });
+            }
+            await tx.audit_logs.create({ data: {
+              organization_id: item.organization_id,
+              actor_type: "system",
+              actor_id: rollbackApproval?.policyId ?? null,
+              actor_label: rollbackApproval ? "Organization Policy" : "Builder Orchestrator",
+              action: "builder.production.rollback",
+              target_type: "builder_release",
+              target_id: failedRelease!,
+              result: "failure",
+              detail: { rollback_target_id: rollbackTarget, error_class: classifyBuilderFailure(error).failureClass },
+            } });
+          });
+        }
       }
     }
   }
 
   private async reconcileDrift(): Promise<void> {
-    const candidates = await this.deps.system.listBuilderReleasesForDrift(20);
+    const candidates = await this.deps.system.listBuilderReleasesForDrift(this.deps.env.WORKER_ID, 20);
     for (const item of candidates) {
       await this.deps.db.org(item.organization_id, async (tx) => {
         const release = await tx.builder_releases.findUnique({ where: { id: item.builder_release_id } });
@@ -2128,7 +2406,7 @@ export class BuilderOrchestrator {
           .filter((link) => link.connection.status !== "connected" || Boolean(link.connection.revoked_at))
           .map((link) => link.connector_id);
         const runtime = deployment?.runtime_profile.runtime;
-        const runtimeHealthy = !runtime || ["active", "degraded"].includes(runtime.status);
+        const runtimeHealthy = !runtime || runtime.status === "active";
         const runtimeCatalog = Array.isArray(runtime?.tool_catalog) ? runtime.tool_catalog as Array<{ name?: unknown }> : [];
         const runtimeToolNames = new Set(runtimeCatalog.flatMap((entry) => typeof entry.name === "string" ? [entry.name] : []));
         const missingRuntimeTools = runtime ? release.required_tools.filter((name) => !runtimeToolNames.has(name)) : [];
@@ -2158,7 +2436,11 @@ export class BuilderOrchestrator {
           error: healthy ? null : "ProductionのBuild、Connection、Runtime、またはHealthが固定時点から変化しました",
           finished_at: now,
         } });
-        if (!healthy) await tx.builder_projects.update({ where: { id: release.project_id }, data: { status: "blocked", completed_at: null } });
+        if (deployment) await tx.deployments.update({ where: { id: deployment.id }, data: { health_status: healthy ? "ready" : "degraded" } });
+        await tx.builder_projects.update({
+          where: { id: release.project_id },
+          data: healthy ? { status: "completed", completed_at: now } : { status: "blocked", completed_at: null },
+        });
         await tx.audit_logs.createMany({ data: [{
           organization_id: item.organization_id,
           actor_type: "system",
