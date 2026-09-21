@@ -86,7 +86,7 @@ yarn workspace @agent-studio/api test:integration  # 結合テスト（PostgreSQ
 | [deploy-runtime.yml](.github/workflows/deploy-runtime.yml) | main への push（staging）・手動（production） | Runtime のイメージの push → 企業ごとの Terraform の適用 |
 
 AWS には GitHub OIDC で接続する（長期のアクセスキーは使わない）。AWS 側の準備と GitHub Environment の変数は [infra/README.md](infra/README.md)。
-必須のAWS設定が不足している場合、デプロイのワークフローは失敗終了する。
+必須のAWS設定が不足している場合、main への push で起動した自動デプロイは warning を残してスキップする。手動で明示的に起動したデプロイは設定不足をエラーとして失敗終了する。
 
 ## ドキュメント
 
