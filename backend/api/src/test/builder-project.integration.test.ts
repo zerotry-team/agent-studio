@@ -566,7 +566,8 @@ describe("Builder Project", () => {
     expect(applied.body.connector.tools).toHaveLength(1);
     expect(applied.body.project.status).toBe("waiting_human_action");
     expect(applied.body.project.discovery_sources).toHaveLength(1);
-    expect(applied.body.project.change_sets[0]).toMatchObject({ kind: "declarative_connector", status: "applied", risk: "read" });
+    expect(applied.body.project.change_sets.find((change: { kind: string }) => change.kind === "declarative_connector"))
+      .toMatchObject({ kind: "declarative_connector", status: "applied", risk: "read" });
     expect(applied.body.project.validation_runs.map((run: { suite: string; status: string }) => [run.suite, run.status])).toEqual(
       expect.arrayContaining([["contract", "passed"], ["security", "passed"]]),
     );

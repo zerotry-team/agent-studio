@@ -248,7 +248,7 @@ SDK（`openai` 7.x）の型を調べた結果（docs/reference/openai-agents-sdk
 | 対象 | 方法 | 結果 |
 |---|---|---|
 | 型・単体テスト | `yarn type-check` / `yarn lint` / `yarn test`（全ワークスペース） | 型・lint成功、436 件すべて成功 |
-| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration --run --maxWorkers=1 --minWorkers=1`（PostgreSQL 16） | 60 件すべて成功。Browser Profileの一回限りRelay ticket、Runtime照合、revoke cleanup、Builderの質問・回答・自動Discovery・公開/Human Login Browser Flow・Browser Runtime自動再開、OpenAPI / MCP生成 → Preview Run、GitHub App delivery、Workflow v2、承認付き外部作用、同一BuildのProduction昇格、Harness単位queue分離を含む |
+| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration --run --maxWorkers=1 --minWorkers=1`（PostgreSQL 16） | 61 件すべて成功。Browser Profileの一回限りRelay ticket、Runtime照合、revoke cleanup、Builderの質問・回答・自動Discovery・公開/Human Login Browser Flow・Browser Runtime自動再開、OpenAPI / MCP生成 → Preview Run、GitHub App delivery、Workflow v2、承認付き外部作用、同一BuildのProduction昇格、Harness単位queue分離を含む |
 | ビルド | `yarn build`、`docker build`（api / web / runtime の全イメージ） | 成功 |
 | Terraform | `fmt` / `validate`（5 つのルートモジュール）、モックのプロバイダーでの apply | 成功 |
 | ワークフロー | actionlint | 指摘なし |
