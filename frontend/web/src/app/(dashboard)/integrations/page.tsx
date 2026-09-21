@@ -150,6 +150,28 @@ const BROWSER_PRESET = {
       risk: "write" as const,
       input_schema: { type: "object" as const, properties: {}, additionalProperties: true },
     })),
+    {
+      name: "browser_download",
+      display_name: "ファイルを取得",
+      description: "DownloadをRun専用Artifactとして安全検査し、本文をモデルへ渡さず保持する",
+      risk: "read" as const,
+      input_schema: { type: "object" as const, properties: { selector: { type: "string" }, text: { type: "string" } }, additionalProperties: false },
+    },
+    {
+      name: "browser_upload",
+      display_name: "Artifactを送信",
+      description: "このRunで取得したArtifact IDだけを承認後に許可済みWeb画面へUploadする",
+      risk: "external_send" as const,
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          selector: { type: "string" }, artifact_id: { type: "string" }, destination: { type: "string" },
+          filename: { type: "string" }, sha256: { type: "string" },
+        },
+        required: ["selector", "artifact_id", "destination", "filename", "sha256"],
+        additionalProperties: false,
+      },
+    },
   ],
 };
 

@@ -879,6 +879,13 @@ export interface BrowserLoginSessionDto {
   launch_path: string;
 }
 
+export interface BrowserRelayTicketDto {
+  session_id: string;
+  token: string;
+  websocket_url: string;
+  expires_at: string;
+}
+
 export const createDeploymentCredentialSchema = z.object({
   name: z.string().trim().min(1).max(100),
   rate_limit_per_minute: z.number().int().min(1).max(600).default(60),

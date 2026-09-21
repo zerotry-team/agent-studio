@@ -17,6 +17,7 @@ import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { SkeletonText } from "@/components/ui/skeleton";
 import { useActionQuery } from "@/hooks/use-action-query";
 import { useSession } from "@/hooks/use-session";
+import { BrowserProfilesCard } from "./browser-profiles-card";
 
 const isGitHubApp = (connection: ConnectionDto) => connection.metadata.provider === "github_app";
 const isRuntimeReady = (runtime: RuntimeDto) => ["active", "degraded"].includes(runtime.status);
@@ -90,6 +91,7 @@ export function InfrastructureTab() {
             </div>
           </CardBody>
         </Card>
+        <BrowserProfilesCard />
       </div>
 
       {githubDialog ? (

@@ -4,8 +4,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { BROWSER_TOOLS, callBrowserTool } from "./actions.js";
 import type { BrowserSession } from "./session.js";
+import { z } from "zod";
 
-const MAX_BODY = 1024 * 1024;
+const MAX_BODY = 4 * 1024 * 1024;
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -24,11 +25,67 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+const humanActionSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("navigate"), url: z.url().max(2000) }).strict(),
+  z.object({ type: z.literal("click"), x: z.number().min(0).max(10000), y: z.number().min(0).max(10000) }).strict(),
+  z.object({ type: z.literal("type"), value: z.string().max(20_000) }).strict(),
+  z.object({ type: z.literal("key"), key: z.string().min(1).max(100) }).strict(),
+  z.object({ type: z.literal("scroll"), delta_x: z.number().min(-10000).max(10000), delta_y: z.number().min(-10000).max(10000) }).strict(),
+]);
+
+async function screenshot(session: BrowserSession): Promise<{ image: string; url: string; title: string }> {
+  const page = session.page();
+  const image = await page.screenshot({ type: "jpeg", quality: 75 });
+  return { image: image.toString("base64"), url: page.url(), title: await page.title() };
+}
+
+async function humanAction(session: BrowserSession, body: unknown): Promise<void> {
+  const action = humanActionSchema.parse(body);
+  const page = session.page();
+  if (action.type === "navigate") await session.navigateForHuman(action.url);
+  else if (action.type === "click") await page.mouse.click(action.x, action.y);
+  else if (action.type === "type") await page.keyboard.type(action.value);
+  else if (action.type === "key") await page.keyboard.press(action.key);
+  else await page.mouse.wheel(action.delta_x, action.delta_y);
+}
+
 export function createBrowserServer(session: BrowserSession, version: string): Server {
   const expectedPath = `/mcp/${session.config.sessionToken}`;
+  const humanPrefix = `/human/${session.config.sessionToken}`;
   return createServer(async (req, res) => {
     const path = (req.url ?? "/").split("?")[0];
     if (path === "/health") return json(res, 200, { status: "ok", mode: session.config.mode });
+    if (path === `${humanPrefix}/screenshot` && req.method === "GET") {
+      try {
+        return json(res, 200, await screenshot(session));
+      } catch {
+        return json(res, 500, { error: "screenshot_failed" });
+      }
+    }
+    if (path === `${humanPrefix}/action` && req.method === "POST") {
+      try {
+        await humanAction(session, await readBody(req));
+        return json(res, 200, await screenshot(session));
+      } catch (error) {
+        const message = error instanceof z.ZodError ? "invalid_action" : error instanceof Error ? error.message : "action_failed";
+        return json(res, 400, { error: message });
+      }
+    }
+    if (path === `${humanPrefix}/profile` && req.method === "PUT") {
+      try {
+        await session.importStorageState((await readBody(req)) as { cookies?: unknown[]; origins?: unknown[] });
+        return json(res, 204, null);
+      } catch {
+        return json(res, 400, { error: "invalid_profile" });
+      }
+    }
+    if (path === `${humanPrefix}/profile` && req.method === "GET") {
+      try {
+        return json(res, 200, await session.exportStorageState());
+      } catch {
+        return json(res, 500, { error: "profile_export_failed" });
+      }
+    }
     if (path !== expectedPath) return json(res, 404, { error: "not_found" });
     if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
 

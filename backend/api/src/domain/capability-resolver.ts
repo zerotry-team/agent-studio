@@ -41,6 +41,8 @@ const BROWSER_CAPABILITIES = new Set([
   "browser_select_option",
   "browser_hover",
   "browser_drag",
+  "browser_download",
+  "browser_upload",
   "browser_exec_js",
 ]);
 

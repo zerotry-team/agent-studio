@@ -12,6 +12,10 @@ output "api_service_name" {
   value = module.control_plane.api_service_name
 }
 
+output "relay_service_name" {
+  value = module.control_plane.relay_service_name
+}
+
 output "worker_service_name" {
   value = module.control_plane.worker_service_name
 }

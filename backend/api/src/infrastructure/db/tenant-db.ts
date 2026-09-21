@@ -73,6 +73,12 @@ export class SystemDb {
     return rows[0] ?? null;
   }
 
+  async consumeBrowserLoginTicket(sessionId: string, tokenHash: string): Promise<{ organization_id: string; runtime_id: string; expires_at: Date } | null> {
+    const rows = await this.prisma.$queryRaw<Array<{ organization_id: string; runtime_id: string; expires_at: Date }>>`
+      SELECT * FROM system_consume_browser_login_ticket(${sessionId}::uuid, ${tokenHash})`;
+    return rows[0] ?? null;
+  }
+
   claimRuns(owner: string, leaseSeconds: number, limit: number) {
     return this.prisma.$queryRaw<{ run_id: string; organization_id: string }[]>`
       SELECT * FROM system_claim_runs(${owner}, ${leaseSeconds}::integer, ${limit}::integer)`;

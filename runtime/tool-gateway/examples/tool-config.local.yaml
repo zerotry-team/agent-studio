@@ -327,6 +327,30 @@ upstream_mcp:
             target_selector: { type: string }
           required: [source_selector, target_selector]
           additionalProperties: false
+      - name: browser_download
+        risk: read
+        reads_untrusted_content: true
+        description: "クリックで開始されるDownloadをこのRun専用Artifactとして安全検査します"
+        input_schema:
+          type: object
+          properties:
+            selector: { type: string }
+            text: { type: string }
+          additionalProperties: false
+      - name: browser_upload
+        risk: external_send
+        reads_untrusted_content: true
+        description: "このRunで取得したArtifact IDだけを現在の許可済みWeb画面へUploadします"
+        input_schema:
+          type: object
+          properties:
+            selector: { type: string }
+            artifact_id: { type: string }
+            destination: { type: string }
+            filename: { type: string }
+            sha256: { type: string }
+          required: [selector, artifact_id, destination, filename, sha256]
+          additionalProperties: false
       - name: browser_exec_js
         risk: write
         reads_untrusted_content: true

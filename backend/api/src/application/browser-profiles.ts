@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { BrowserLoginSessionDto, BrowserProfileDto, CreateBrowserProfileInput } from "@agent-studio/contracts";
+import { isIP } from "node:net";
+import type { BrowserLoginSessionDto, BrowserProfileDto, BrowserRelayTicketDto, CreateBrowserProfileInput } from "@agent-studio/contracts";
 import { conflict, notFound, preconditionFailed, validationError } from "../domain/errors.js";
 import { recordAudit } from "../infrastructure/audit.js";
 import { auditBy, requireRole, scopeOf, type MemberActor } from "./context.js";
@@ -41,7 +42,9 @@ export class BrowserProfileService {
   async create(actor: MemberActor, input: CreateBrowserProfileInput): Promise<BrowserProfileDto> {
     requireRole(actor, "builder");
     const domains = [...new Set(input.allowed_domains.map((domain) => domain.toLowerCase().replace(/\.$/, "")))];
-    if (domains.some((domain) => !DOMAIN.test(domain) || domain === "localhost")) throw validationError("接続先ドメインの形式が正しくありません");
+    if (domains.some((domain) => !DOMAIN.test(domain) || domain === "localhost" || isIP(domain) !== 0 || !domain.includes("."))) {
+      throw validationError("接続先ドメインはIPやpublic suffixではなく、完全なドメイン名で指定してください");
+    }
     return this.deps.db.run(scopeOf(actor), async (tx) => {
       if (input.project_id) {
         const project = await tx.builder_projects.findFirst({ where: { id: input.project_id, organization_id: actor.organizationId } });
@@ -76,11 +79,10 @@ export class BrowserProfileService {
       const action = profile.project_id ? await tx.human_actions.findFirst({
         where: { project_id: profile.project_id, type: "human_login", status: "pending" }, orderBy: { created_at: "desc" },
       }) : null;
-      const relayToken = randomBytes(32).toString("base64url");
       const expiresAt = new Date(Date.now() + LOGIN_TTL_MS);
       const session = await tx.browser_login_sessions.create({ data: {
         organization_id: actor.organizationId, profile_id: profile.id, runtime_id: profile.runtime_id,
-        project_id: profile.project_id, human_action_id: action?.id, relay_token_hash: createHash("sha256").update(relayToken).digest("hex"),
+        project_id: profile.project_id, human_action_id: action?.id, relay_token_hash: randomBytes(32).toString("hex"),
         expires_at: expiresAt, created_by: actor.userId,
       } });
       const job = await tx.runtime_jobs.create({ data: {
@@ -97,6 +99,35 @@ export class BrowserProfileService {
     const row = await this.deps.db.run(scopeOf(actor), (tx) => tx.browser_login_sessions.findFirst({ where: { id: sessionId, organization_id: actor.organizationId } }));
     if (!row) throw notFound("Browser Login Session");
     return loginDto(row);
+  }
+
+  async issueRelayTicket(actor: MemberActor, sessionId: string): Promise<BrowserRelayTicketDto> {
+    requireRole(actor, "builder");
+    const token = randomBytes(32).toString("base64url");
+    const row = await this.deps.db.run(scopeOf(actor), async (tx) => {
+      const login = await tx.browser_login_sessions.findFirst({ where: { id: sessionId, organization_id: actor.organizationId } });
+      if (!login) throw notFound("Browser Login Session");
+      if (!['pending', 'running'].includes(login.status) || login.expires_at <= new Date()) {
+        throw conflict("このBrowser Login Sessionは終了しています");
+      }
+      const updated = await tx.browser_login_sessions.update({
+        where: { id: login.id },
+        data: { relay_token_hash: createHash("sha256").update(token).digest("hex") },
+      });
+      await recordAudit(tx, auditBy(actor, {
+        action: "browser_profile.login.relay_ticket",
+        targetType: "browser_login_session",
+        targetId: login.id,
+        detail: { expires_at: login.expires_at.toISOString(), token_persisted: false },
+      }));
+      return updated;
+    });
+    const base = new URL(this.deps.env.PUBLIC_API_BASE_URL);
+    base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+    base.pathname = "/relay/v1/browser-login";
+    base.search = "";
+    base.hash = "";
+    return { session_id: row.id, token, websocket_url: base.toString(), expires_at: row.expires_at.toISOString() };
   }
 
   async cancelLogin(actor: MemberActor, sessionId: string): Promise<void> {
@@ -116,9 +147,17 @@ export class BrowserProfileService {
     await this.deps.db.run(scopeOf(actor), async (tx) => {
       const row = await tx.browser_profiles.findFirst({ where: { id: profileId, organization_id: actor.organizationId } });
       if (!row) throw notFound("Browser Profile");
-      await tx.browser_profiles.update({ where: { id: profileId }, data: { status: "revoked", runtime_object_key: null, revoked_at: new Date() } });
+      await tx.browser_profiles.update({ where: { id: profileId }, data: { status: "revoked", revoked_at: new Date() } });
       await tx.browser_login_sessions.updateMany({ where: { profile_id: profileId, status: { in: ["pending", "running"] } }, data: { status: "cancelled", completed_at: new Date() } });
-      await recordAudit(tx, auditBy(actor, { action: "browser_profile.revoke", targetType: "browser_profile", targetId: profileId, detail: { runtime_id: row.runtime_id } }));
+      if (row.runtime_object_key) {
+        await tx.runtime_jobs.create({ data: {
+          organization_id: actor.organizationId,
+          runtime_id: row.runtime_id,
+          type: "revoke_browser_profile",
+          payload: { type: "revoke_browser_profile", profile_id: row.id, runtime_object_key: row.runtime_object_key },
+        } });
+      }
+      await recordAudit(tx, auditBy(actor, { action: "browser_profile.revoke", targetType: "browser_profile", targetId: profileId, detail: { runtime_id: row.runtime_id, deletion_queued: Boolean(row.runtime_object_key) } }));
     });
   }
 }

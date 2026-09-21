@@ -9,6 +9,7 @@ import type { StudioApi } from "./studio-client.js";
 import type { WorkspaceExecutor } from "./workspace-executor.js";
 import type { GitPublisher } from "./git-publisher.js";
 import type { BuilderResultCollector } from "./builder-result-collector.js";
+import type { BrowserProfileBroker } from "./browser-profile-broker.js";
 
 export interface JobHandlerDeps {
   grants: GrantStore;
@@ -17,7 +18,8 @@ export interface JobHandlerDeps {
   workspaceExecutor?: WorkspaceExecutor;
   gitPublisher?: GitPublisher;
   builderResultCollector?: BuilderResultCollector;
-  studio: Pick<StudioApi, "sessionEvent" | "environmentKey">;
+  browserProfileBroker?: BrowserProfileBroker;
+  studio: Pick<StudioApi, "sessionEvent" | "environmentKey" | "browserProfile">;
   secrets: Pick<ControllerSecrets, "saveEnvironmentKey">;
   logger: Logger;
   limits: { maxConcurrentSessions: number; sessionMaxLifetimeMinutes: number };
@@ -77,8 +79,12 @@ export class JobHandler {
           if (!this.deps.gitPublisher) return fail("このRuntimeではGit branch公開が有効になっていません");
           return { status: "succeeded", output: await this.deps.gitPublisher.publish(job) };
         case "start_browser_login":
-          // password、MFA、CAPTCHAをControllerが代行してはならない。Relay/Brokerが設定されるまでfail closed。
-          return fail("このRuntimeではHuman Login Relay / Browser Profile Brokerが有効になっていません");
+          if (!this.deps.browserProfileBroker) return fail("このRuntimeではHuman Login Relay / Browser Profile Brokerが有効になっていません");
+          return { status: "succeeded", output: await this.deps.browserProfileBroker.startLogin(job) };
+        case "revoke_browser_profile":
+          if (!this.deps.browserProfileBroker) return fail("このRuntimeではBrowser Profile Brokerが有効になっていません");
+          await this.deps.browserProfileBroker.revoke(job.runtime_object_key);
+          return ok();
       }
     } catch (err) {
       log.error({ err: errorInfo(err) }, "ジョブの処理に失敗しました");
@@ -165,6 +171,19 @@ export class JobHandler {
         return fail("Browser Session Worker の Private IP を解決できませんでした");
       }
       record.browser.status = "running";
+      if (browser.mode === "authenticated_restricted" && browser.profile_id) {
+        try {
+          if (!this.deps.browserProfileBroker) throw new Error("Browser Profile Brokerが有効になっていません");
+          const profile = await this.deps.studio.browserProfile(browser.profile_id);
+          await this.deps.browserProfileBroker.restore(profile, endpoint, accessToken, browser.allowed_domains);
+        } catch (err) {
+          await browserLauncher.stop(browserTaskArn, "Browser Profileを復元できませんでした").catch(() => undefined);
+          grants.remove(sessionId);
+          const detail = `Browser Profileを復元できませんでした: ${errorInfo(err).message}`;
+          await this.postEvent(sessionId, { type: "worker_failed", detail });
+          return fail(detail);
+        }
+      }
       record.grant = {
         ...record.grant,
         browser: { endpoint, mode: browser.mode, allowed_domains: browser.allowed_domains, allow_public_web: browser.allow_public_web },

@@ -257,6 +257,7 @@ export const startBrowserLoginJobSchema = z.object({
   allowed_domains: z.array(z.string().min(1).max(253)).min(1).max(20),
   expires_at: z.iso.datetime(),
 }).strict();
+export type StartBrowserLoginJob = z.infer<typeof startBrowserLoginJobSchema>;
 
 export const browserLoginResultSchema = z.object({
   login_session_id: z.uuid(),
@@ -266,6 +267,23 @@ export const browserLoginResultSchema = z.object({
   expires_at: z.iso.datetime(),
 }).strict();
 export type BrowserLoginResult = z.infer<typeof browserLoginResultSchema>;
+
+/** RuntimeがProfile本文を顧客Storeから復元するための、Control Plane側メタデータだけの応答。 */
+export const runtimeBrowserProfileSchema = z.object({
+  profile_id: z.uuid(),
+  runtime_object_key: z.string().min(1).max(1000),
+  allowed_domains: z.array(z.string().min(1).max(253)).min(1).max(20),
+  expires_at: z.iso.datetime(),
+}).strict();
+export type RuntimeBrowserProfile = z.infer<typeof runtimeBrowserProfileSchema>;
+
+export const revokeBrowserProfileJobSchema = z.object({
+  type: z.literal("revoke_browser_profile"),
+  job_id: z.uuid(),
+  profile_id: z.uuid(),
+  runtime_object_key: z.string().min(1).max(1000),
+}).strict();
+export type RevokeBrowserProfileJob = z.infer<typeof revokeBrowserProfileJobSchema>;
 
 export const gitCredentialResponseSchema = z.object({
   username: z.literal("x-access-token"),
@@ -324,6 +342,7 @@ export const runtimeJobSchema = z.discriminatedUnion("type", [
   collectBuilderSessionResultJobSchema,
   publishBuilderBranchJobSchema,
   startBrowserLoginJobSchema,
+  revokeBrowserProfileJobSchema,
 ]);
 export type RuntimeJob = z.infer<typeof runtimeJobSchema>;
 export type StartSessionJob = z.infer<typeof startSessionJobSchema>;
@@ -415,4 +434,5 @@ export const RUNTIME_API = {
   audit: "/runtime/v1/audit",
   environmentKey: "/runtime/v1/environment-key",
   gitCredential: (jobId: string) => `/runtime/v1/jobs/${jobId}/git-credential`,
+  browserProfile: (profileId: string) => `/runtime/v1/browser-profiles/${profileId}`,
 } as const;

@@ -190,6 +190,8 @@ const BROWSER_FLOW_TOOL_NAMES = [
   "browser_type",
   "browser_press_key",
   "browser_select_option",
+  "browser_download",
+  "browser_upload",
 ] as const;
 const REQUIRED_BROWSER_FLOW_TOOL_NAMES = new Set(["browser_navigate", "browser_snapshot", "browser_screenshot"]);
 const GENERATED_IMAGE_REQUEST = /(?:(?:画像|挿絵|イラスト|サムネイル).*(?:生成|作成|追加)|(?:生成|作成).*(?:画像|挿絵|イラスト|サムネイル))/i;

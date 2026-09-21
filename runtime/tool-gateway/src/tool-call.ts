@@ -102,12 +102,18 @@ export class ToolCallService {
     }
 
     // 組織・Agent（grant）→ ツール・配下のサーバー → Runtime 全体。最も厳しい結果になる
-    const decision = evaluatePolicies([...grant.policies, ...tool.policies, ...catalog.globalPolicies], {
+    let decision = evaluatePolicies([...grant.policies, ...tool.policies, ...catalog.globalPolicies], {
       tool: name,
       args: argsObject,
       now: this.now(),
       callsSoFar: this.callsSoFar(sessionId, name),
     });
+
+    // external_sendはManifestやRuntime設定にapproval policyが欠落しても無人実行しない。
+    // Browser Upload、SNS投稿、メール送信などの最終境界をGatewayでfail closedにする。
+    if (decision.action === "allow" && tool.risk === "external_send") {
+      decision = { action: "require_approval", reason: "外部への送信には実行直前の承認が必要です", timeout_minutes: 60 };
+    }
 
     if (decision.action === "deny") {
       record("denied", decision.reason);

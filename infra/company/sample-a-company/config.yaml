@@ -252,6 +252,30 @@ runtime:
                 target_selector: { type: string }
               required: [source_selector, target_selector]
               additionalProperties: false
+          - name: browser_download
+            description: "クリックで開始されるDownloadをこのRun専用Artifactとして安全検査します。"
+            risk: read
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                selector: { type: string }
+                text: { type: string }
+              additionalProperties: false
+          - name: browser_upload
+            description: "このRunで取得したArtifact IDだけを現在の許可済みWeb画面へUploadします。"
+            risk: external_send
+            reads_untrusted_content: true
+            input_schema:
+              type: object
+              properties:
+                selector: { type: string }
+                artifact_id: { type: string }
+                destination: { type: string }
+                filename: { type: string }
+                sha256: { type: string }
+              required: [selector, artifact_id, destination, filename, sha256]
+              additionalProperties: false
           - name: browser_exec_js
             description: "公開ページを制限付きPlaywrightコードで操作します。"
             risk: write

@@ -14,8 +14,8 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 | WS-01 正本化 | implemented | 本表と最終仕様を相互参照。古い履歴は削除せず、現在の判定を本表へ集約 |
 | WS-02 自律診断・再実行 | tested_fake | 13 failure class、error fingerprint、class別上限/backoff/next action、lease所有者検査、遅延失敗拒否を実装。通常Workerと各integration Harnessを一意のqueueで分離し、別HarnessのJobをclaimしない契約テストを追加。自動追加commitの実Provider E2Eは未確認 |
 | WS-03 モデル標準能力 | tested_fake | text/vision/OCR/image generation/web search/computer use Catalog、不要Custom Tool抑止、画像Artifact保存を実装。実OpenAIのOCR/画像/ニュース3本は未実施 |
-| WS-04 Connection/Human Login | tested_fake | Browser Profile/Login Session/RLS/15分失効/Runtime結果照合/同一Builder自動再開、顧客Runtime内SSE-KMS Bucketを実装。Login Relay/Profile Brokerの実人間操作は未完成 |
-| WS-05 Browser/Artifact/Computer | tested_fake | Artifact ID、MIME、size、SHA-256、安全検査、保持期限、Run/tenant分離、短期download URL、限定Computer Actionと操作後Screenshotを実装。Download→承認付きUploadは未実装 |
+| WS-04 Connection/Human Login | tested_local_real | outbound WebSocket Relay、利用者だけが操作するHuman Login UI、Runtime内SSE-KMS/File Profile Store、Profile restore/revoke、切断再接続を実装。実Chromiumでpasswordを人間経路から入力し、HttpOnly Cookie保存後に別Browser Sessionへ復元して認証済み画面を確認。productionは専用単一Relay serviceへ分離してAPI複数台時のsplit-brainを防止。実AWS/実Providerでの一連E2Eは未実施 |
+| WS-05 Browser/Artifact/Computer | tested_local_real | Browser DownloadをRun専用Artifactへ変換し、任意pathを受けず、25MB上限、MIME、size、SHA-256、実行形式/EICAR検査、30分保持を実装。Uploadは同一SessionのArtifact ID・filename・hash・現在画面のdestination一致を必須化し、Gatewayが`external_send`承認を設定欠落時も強制する。実Chromiumで15-byte CSVのDownload→Uploadと受信hash一致を確認。Browser ArtifactのControl Plane S3/DBへのdurable promotionは未実装 |
 | WS-06 企業Runtime/AWS | tested_local_real | private repo/PR/package/heartbeat/Tool登録の縦切りとRuntime Terraformは既存実装。新規組織の実AWS apply、実DB、upgrade/orphan/署名不一致の一括Cloud E2Eは未実施 |
 | WS-07 Adapter分離 | tested_fake | `shared_provider_adapter` / `organization_private_adapter`を追加し、既存の企業Repository強制を維持。共通Adapterの複数組織公開E2Eは未実施 |
 | WS-08 Factoring | tested_fake | F-01〜F-08、可/否/保留、fail closed、承認、Provider Job/permalink契約はfixtureで成功。実Provider投稿はHuman Gate |
@@ -36,7 +36,7 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 | 07 公開OpenAPI | tested_local_real | Production再検証待ち |
 | 08 公開MCP | tested_local_real | Production再検証待ち |
 | 09 公開Web | tested_local_real | Cloud Browser再検証待ち |
-| 10 Human Login | tested_fake | 実Login Relay/Profile Broker未完成 |
+| 10 Human Login | tested_local_real | Relay、Profile Store、実Chromiumでの保存・別Session復元は個別および実プロセス確認済み。実AWS上でUI→Relay→Runtime→DB自動再開を連結したE2Eは未実施 |
 | 11 企業専用DB | tested_local_real | 実AWS Runtime/実検証DB未実施 |
 | 12 汎用Provider | implemented | 共通Repository mergeと複数組織利用未実施 |
 | 13 承認付き書込 | tested_local_real | 対象Providerの最終外部作用はHuman Gate |
@@ -168,7 +168,7 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 - Browser専用Egress Proxyを追加し、FQDN allowlist、IP literal、private/link-local/metadata系address拒否を強制。`proxy` modeではBrowser TaskのSecurity Groupから直接Internet向け80/443を削除した。
 - `browser-automation` Connectorを1能力として扱い、Build時に内部Action群へ展開。`authenticated_restricted`では`browser_exec_js`をContract、Gateway、Workerの3箇所で無効化した。
 - Agent作成後はBrowser内部Actionを個別表示せず、必要なConnectionと許可ドメインだけを確認する。Browser接続範囲が未設定の間はPreviewを作成しないことをAPI結合テストと実ブラウザで確認した。
-- 新しいBrowser Worker + Egress ProxyをDocker上で接続し、Proxy経由で`https://example.com`を開き、画像応答とSnapshot内容を確認した。Browser ProfileのControl Plane契約、Artifact downloadメタデータ、限定Computer Actionは追加したが、AWS上の実OpenAI E2E、Human Login Relay、承認付きUploadは未確認・未実装。
+- 新しいBrowser Worker + Egress ProxyをDocker上で接続し、Proxy経由で`https://example.com`を開き、画像応答とSnapshot内容を確認した。加えて、Human LoginのProfile保存・別Session復元、およびBrowser Download→Run専用Artifact→Uploadを実Chromiumで確認した。UploadはGatewayで実行直前承認を強制する。AWS上の実OpenAI E2E、実Provider Human Login、Browser Artifactのdurable S3/DB promotionは未確認・未実装。
 
 残件:
 
@@ -247,8 +247,8 @@ SDK（`openai` 7.x）の型を調べた結果（docs/reference/openai-agents-sdk
 
 | 対象 | 方法 | 結果 |
 |---|---|---|
-| 型・単体テスト | `yarn type-check` / `yarn lint` / `yarn test`（全ワークスペース） | 型・lint成功、421 件すべて成功 |
-| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration --run --maxWorkers=1 --minWorkers=1`（PostgreSQL、通常Worker稼働中） | 59 件すべて成功。Builderの質問・回答・自動Discovery・公開/Human Login Browser Flow・Browser Runtime自動再開・複数Connector固定・修正後再開、OpenAPI / MCP生成 → Preview Run、GitHub App branch/PR/merge/package/Tool登録、Workflow v2、承認付き外部作用とProvider Job成功待ち、同一BuildのProduction昇格、組織Policyによる自動昇格、Harness単位queue分離を含む |
+| 型・単体テスト | `yarn type-check` / `yarn lint` / `yarn test`（全ワークスペース） | 型・lint成功、436 件すべて成功 |
+| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration --run --maxWorkers=1 --minWorkers=1`（PostgreSQL 16） | 60 件すべて成功。Browser Profileの一回限りRelay ticket、Runtime照合、revoke cleanup、Builderの質問・回答・自動Discovery・公開/Human Login Browser Flow・Browser Runtime自動再開、OpenAPI / MCP生成 → Preview Run、GitHub App delivery、Workflow v2、承認付き外部作用、同一BuildのProduction昇格、Harness単位queue分離を含む |
 | ビルド | `yarn build`、`docker build`（api / web / runtime の全イメージ） | 成功 |
 | Terraform | `fmt` / `validate`（5 つのルートモジュール）、モックのプロバイダーでの apply | 成功 |
 | ワークフロー | actionlint | 指摘なし |

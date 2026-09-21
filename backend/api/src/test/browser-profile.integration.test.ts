@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
 
@@ -46,6 +47,14 @@ describe("Browser Profile / Human Login metadata boundary", () => {
     expect(login.body).toMatchObject({ profile_id: profile.body.id, status: "running", launch_path: expect.any(String) });
     expect(JSON.stringify(login.body)).not.toMatch(/relay_token_hash|cookie|password/i);
 
+    const ticket = await h.request("POST", `/api/v1/browser-login-sessions/${login.body.id}/relay-ticket`, owner);
+    expect(ticket.status).toBe(201);
+    expect(ticket.body).toMatchObject({ session_id: login.body.id, token: expect.any(String), websocket_url: expect.stringMatching(/^ws/) });
+    expect(JSON.stringify(ticket.body)).not.toContain("relay_token_hash");
+    const consumed = await h.deps.system.consumeBrowserLoginTicket(login.body.id, createHash("sha256").update(ticket.body.token).digest("hex"));
+    expect(consumed).toMatchObject({ organization_id: owner.org, runtime_id: runtimeId });
+    expect(await h.deps.system.consumeBrowserLoginTicket(login.body.id, createHash("sha256").update(ticket.body.token).digest("hex"))).toBeNull();
+
     const leased = await h.request("GET", "/runtime/v1/jobs/next?wait=0", { token: runtimeToken });
     expect(leased.body.job).toMatchObject({ type: "start_browser_login", login_session_id: login.body.id, profile_id: profile.body.id });
     const result = await h.request("POST", `/runtime/v1/jobs/${leased.body.job.job_id}/result`, { token: runtimeToken, body: {
@@ -60,5 +69,20 @@ describe("Browser Profile / Human Login metadata boundary", () => {
     const profiles = await h.request("GET", "/api/v1/browser-profiles", owner);
     expect(profiles.body).toEqual([expect.objectContaining({ id: profile.body.id, status: "active", allowed_domains: ["example.com"] })]);
     expect(JSON.stringify(profiles.body)).not.toContain("runtime_object_key");
+
+    const runtimeProfile = await h.request("GET", `/runtime/v1/browser-profiles/${profile.body.id}`, { token: runtimeToken });
+    expect(runtimeProfile.body).toMatchObject({
+      profile_id: profile.body.id,
+      runtime_object_key: `profiles/${profile.body.id}/storage-state.enc`,
+      allowed_domains: ["example.com"],
+    });
+
+    expect((await h.request("DELETE", `/api/v1/browser-profiles/${profile.body.id}`, owner)).status).toBe(204);
+    const revoke = await h.request("GET", "/runtime/v1/jobs/next?wait=0", { token: runtimeToken });
+    expect(revoke.body.job).toMatchObject({ type: "revoke_browser_profile", profile_id: profile.body.id });
+    expect((await h.request("POST", `/runtime/v1/jobs/${revoke.body.job.job_id}/result`, { token: runtimeToken, body: { status: "succeeded" } })).status).toBe(204);
+    const row = await h.admin.browser_profiles.findUniqueOrThrow({ where: { id: profile.body.id } });
+    expect(row).toMatchObject({ status: "revoked", runtime_object_key: null });
+    expect((await h.request("GET", `/runtime/v1/browser-profiles/${profile.body.id}`, { token: runtimeToken })).status).toBe(404);
   });
 });

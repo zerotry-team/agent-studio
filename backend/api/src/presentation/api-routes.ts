@@ -366,6 +366,7 @@ export function createApiRoutes(deps: Deps, s: Services) {
   org.post("/browser-profiles", async (c) => c.json(await s.browserProfiles.create(c.get("member"), await json(c, createBrowserProfileSchema)), 201));
   org.post("/browser-profiles/:id/login-sessions", async (c) => c.json(await s.browserProfiles.startLogin(c.get("member"), id(c.req.param("id"))), 201));
   org.get("/browser-login-sessions/:id", async (c) => c.json(await s.browserProfiles.getLogin(c.get("member"), id(c.req.param("id")))));
+  org.post("/browser-login-sessions/:id/relay-ticket", async (c) => c.json(await s.browserProfiles.issueRelayTicket(c.get("member"), id(c.req.param("id"))), 201));
   org.post("/browser-login-sessions/:id/cancel", async (c) => { await s.browserProfiles.cancelLogin(c.get("member"), id(c.req.param("id"))); return c.body(null, 204); });
   org.delete("/browser-profiles/:id", async (c) => { await s.browserProfiles.revoke(c.get("member"), id(c.req.param("id"))); return c.body(null, 204); });
 
