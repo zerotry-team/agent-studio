@@ -24,6 +24,17 @@ const STEP_LABELS: Record<string, string> = {
   prepare_human_actions: "必要な準備と安全境界を確認",
 };
 
+/** 完了後は、後から中止された重複Previewより実際に成功したProductionを表示する。 */
+export function primaryBuilderRelease(project: BuilderProjectDto) {
+  if (project.status === "completed") {
+    return project.releases.find((release) => release.status === "production_succeeded")
+      ?? project.releases.find((release) => release.status === "preview_succeeded")
+      ?? project.releases.find((release) => release.status !== "preview_cancelled")
+      ?? project.releases[0];
+  }
+  return project.releases[0];
+}
+
 function actionTitle(action: BuilderProjectDto["human_actions"][number]): string {
   const condition = action.resume_condition && typeof action.resume_condition === "object" && !Array.isArray(action.resume_condition)
     ? action.resume_condition as { type?: unknown; repository_connection_id?: unknown }
@@ -49,7 +60,7 @@ function stepPhase(step: BuilderStepDto | undefined, label: string, runningDetai
 }
 
 function releasePhase(project: BuilderProjectDto): BuildPhase {
-  const release = project.releases[0];
+  const release = primaryBuilderRelease(project);
   const status = release?.status;
   const failed = status === "preview_failed" || status === "preview_cancelled";
   const completed = Boolean(status && !["preview_running"].includes(status));
@@ -70,7 +81,7 @@ export function buildProgressPhases(project: BuilderProjectDto): BuildPhase[] {
     && action.type !== "production_approval"
     && action.type !== "adapter_delivery"
     && action.type !== "repository_merge");
-  const release = project.releases[0];
+  const release = primaryBuilderRelease(project);
   const hasGeneratedAgent = Boolean(release || project.change_sets.some((change) => ["applied", "pr_open", "merged"].includes(change.status)));
   const generationValidation = project.validation_runs.find((validation) => String(validation.suite) === "builder_session" && validation.status === "passed");
   const implementationFailed = project.status === "failed" && !run?.steps.some((step) => step.status === "failed") && !release;

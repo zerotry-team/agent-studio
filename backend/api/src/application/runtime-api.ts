@@ -291,6 +291,9 @@ export class RuntimeApiService {
         if (!descriptor.success || !expectedTools.every((name) => reported.tools.has(name))) continue;
         const expectedContractHash = createHash("sha256").update(canonicalJson(descriptor.data.tools)).digest("hex");
         if (expectedContractHash !== reported.package.contract_hash) continue;
+        // heartbeatは継続的に届く。登録済みpackageで毎回Builder Runを再作成すると、
+        // Production成功後にも新しいPreviewが始まって完成状態を壊すため、遷移は一度だけ行う。
+        if (reported.package.status === "registered" && reported.package.health_status === "ready") continue;
         await tx.builder_adapter_packages.update({ where: { id: reported.package.id }, data: { status: "registered", health_status: "ready", registered_at: new Date() } });
         await tx.builder_validation_runs.create({ data: {
           organization_id: ctx.organizationId, project_id: reported.package.project_id, suite: "tool_catalog", environment: "preview", status: "passed",

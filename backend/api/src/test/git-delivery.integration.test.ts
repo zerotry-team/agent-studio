@@ -1,6 +1,6 @@
 import { createHash, createHmac, generateKeyPairSync, sign } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { canonicalJson, type GitHubAppConnectionMetadata } from "@agent-studio/contracts";
+import { canonicalJson, type GitHubAppConnectionMetadata, type HeartbeatRequest } from "@agent-studio/contracts";
 import { RuntimeApiService } from "../application/runtime-api.js";
 import type { GitHubAppSecret, GitProvider } from "../infrastructure/git/github-app.js";
 import { createHarness, type Harness } from "./harness.js";
@@ -297,18 +297,24 @@ describe("GitHub App → signed Adapter delivery", () => {
     });
     expect(deployed.status).toBe(202);
 
-    await service.heartbeat({ runtimeId, organizationId: orgId, sourceIp: "127.0.0.1" }, {
+    const heartbeat: HeartbeatRequest = {
       controller_version: "test", gateway_url: "http://127.0.0.1:8080/mcp", active_sessions: [], capabilities: ["adapter_delivery"],
       tools: [{
         name: "evaluate_factoring_rules", description: "deterministic rules", input_schema: { type: "object", properties: {}, additionalProperties: false }, risk: "financial", reads_untrusted_content: false,
         delivery: { connector_key: "factoring-adapter", contract_hash: contractHash, image_digest: imageDigest, source_commit: mergeSha, package_signature: packageSignature },
       }],
-    });
+    };
+    await service.heartbeat({ runtimeId, organizationId: orgId, sourceIp: "127.0.0.1" }, heartbeat);
     const pkg = await h.admin.builder_adapter_packages.findUniqueOrThrow({ where: { change_set_id: changeSetId } });
     expect(pkg).toMatchObject({ status: "registered", health_status: "ready", source_commit: mergeSha, image_digest: imageDigest });
     const connector = await h.admin.connectors.findUniqueOrThrow({ where: { organization_id_key: { organization_id: orgId, key: "factoring-adapter" } } });
     const tool = await h.admin.tools.findUniqueOrThrow({ where: { organization_id_name: { organization_id: orgId, name: "evaluate_factoring_rules" } } });
     expect(tool.connector_id).toBe(connector.id);
     expect(await h.admin.human_actions.count({ where: { project_id: projectId, type: "adapter_delivery", status: "pending" } })).toBe(0);
+    const builderRunsAfterRegistration = await h.admin.builder_runs.count({ where: { project_id: projectId } });
+    const validationsAfterRegistration = await h.admin.builder_validation_runs.count({ where: { project_id: projectId, suite: "tool_catalog" } });
+    await service.heartbeat({ runtimeId, organizationId: orgId, sourceIp: "127.0.0.1" }, heartbeat);
+    expect(await h.admin.builder_runs.count({ where: { project_id: projectId } })).toBe(builderRunsAfterRegistration);
+    expect(await h.admin.builder_validation_runs.count({ where: { project_id: projectId, suite: "tool_catalog" } })).toBe(validationsAfterRegistration);
   });
 });
