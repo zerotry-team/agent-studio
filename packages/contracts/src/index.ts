@@ -8,3 +8,5 @@ export * from "./api.js";
 export * from "./browser-access.js";
 export * from "./log-redaction.js";
 export * from "./adapter-descriptor.js";
+export * from "./auto-approval.js";
+export * from "./response-boundary.js";

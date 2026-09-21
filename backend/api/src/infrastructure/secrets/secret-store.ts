@@ -123,4 +123,6 @@ export const secretNames = {
     `${prefix}/orgs/${organizationId}/connections/${connectionId}`,
   connectorOAuthApp: (prefix: string, organizationId: string, connectorId: string) =>
     `${prefix}/orgs/${organizationId}/connectors/${connectorId}/oauth-client-secret`,
+  deploymentWebhook: (prefix: string, organizationId: string, webhookId: string) =>
+    `${prefix}/orgs/${organizationId}/deployment-webhooks/${webhookId}`,
 };

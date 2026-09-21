@@ -52,7 +52,7 @@ export function createHarness(overrides: Partial<Deps> = {}) {
 
   /** 組織・メンバーを所有者ロールで作る（RLS の外） */
   async function createOrg(name: string, members: { email: string; role: string; approver?: boolean }[]) {
-    const org = await admin.organizations.create({ data: { slug: `${name}-${suffix}`, name } });
+    const org = await admin.organizations.create({ data: { slug: `${name}-${suffix}`, name, worker_pool: env.WORKER_ID } });
     await admin.organization_openai_settings.create({ data: { organization_id: org.id } });
     for (const m of members) {
       const user = await admin.users.upsert({

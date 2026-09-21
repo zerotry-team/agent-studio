@@ -55,7 +55,7 @@ export function classifyCapabilityFulfillment(
   // Capability自身がkintone等を明示する場合だけ、汎用SaaSを優先する。
   if (!SHARED_PROVIDER_PATTERN.test(requirementText) && ORGANIZATION_PRIVATE_PATTERN.test(requestText)) {
     return {
-      mode: "organization_tool",
+      mode: "organization_private_adapter",
       owner: "organization",
       execution_location: "runtime",
       reason: "社内ネットワークまたは自社データへ接続するため、企業専用RuntimeへToolを実装します",
@@ -64,7 +64,7 @@ export function classifyCapabilityFulfillment(
   }
   if (SHARED_PROVIDER_PATTERN.test(requirementText) || EXTERNAL_ACTION_PATTERN.test(requestText)) {
     return {
-      mode: "shared_tool",
+      mode: "shared_provider_adapter",
       owner: "agent_studio",
       execution_location: "studio",
       reason: "外部サービスの読み書きが必要なため、Agent Studioの共通Toolとして追加します",

@@ -7,7 +7,7 @@ function project(overrides: Partial<BuilderProjectDto> = {}): BuilderProjectDto 
     id: "project-1", agent_id: "agent-1", request: "文章を要約する", target: "production", status: "analyzing",
     created_by: "user-1", created_at: "2026-09-21T12:00:00.000Z", updated_at: "2026-09-21T12:00:10.000Z", completed_at: null,
     latest_plan: null, gaps: [], human_actions: [], discovery_sources: [], change_sets: [], validation_runs: [], releases: [],
-    runs: [{ id: "run-1", attempt: 1, status: "running", correlation_id: "correlation-1", error_class: null, error: null, started_at: "2026-09-21T12:00:01.000Z", finished_at: null, created_at: "2026-09-21T12:00:00.000Z", steps: [
+    runs: [{ id: "run-1", attempt: 1, status: "running", correlation_id: "correlation-1", error_class: null, error: null, error_fingerprint: null, retryable: null, next_action: null, not_before: null, last_evidence_id: null, started_at: "2026-09-21T12:00:01.000Z", finished_at: null, created_at: "2026-09-21T12:00:00.000Z", steps: [
       { id: "step-1", kind: "analyze_requirements", status: "running", attempts: 1, error_class: null, error: null, started_at: "2026-09-21T12:00:01.000Z", finished_at: null },
       { id: "step-2", kind: "resolve_capabilities", status: "pending", attempts: 0, error_class: null, error: null, started_at: null, finished_at: null },
       { id: "step-3", kind: "prepare_human_actions", status: "pending", attempts: 0, error_class: null, error: null, started_at: null, finished_at: null },
@@ -65,7 +65,7 @@ describe("Builder progress", () => {
     const waiting = project({
       status: "waiting_human_action",
       latest_plan: {
-        id: "plan-1", version: 1, requirements: [{ requirement: "社内DBを読む", state: "missing", connector_id: null, connector_name: null, tool_names: [], confidence: 1, reason: "専用Toolが必要", variables: [], fulfillment: { mode: "organization_tool", owner: "organization", execution_location: "runtime", reason: "社内データ", availability_target_minutes: null } }],
+        id: "plan-1", version: 1, requirements: [{ requirement: "社内DBを読む", state: "missing", connector_id: null, connector_name: null, tool_names: [], confidence: 1, reason: "専用Toolが必要", variables: [], fulfillment: { mode: "organization_private_adapter", owner: "organization", execution_location: "runtime", reason: "社内データ", availability_target_minutes: null } }],
         graph: { nodes: [], edges: [] }, risks: [], execution_locations: [], created_at: "2026-09-21T12:01:00.000Z",
       },
       human_actions: [{ id: "action-1", type: "business_rule_confirmation", title: "Tool作成を確認", reason: "実装開始前の確認", assignee_role: "builder", fields: [], instructions: [], resume_condition: {}, response: null, status: "pending", completed_at: null, expires_at: null, created_at: "2026-09-21T12:01:00.000Z" }],

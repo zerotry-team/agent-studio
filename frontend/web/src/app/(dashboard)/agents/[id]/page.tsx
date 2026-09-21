@@ -280,9 +280,9 @@ function RequirementRow({
     ? "準備済み"
     : fulfillment?.mode === "configure"
       ? "接続設定が必要"
-      : fulfillment?.mode === "shared_tool"
+      : ["shared_provider_adapter", "shared_tool"].includes(fulfillment?.mode ?? "")
         ? "共通Toolを追加"
-        : fulfillment?.mode === "organization_tool"
+        : ["organization_private_adapter", "organization_tool"].includes(fulfillment?.mode ?? "")
           ? "企業専用Toolを追加"
           : "調査中";
   const browserRequirement = requirement.tool_names.some(isBrowserCapability);
@@ -297,7 +297,7 @@ function RequirementRow({
             {fulfillment && !ready ? (
               <p className="mt-1 text-xs text-gray-600">
                 {fulfillment.reason}
-                {fulfillment.mode === "shared_tool" && fulfillment.availability_target_minutes
+                {["shared_provider_adapter", "shared_tool"].includes(fulfillment.mode) && fulfillment.availability_target_minutes
                   ? `。mainへのマージ後、${fulfillment.availability_target_minutes}分以内の利用可能通知を目標にします`
                   : ""}
               </p>

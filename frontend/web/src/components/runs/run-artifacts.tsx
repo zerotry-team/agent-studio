@@ -41,14 +41,20 @@ export function RunArtifacts({ runId, finished }: { runId: string; finished: boo
                 <span className="truncate font-mono text-[13px]">{a.path}</span>
                 <span className="shrink-0 text-xs text-gray-500">{formatSize(a.size_bytes)}</span>
               </span>
-              <a
-                href={a.download_url}
-                className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-sm font-medium text-accent-700 hover:bg-accent-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
-                rel="noopener noreferrer"
-              >
-                <Download className="h-4 w-4" aria-hidden="true" />
-                ダウンロード
-              </a>
+              {a.download_url ? (
+                <a
+                  href={a.download_url}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-sm font-medium text-accent-700 hover:bg-accent-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
+                  rel="noopener noreferrer"
+                >
+                  <Download className="h-4 w-4" aria-hidden="true" />
+                  ダウンロード
+                </a>
+              ) : (
+                <span className="shrink-0 rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800">
+                  {a.scan_status === "rejected" ? "安全検査で拒否" : a.scan_status === "failed" ? "安全検査失敗" : "安全検査中"}
+                </span>
+              )}
             </li>
           ))}
         </ul>

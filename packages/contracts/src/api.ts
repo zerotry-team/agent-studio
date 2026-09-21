@@ -5,6 +5,7 @@ import { policySchema, type Policy } from "./policy.js";
 import type { ApprovalStatus } from "./runtime-protocol.js";
 import type { ToolExecutionLocation, ToolInputSchema, ToolRisk, ToolVersionSpec } from "./tools.js";
 import { staticHeaderNameSchema, toolVersionSpecSchema } from "./tools.js";
+import { responseBoundarySchema } from "./response-boundary.js";
 
 /**
  * フロントエンド ↔ Agent Studio API の契約。
@@ -114,7 +115,7 @@ export interface ToolDto {
   versions?: ToolVersionDto[];
 }
 
-export const connectorAdapterSchema = z.enum(["http_openapi", "mcp", "internal", "openai_builtin", "runtime"]);
+export const connectorAdapterSchema = z.enum(["http_openapi", "internal_http_api", "mcp", "internal", "openai_builtin", "runtime"]);
 export type ConnectorAdapter = z.infer<typeof connectorAdapterSchema>;
 export const connectorAuthTypeSchema = z.enum(["none", "static_bearer", "runtime_secret"]);
 export type ConnectorAuthType = z.infer<typeof connectorAuthTypeSchema>;
@@ -142,6 +143,8 @@ export const connectorOperationSchema = z
       .default({ type: "object", properties: {}, additionalProperties: false }),
     /** OpenAPIの成功レスポンスから抽出したJSON Schema。実行結果の契約検証に使う。 */
     output_schema: z.unknown().optional(),
+    /** モデルへ返してよいfieldと応答上限。社内APIでは必ず設定する。 */
+    response_boundary: responseBoundarySchema.optional(),
   })
   .strict();
 export type ConnectorOperationInput = z.input<typeof connectorOperationSchema>;
@@ -166,11 +169,11 @@ export const createConnectorSchema = z
     message: "操作名が重複しています",
     path: ["operations"],
   })
-  .refine((v) => v.adapter !== "http_openapi" || Boolean(v.base_url), {
+  .refine((v) => !["http_openapi", "internal_http_api"].includes(v.adapter) || Boolean(v.base_url), {
     message: "HTTP連携にはbase_urlが必要です",
     path: ["base_url"],
   })
-  .refine((v) => v.adapter !== "http_openapi" || v.operations.every((o) => o.method && o.path), {
+  .refine((v) => !["http_openapi", "internal_http_api"].includes(v.adapter) || v.operations.every((o) => o.method && o.path), {
     message: "HTTP連携の各操作にはmethodとpathが必要です",
     path: ["operations"],
   })
@@ -183,9 +186,13 @@ export const createConnectorSchema = z
     message: "MCP連携の操作にmethodとpathは指定できません",
     path: ["operations"],
   })
-  .refine((v) => v.adapter === "http_openapi" || !v.default_headers, {
+  .refine((v) => ["http_openapi", "internal_http_api"].includes(v.adapter) || !v.default_headers, {
     message: "固定ヘッダはHTTP連携でだけ指定できます",
     path: ["default_headers"],
+  })
+  .refine((v) => v.adapter !== "internal_http_api" || v.operations.every((operation) => operation.output_schema && operation.response_boundary), {
+    message: "社内APIの各操作にはresponse schemaとfield allowlistが必要です",
+    path: ["operations"],
   });
 export type CreateConnectorInput = z.input<typeof createConnectorSchema>;
 
@@ -478,6 +485,9 @@ export type CapabilityFulfillmentMode =
   | "model"
   | "reuse"
   | "configure"
+  | "shared_provider_adapter"
+  | "organization_private_adapter"
+  /** 2026-09以前に保存した計画との後方互換。新規計画は上のadapter名を使う。 */
   | "shared_tool"
   | "organization_tool";
 
@@ -490,7 +500,7 @@ export interface CapabilityFulfillmentDto {
   owner: "model" | "agent_studio" | "organization";
   execution_location: "model" | "studio" | "runtime";
   reason: string;
-  /** shared_toolをmainへmergeした後、利用可能通知までの運用目標。保証時間ではない。 */
+  /** shared_provider_adapterをmainへmergeした後、利用可能通知までの運用目標。保証時間ではない。 */
   availability_target_minutes: number | null;
 }
 export interface CapabilityRequirementDto {
@@ -819,10 +829,89 @@ export interface RunDto {
 
 /** 実行の成果物（S3 に保存したもの）。download_url は5分だけ有効 */
 export interface RunArtifactDto {
+  id: string;
   path: string;
+  mime_type: string;
   size_bytes: number;
-  download_url: string;
+  sha256: string;
+  scan_status: "pending" | "passed" | "rejected" | "failed";
+  retained_until: string;
+  /** scan_status=passedかつ保持期限内だけ発行する。 */
+  download_url: string | null;
 }
+
+export const createBrowserProfileSchema = z.object({
+  runtime_id: z.uuid().optional(),
+  project_id: z.uuid().optional(),
+  provider_key: z.string().trim().min(1).max(100).regex(/^[a-z0-9][a-z0-9_-]*$/),
+  display_name: z.string().trim().min(1).max(100),
+  environment: z.enum(["staging", "production"]),
+  allowed_domains: z.array(z.string().trim().min(1).max(253)).min(1).max(20),
+}).strict();
+export type CreateBrowserProfileInput = z.input<typeof createBrowserProfileSchema>;
+
+export interface BrowserProfileDto {
+  id: string;
+  runtime_id: string;
+  project_id: string | null;
+  provider_key: string;
+  display_name: string;
+  environment: "staging" | "production";
+  allowed_domains: string[];
+  status: "pending" | "active" | "expired" | "revoked";
+  last_verified_at: string | null;
+  expires_at: string | null;
+  created_at: string;
+}
+
+export interface BrowserLoginSessionDto {
+  id: string;
+  profile_id: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
+  expires_at: string;
+  completed_at: string | null;
+  error: string | null;
+  /** UIの認証済みrelay route。password/MFA/cookieをAPIへ返さない。 */
+  launch_path: string;
+}
+
+export const createDeploymentCredentialSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  rate_limit_per_minute: z.number().int().min(1).max(600).default(60),
+  max_runs_per_day: z.number().int().min(1).max(100_000).default(1_000),
+  expires_at: z.iso.datetime().optional(),
+}).strict();
+export type CreateDeploymentCredentialInput = z.input<typeof createDeploymentCredentialSchema>;
+
+export interface DeploymentApiKeyDto {
+  id: string;
+  deployment_id: string;
+  name: string;
+  key_prefix: string;
+  status: "active" | "revoked";
+  rate_limit_per_minute: number;
+  max_runs_per_day: number;
+  last_used_at: string | null;
+  expires_at: string | null;
+  created_at: string;
+}
+
+export interface CreatedDeploymentApiKeyDto extends DeploymentApiKeyDto { secret: string }
+
+export interface DeploymentWebhookDto {
+  id: string;
+  deployment_id: string;
+  name: string;
+  status: "active" | "revoked";
+  rate_limit_per_minute: number;
+  max_runs_per_day: number;
+  last_used_at: string | null;
+  created_at: string;
+}
+
+export interface CreatedDeploymentWebhookDto extends DeploymentWebhookDto { signing_secret: string; path: string }
+
+export const deploymentTriggerInputSchema = z.object({ input: z.string().trim().min(1).max(100_000) }).strict();
 
 // ---------------------------------------------------------------------------
 // 承認
@@ -834,7 +923,8 @@ export type ApprovalDecisionInput = z.infer<typeof approvalDecisionSchema>;
 
 export interface ApprovalDto {
   id: string;
-  run_id: string;
+  run_id: string | null;
+  source: string;
   tool: string;
   args_preview: string;
   reason: string;
@@ -844,6 +934,10 @@ export interface ApprovalDto {
   decided_by: string | null;
   decided_at: string | null;
   comment: string | null;
+  auto_approved: boolean;
+  auto_approval_policy_id: string | null;
+  auto_approval_policy_version: number | null;
+  auto_approval_reason: string | null;
   agent: { id: string; name: string } | null;
 }
 
@@ -885,9 +979,11 @@ export const builderOpenApiInputSchema = z
     connector_key: slugSchema.optional(),
     connector_name: z.string().trim().min(1).max(100).optional(),
     selected_operation_ids: z.array(z.string().trim().min(1).max(300)).max(100).optional(),
+    /** 社内データ用APIとして、response schemaとfield allowlistを必須化する。 */
+    internal_api: z.boolean().default(false),
   })
   .strict();
-export type BuilderOpenApiInput = z.infer<typeof builderOpenApiInputSchema>;
+export type BuilderOpenApiInput = z.input<typeof builderOpenApiInputSchema>;
 
 export const builderMcpInputSchema = z
   .object({
@@ -951,7 +1047,7 @@ export interface BuilderOpenApiProposalDto {
     key: string;
     name: string;
     description: string;
-    adapter: "http_openapi";
+    adapter: "http_openapi" | "internal_http_api";
     base_url: string;
     auth_type: ConnectorAuthType;
     default_headers?: Record<string, string>;
@@ -1002,6 +1098,11 @@ export interface BuilderRunDto {
   correlation_id: string;
   error_class: string | null;
   error: string | null;
+  error_fingerprint: string | null;
+  retryable: boolean | null;
+  next_action: string | null;
+  not_before: string | null;
+  last_evidence_id: string | null;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;

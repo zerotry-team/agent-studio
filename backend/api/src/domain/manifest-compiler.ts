@@ -73,6 +73,7 @@ export interface CompiledFunctionTool {
   tool_version_id: string;
   risk: ToolRisk;
   connector_id: string | null;
+  output_schema?: unknown;
   spec: Extract<ToolVersionSpec, { execution_location: "studio_function" }>["studio_function"];
 }
 
@@ -144,6 +145,7 @@ export function compileAgent(input: {
           tool_version_id: t.tool_version_id,
           risk: t.spec.risk,
           connector_id: t.connector_id ?? null,
+          ...(t.spec.output_schema !== undefined ? { output_schema: t.spec.output_schema } : {}),
           spec: t.spec.studio_function,
         });
         break;

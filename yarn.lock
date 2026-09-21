@@ -103,6 +103,25 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@agent-studio/factoring-portal@workspace:frontend/factoring-portal":
+  version: 0.0.0-use.local
+  resolution: "@agent-studio/factoring-portal@workspace:frontend/factoring-portal"
+  dependencies:
+    "@agent-studio/contracts": "workspace:^"
+    "@types/node": "npm:^22.10.0"
+    "@types/react": "npm:^18.3.31"
+    "@types/react-dom": "npm:^18.3.7"
+    eslint: "npm:^8.57.1"
+    eslint-config-next: "npm:14.2.35"
+    lucide-react: "npm:^1.47.0"
+    next: "npm:14.2.35"
+    react: "npm:18.3.1"
+    react-dom: "npm:18.3.1"
+    typescript: "npm:5.9.3"
+    vitest: "npm:^3.2.7"
+  languageName: unknown
+  linkType: soft
+
 "@agent-studio/runtime-controller@workspace:runtime/controller":
   version: 0.0.0-use.local
   resolution: "@agent-studio/runtime-controller@workspace:runtime/controller"

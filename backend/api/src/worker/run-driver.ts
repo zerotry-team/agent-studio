@@ -5,6 +5,7 @@ import {
   TERMINAL_RUN_STATUSES,
   canonicalJson,
   evaluatePolicies,
+  requestedRecordCount,
   redactLogText,
   redactLogValue,
   sha256Hex,
@@ -17,6 +18,9 @@ import { hashToken } from "../application/environments.js";
 import { appendRunEvent, setRunStatus } from "../application/run-events.js";
 import type { CompiledAgentConfig } from "../domain/manifest-compiler.js";
 import { buildSessionCreateParams } from "../domain/session-params.js";
+import { inspectArtifact } from "../domain/artifact-security.js";
+import { evaluateOrganizationAutoApproval } from "../domain/organization-auto-approval.js";
+import { recordAudit } from "../infrastructure/audit.js";
 import type { Tx } from "../infrastructure/db/tenant-db.js";
 import { artifactPrefix } from "../infrastructure/storage/object-store.js";
 import type {
@@ -646,17 +650,35 @@ export class RunDriver {
       const artifacts = (await this.api.listArtifacts(state.openaiSessionId)).filter((a) => a.size_bytes <= MAX_ARTIFACT_BYTES).slice(0, MAX_ARTIFACTS);
       if (artifacts.length === 0) return;
       const prefix = artifactPrefix(this.organizationId, this.runId);
+      const saved: Array<ReturnType<typeof inspectArtifact> & { objectKey: string; sizeBytes: number }> = [];
       for (const a of artifacts) {
         const body = await this.api.downloadArtifact(state.openaiSessionId, a.id);
-        const path = a.path.replace(/^\/workspace\/outputs\//, "").replace(/^\/+/, "").replace(/\.\.+/g, "_");
-        await this.deps.objects.put(bucket, `${prefix}${path}`, body, "application/octet-stream");
+        const inspected = inspectArtifact(a.path, body);
+        const objectKey = `${prefix}${inspected.path}`;
+        if (inspected.scanStatus === "passed") await this.deps.objects.put(bucket, objectKey, body, inspected.mimeType);
+        saved.push({ ...inspected, objectKey, sizeBytes: body.byteLength });
       }
-      await this.deps.db.org(this.organizationId, (tx) =>
-        appendRunEvent(tx, state.run, "message", `成果物を ${artifacts.length} 件保存しました`, {
+      await this.deps.db.org(this.organizationId, async (tx) => {
+        for (const artifact of saved) {
+          await tx.run_artifacts.upsert({
+            where: { organization_id_run_id_path: { organization_id: this.organizationId, run_id: this.runId, path: artifact.path } },
+            create: {
+              organization_id: this.organizationId, run_id: this.runId, path: artifact.path, object_key: artifact.objectKey,
+              mime_type: artifact.mimeType, size_bytes: artifact.sizeBytes, sha256: artifact.sha256,
+              scan_status: artifact.scanStatus, scan_engine: artifact.scanEngine, source: "openai_session",
+              retained_until: new Date(Date.now() + 30 * 24 * 60 * 60_000),
+            },
+            update: {
+              object_key: artifact.objectKey, mime_type: artifact.mimeType, size_bytes: artifact.sizeBytes, sha256: artifact.sha256,
+              scan_status: artifact.scanStatus, scan_engine: artifact.scanEngine, retained_until: new Date(Date.now() + 30 * 24 * 60 * 60_000),
+            },
+          });
+        }
+        await appendRunEvent(tx, state.run, "message", `成果物を ${saved.filter((artifact) => artifact.scanStatus === "passed").length} 件保存しました`, {
           role: "system",
-          text: artifacts.map((a) => a.path).join("\n"),
-        }),
-      );
+          text: saved.map((artifact) => `${artifact.path} (${artifact.scanStatus})`).join("\n"),
+        });
+      });
     } catch (e) {
       this.log.warn({ err: e }, "成果物を保存できませんでした");
       await this.deps.db
@@ -727,6 +749,57 @@ export class RunDriver {
       const approval = await this.deps.db.org(this.organizationId, async (tx) => {
         const existing = await tx.approvals.findFirst({ where: { run_id: this.runId, source: "studio_function", call_id: action.call_id } });
         if (existing) return existing;
+        const destination = tool.spec.handler === "http_api" ? new URL(tool.spec.base_url) : null;
+        const auto = await evaluateOrganizationAutoApproval(tx, this.organizationId, {
+          actionKind: tool.spec.handler === "http_api" ? "api_call" : "tool_call",
+          stage: state.run.stage,
+          operation: tool.name,
+          risk: tool.risk,
+          host: destination?.hostname ?? null,
+          method: tool.spec.handler === "http_api" ? tool.spec.method : null,
+          requestedRecords: requestedRecordCount(args),
+          now: new Date(),
+        });
+        if (auto.policy && auto.decision.action === "auto_approve") {
+          const now = new Date();
+          const created = await tx.approvals.create({
+            data: {
+              organization_id: this.organizationId,
+              run_id: this.runId,
+              session_id: state.sessionRowId,
+              source: "studio_function",
+              call_id: action.call_id,
+              tool: tool.name,
+              args_hash: await toolCallHash(tool.name, args),
+              args_preview: canonicalJson(redactLogValue(args)).slice(0, 4000),
+              reason: decision.reason,
+              status: "approved",
+              expires_at: new Date(now.getTime() + decision.timeout_minutes * 60_000),
+              decided_at: now,
+              auto_approved: true,
+              auto_approval_policy_id: auto.policy.id,
+              auto_approval_policy_version: auto.policy.version,
+              auto_approval_reason: auto.decision.reason,
+            },
+          });
+          await appendRunEvent(tx, state.run, "approval.decided", `${tool.name} を組織Policyが自動承認しました`, {
+            approval_id: created.id,
+            tool: tool.name,
+            policy_id: auto.policy.id,
+            policy_version: auto.policy.version,
+            reason: auto.decision.reason,
+          });
+          await recordAudit(tx, {
+            organizationId: this.organizationId,
+            actorType: "system",
+            actorId: "organization_policy",
+            action: "approval.auto_approve",
+            targetType: "approval",
+            targetId: created.id,
+            detail: { tool: tool.name, policy_id: auto.policy.id, policy_version: auto.policy.version, reason: auto.decision.reason },
+          });
+          return created;
+        }
         const created = await tx.approvals.create({
           data: {
             organization_id: this.organizationId,
@@ -736,7 +809,7 @@ export class RunDriver {
             call_id: action.call_id,
             tool: tool.name,
             args_hash: await toolCallHash(tool.name, args),
-            args_preview: canonicalJson(args).slice(0, 4000),
+            args_preview: canonicalJson(redactLogValue(args)).slice(0, 4000),
             reason: decision.reason,
             expires_at: new Date(Date.now() + decision.timeout_minutes * 60_000),
           },
@@ -751,11 +824,12 @@ export class RunDriver {
       if (approval.status === "pending") return "waiting";
       if (approval.status !== "approved") {
         return { success: false, error: approval.status === "denied" ? "承認者がこの操作を却下しました" : "承認されませんでした" };
+      } else {
+        await this.deps.db.org(this.organizationId, (tx) =>
+          tx.approvals.update({ where: { id: approval.id }, data: { status: "consumed", consumed_at: new Date() } }),
+        );
+        approvedBeforeExecution = true;
       }
-      await this.deps.db.org(this.organizationId, (tx) =>
-        tx.approvals.update({ where: { id: approval.id }, data: { status: "consumed", consumed_at: new Date() } }),
-      );
-      approvedBeforeExecution = true;
     }
 
     state.callCounts.set(tool.name, callsSoFar + 1);

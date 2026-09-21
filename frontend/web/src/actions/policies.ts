@@ -1,12 +1,15 @@
 "use server";
 
-import type { CreatePolicyInput, UpdatePolicyInput } from "@agent-studio/contracts";
+import type { CreatePolicyInput, SetAutoApprovalEmergencyStopInput, UpdateAutoApprovalPolicyInput, UpdatePolicyInput } from "@agent-studio/contracts";
 import { runAction } from "@/lib/api/run-action";
 import {
   CreatePolicyService,
   DeletePolicyService,
   ListPoliciesService,
   UpdatePolicyService,
+  GetAutoApprovalPolicyService,
+  SetAutoApprovalEmergencyStopService,
+  SetAutoApprovalPolicyService,
 } from "@/lib/services/policies";
 
 export async function listPoliciesAction() {
@@ -23,4 +26,16 @@ export async function updatePolicyAction(id: string, input: UpdatePolicyInput) {
 
 export async function deletePolicyAction(id: string) {
   return runAction(() => new DeletePolicyService().invoke(id), "ポリシーを削除できませんでした");
+}
+
+export async function getAutoApprovalPolicyAction() {
+  return runAction(() => new GetAutoApprovalPolicyService().invoke(), "自動承認Policyを取得できませんでした");
+}
+
+export async function setAutoApprovalPolicyAction(input: UpdateAutoApprovalPolicyInput) {
+  return runAction(() => new SetAutoApprovalPolicyService().invoke(input), "自動承認Policyを保存できませんでした");
+}
+
+export async function setAutoApprovalEmergencyStopAction(input: SetAutoApprovalEmergencyStopInput) {
+  return runAction(() => new SetAutoApprovalEmergencyStopService().invoke(input), "自動承認の状態を変更できませんでした");
 }

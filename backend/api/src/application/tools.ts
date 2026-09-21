@@ -101,6 +101,7 @@ function buildConnectorToolSpec(
         argument_location: operation.method === "GET" || operation.method === "DELETE" ? "query" : "body",
         ...(defaultHeaders && Object.keys(defaultHeaders).length > 0 ? { headers: defaultHeaders } : {}),
         ...(operation.idempotency_key_field ? { idempotency_key_field: operation.idempotency_key_field } : {}),
+        ...(operation.response_boundary ? { response_boundary: operation.response_boundary } : {}),
       },
     } as Prisma.InputJsonValue,
   };
@@ -207,7 +208,7 @@ export class ToolService {
   async createConnector(actor: MemberActor, raw: CreateConnectorInput): Promise<ConnectorDto> {
     requireRole(actor, "builder");
     const input = createConnectorSchema.parse(raw);
-    if (!(["http_openapi", "runtime", "mcp"] as const).includes(input.adapter as "http_openapi" | "runtime" | "mcp")) {
+    if (!(["http_openapi", "internal_http_api", "runtime", "mcp"] as const).includes(input.adapter as "http_openapi" | "internal_http_api" | "runtime" | "mcp")) {
       throw validationError("HTTP連携、MCP連携、Browser連携の一括登録に対応しています");
     }
     const runtime = input.adapter === "runtime";
@@ -269,9 +270,12 @@ export class ToolService {
         include: { tools: { include: { versions: { orderBy: { version: "desc" }, take: 1 } } } },
       });
       if (!connector) throw notFound("連携サービス");
-      if (connector.adapter === "http_openapi" && !input.base_url) throw validationError("HTTP連携にはbase_urlが必要です");
+      if ((connector.adapter === "http_openapi" || connector.adapter === "internal_http_api") && !input.base_url) throw validationError("HTTP連携にはbase_urlが必要です");
       if (connector.adapter === "mcp" && !input.base_url) throw validationError("MCP連携にはサーバーのURLが必要です");
-      if (connector.adapter !== "http_openapi" && input.default_headers) {
+      if (connector.adapter === "internal_http_api" && input.operations.some((operation) => !operation.output_schema || !operation.response_boundary)) {
+        throw validationError("社内APIの各操作にはresponse schemaとfield allowlistが必要です");
+      }
+      if (connector.adapter !== "http_openapi" && connector.adapter !== "internal_http_api" && input.default_headers) {
         throw validationError("固定ヘッダはHTTP連携でだけ指定できます");
       }
 
@@ -750,7 +754,7 @@ export class ToolService {
     if (conn.expires_at && conn.expires_at <= new Date()) {
       return this.updateConnectionStatus(actor, conn.id, "expired", "connection.validate", { reason: "expired" });
     }
-    if (conn.scope !== "studio" || !conn.connector || conn.connector.adapter !== "http_openapi") {
+    if (conn.scope !== "studio" || !conn.connector || !["http_openapi", "internal_http_api"].includes(conn.connector.adapter)) {
       if (!conn.secret_locator && conn.scope !== "runtime") throw preconditionFailed("認証情報が設定されていません");
       return this.updateConnectionStatus(actor, conn.id, "connected", "connection.validate", { mode: "configuration" });
     }

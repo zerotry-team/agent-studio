@@ -62,6 +62,13 @@ describe("OpenAPI Connector Builder", () => {
     expect(proposal.operations.filter((operation) => operation.selected).map((operation) => operation.operation_id)).toEqual(["getInvoice"]);
   });
 
+  it("社内APIはresponse schemaとfield allowlistを必須にする", () => {
+    const internal = structuredClone(document);
+    (internal.paths["/invoices/{invoice_id}"].get as Record<string, unknown>)["x-agent-studio-response-fields"] = ["amount"];
+    expect(inspectOpenApi({ document: internal, internal_api: true, selected_operation_ids: ["getInvoice"] }).connector.adapter).toBe("internal_http_api");
+    expect(() => inspectOpenApi({ document, internal_api: true, selected_operation_ids: ["getInvoice"] })).toThrow(/field/);
+  });
+
   it("operation単位のsecurityも認証必須として扱う", () => {
     const operationSecurity = structuredClone(document);
     delete (operationSecurity as { security?: unknown }).security;

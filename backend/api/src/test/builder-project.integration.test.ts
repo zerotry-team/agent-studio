@@ -778,4 +778,74 @@ describe("Builder Project", () => {
       fetchMock.mockRestore();
     }
   });
+
+  it("組織Policy内ならPreview成功後に同一BuildをProductionへ自動昇格する", async () => {
+    const autoEmail = `builder-auto-production-${h.suffix}@example.com`;
+    const autoOrg = await h.createOrg("builder-auto-production", [{ email: autoEmail, role: "owner", approver: true }]);
+    await h.admin.runtime_profiles.create({ data: { organization_id: autoOrg.id, key: "builder-preview", name: "Builder Preview", type: "openai_hosted" } });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ status: "ok" }), { status: 200, headers: { "content-type": "application/json" } }));
+    try {
+      const created = await h.request("POST", "/api/v1/builder-projects", {
+        email: autoEmail,
+        org: autoOrg.id,
+        body: { request: "公開Health APIを読み取り、許可済みPolicyで同じBuildをProductionまで自動昇格するAgentを完成させてください。", target: "production" },
+      });
+      await h.waitFor(
+        () => h.request("GET", `/api/v1/builder-projects/${created.body.id}`, { email: autoEmail, org: autoOrg.id }),
+        (response) => response.body.runs[0]?.status === "completed",
+      );
+      const openapi = {
+        openapi: "3.1.0",
+        info: { title: `Auto Production Health ${h.suffix}`, version: "1.0.0" },
+        servers: [{ url: "https://example.com" }],
+        paths: { "/health": { get: { operationId: "getAutoProductionHealth", summary: "Healthを取得", responses: { "200": { description: "ok" } } } } },
+      };
+      const inspected = await h.request("POST", `/api/v1/builder-projects/${created.body.id}/openapi/inspect`, {
+        email: autoEmail,
+        org: autoOrg.id,
+        body: { document: openapi, connector_key: `auto-production-health-${h.suffix}` },
+      });
+      expect(inspected.status, JSON.stringify(inspected.body)).toBe(200);
+      const toolName = inspected.body.operations[0].name as string;
+      const policy = await h.request("PUT", "/api/v1/organization/auto-approval-policy", {
+        email: autoEmail,
+        org: autoOrg.id,
+        body: {
+          mode: "all_within_policy",
+          environments: ["staging", "production"],
+          allowed_hosts: ["example.com"],
+          allowed_operations: [toolName, "production_promotion"],
+          allowed_methods: ["GET"],
+          denied_methods: ["DELETE"],
+          limits: { requests_per_minute: 100, daily_cost_jpy: null, max_records_per_call: 100 },
+          production_promotion: true,
+          automatic_retry: true,
+          automatic_rollback: true,
+          expires_at: null,
+        },
+      });
+      expect(policy.status, JSON.stringify(policy.body)).toBe(200);
+      const applied = await h.request("POST", `/api/v1/builder-projects/${created.body.id}/openapi/apply`, {
+        email: autoEmail,
+        org: autoOrg.id,
+        body: { document: openapi, connector_key: `auto-production-health-${h.suffix}` },
+      });
+      expect(applied.status, JSON.stringify(applied.body)).toBe(201);
+
+      const completed = await h.waitFor(
+        () => h.request("GET", `/api/v1/builder-projects/${created.body.id}`, { email: autoEmail, org: autoOrg.id }),
+        (response) => response.body.status === "completed" || response.body.status === "failed" || response.body.status === "blocked",
+        30_000,
+      );
+      expect(completed.body.status, JSON.stringify(completed.body)).toBe("completed");
+      expect(completed.body.releases[0]).toMatchObject({ status: "production_succeeded", production_run_id: expect.any(String) });
+      expect(completed.body.human_actions).toEqual(expect.arrayContaining([expect.objectContaining({ type: "production_approval", status: "completed" })]));
+      const approval = await h.admin.approvals.findFirstOrThrow({ where: { organization_id: autoOrg.id, tool: "production_promotion" } });
+      expect(approval).toMatchObject({ auto_approved: true, status: "consumed", auto_approval_policy_version: 1 });
+      const audit = await h.admin.audit_logs.findFirstOrThrow({ where: { organization_id: autoOrg.id, action: "builder.production.auto_promote" } });
+      expect(audit.result).toBe("success");
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
 });

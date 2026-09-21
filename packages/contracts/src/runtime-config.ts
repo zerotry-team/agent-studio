@@ -2,6 +2,7 @@ import { z } from "zod";
 import { slugSchema, toolNameSchema } from "./common.js";
 import { policySchema } from "./policy.js";
 import { inputSchemaSchema, toolRiskSchema } from "./tools.js";
+import { responseBoundarySchema } from "./response-boundary.js";
 
 /**
  * Runtime 側（顧客 AWS）で管理するツール設定（CRT-11）。
@@ -62,6 +63,10 @@ export const runtimeHttpToolSchema = z
         auth: httpToolAuthSchema.default({ type: "none" }),
         headers: z.record(z.string(), z.string()).optional(),
         timeout_ms: z.number().int().min(100).max(120000).default(15000),
+        /** 企業Runtime内でRaw responseを縮小し、許可fieldだけをモデルへ返す。 */
+        response_boundary: responseBoundarySchema.optional(),
+        /** OpenAPIから固定した成功応答schema。drift時はモデルへ返さず失敗させる。 */
+        output_schema: z.unknown().optional(),
       })
       .strict(),
     /** Runtime 側で追加するポリシー（顧客が管理） */

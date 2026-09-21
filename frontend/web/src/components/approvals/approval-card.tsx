@@ -64,6 +64,7 @@ export function ApprovalCard({ approval, canDecide, onDecided, hideRunLink = fal
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-sm font-semibold text-gray-900">{approval.tool}</span>
             <ApprovalStatusBadge status={expired ? "expired" : approval.status} />
+            {approval.auto_approved ? <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">組織Policy</span> : null}
           </div>
           <p className="text-sm text-gray-500">
             {approval.agent ? (
@@ -88,7 +89,7 @@ export function ApprovalCard({ approval, canDecide, onDecided, hideRunLink = fal
               {expired ? "期限切れ" : <>期限: {formatDateTime(approval.expires_at)}（<TimeAgo value={approval.expires_at} />）</>}
             </span>
           ) : null}
-          {!hideRunLink ? (
+          {!hideRunLink && approval.run_id ? (
             <Link href={`/runs/${approval.run_id}`} className="inline-flex items-center gap-1 font-medium text-accent-700 hover:underline">
               実行の詳細
               <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
@@ -110,8 +111,13 @@ export function ApprovalCard({ approval, canDecide, onDecided, hideRunLink = fal
         {approval.status !== "pending" ? (
           <div className="rounded-lg bg-gray-50 px-4 py-3 text-sm text-gray-700">
             <p>
-              {approval.decided_by ?? "システム"} が {formatDateTime(approval.decided_at)} に判断しました
+              {approval.auto_approved ? "組織Policy" : approval.decided_by ?? "システム"} が {formatDateTime(approval.decided_at)} に判断しました
             </p>
+            {approval.auto_approved ? (
+              <p className="mt-1 text-gray-600">
+                Policy v{approval.auto_approval_policy_version ?? "-"}: {approval.auto_approval_reason ?? "許可範囲内"}
+              </p>
+            ) : null}
             {approval.comment ? <p className="mt-1 whitespace-pre-wrap text-gray-600">コメント: {approval.comment}</p> : null}
           </div>
         ) : null}

@@ -18,14 +18,16 @@ import type {
   ToolVersionSpec,
   GitCredentialResponse,
 } from "@agent-studio/contracts";
-import { adapterDescriptorSchema, builderWorkspaceResultSchema, canonicalJson, gitPublishResultSchema } from "@agent-studio/contracts";
+import { adapterDescriptorSchema, browserLoginResultSchema, builderWorkspaceResultSchema, canonicalJson, gitPublishResultSchema } from "@agent-studio/contracts";
 import { AppError, notFound } from "../domain/errors.js";
+import { evaluateOrganizationAutoApproval } from "../domain/organization-auto-approval.js";
 import { recordAudit } from "../infrastructure/audit.js";
 import type { Tx } from "../infrastructure/db/tenant-db.js";
 import type { Deps } from "./deps.js";
 import { hashToken } from "./environments.js";
 import { appendRunEvent } from "./run-events.js";
 import { parseGitHubAppMetadata, parseGitHubAppSecret } from "../infrastructure/git/github-app.js";
+import { BuilderGitAutomationService } from "./builder-git-automation.js";
 
 export interface RuntimeContext {
   runtimeId: string;
@@ -47,7 +49,11 @@ const revoked = () => new AppError("runtime_revoked", 403, "この Runtime は�
  * 組織は自己申告させない。
  */
 export class RuntimeApiService {
-  constructor(private readonly deps: Deps) {}
+  private readonly gitAutomation: BuilderGitAutomationService;
+
+  constructor(private readonly deps: Deps) {
+    this.gitAutomation = new BuilderGitAutomationService(deps);
+  }
 
   /** 初回登録（RTM-03）。Bootstrap Token と AWS の身元の両方が一致した場合だけ成功する */
   async register(req: RegisterRequest, sourceIp: string | null): Promise<RegisterResponse> {
@@ -496,6 +502,7 @@ export class RuntimeApiService {
   }
 
   async jobResult(ctx: RuntimeContext, jobId: string, req: JobResultRequest): Promise<void> {
+    let autoMergeChangeSetId: string | null = null;
     await this.deps.db.org(ctx.organizationId, async (tx) => {
       const job = await tx.runtime_jobs.findFirst({ where: { id: jobId, runtime_id: ctx.runtimeId } });
       if (!job) throw notFound("ジョブ");
@@ -510,6 +517,58 @@ export class RuntimeApiService {
           leased_until: null,
         },
       });
+      if (job.type === "start_browser_login") {
+        const login = await tx.browser_login_sessions.findFirst({ where: { runtime_job_id: jobId, runtime_id: ctx.runtimeId } });
+        if (!login) throw notFound("Browser Login Session");
+        const profile = await tx.browser_profiles.findFirst({ where: { id: login.profile_id, runtime_id: ctx.runtimeId } });
+        if (!profile) throw notFound("Browser Profile");
+        if (req.status === "succeeded") {
+          const output = browserLoginResultSchema.safeParse(req.output);
+          const allowed = Array.isArray(profile.allowed_domains) ? profile.allowed_domains.filter((value): value is string => typeof value === "string").sort() : [];
+          const verified = output.success ? [...output.data.verified_domains].sort() : [];
+          const objectKeyOk = output.success && output.data.runtime_object_key.startsWith(`profiles/${profile.id}/`);
+          const expiryOk = output.success && new Date(output.data.expires_at) > new Date() && new Date(output.data.expires_at).getTime() <= Date.now() + 90 * 24 * 60 * 60_000;
+          if (!output.success || output.data.login_session_id !== login.id || output.data.profile_id !== profile.id
+            || JSON.stringify(verified) !== JSON.stringify(allowed) || !objectKeyOk || !expiryOk) {
+            throw new AppError("invalid_job_result", 400, "Browser Profileの検証証跡が一致しません");
+          }
+          const now = new Date();
+          await tx.browser_profiles.update({ where: { id: profile.id }, data: {
+            status: "active", runtime_object_key: output.data.runtime_object_key,
+            last_verified_at: now, expires_at: new Date(output.data.expires_at), revoked_at: null,
+          } });
+          await tx.browser_login_sessions.update({ where: { id: login.id }, data: { status: "succeeded", completed_at: now, error: null } });
+          if (login.human_action_id) await tx.human_actions.updateMany({
+            where: { id: login.human_action_id, status: "pending" }, data: { status: "completed", completed_at: now },
+          });
+          if (login.project_id) {
+            const project = await tx.builder_projects.findUnique({ where: { id: login.project_id } });
+            const active = await tx.builder_runs.findFirst({ where: { project_id: login.project_id, status: { in: ["queued", "running"] } } });
+            if (project && !active) {
+              const last = await tx.builder_runs.aggregate({ where: { project_id: project.id }, _max: { attempt: true } });
+              const requestHash = (suffix: string) => createHash("sha256").update(`${project.request}${suffix}`).digest("hex");
+              await tx.builder_runs.create({ data: {
+                organization_id: ctx.organizationId, project_id: project.id, attempt: (last._max.attempt ?? 0) + 1,
+                correlation_id: randomUUID(), budget: { max_attempts: 3, phase: "planning", ...(this.deps.env.NODE_ENV === "test" ? { worker_id: this.deps.env.WORKER_ID } : {}) },
+                steps: { create: [
+                  { kind: "analyze_requirements", input_hash: requestHash("") },
+                  { kind: "resolve_capabilities", input_hash: requestHash(":resolve") },
+                  { kind: "prepare_human_actions", input_hash: requestHash(":human") },
+                ] },
+              } });
+              await tx.builder_projects.update({ where: { id: project.id }, data: { status: "draft", completed_at: null } });
+            }
+          }
+        } else {
+          await tx.browser_login_sessions.update({ where: { id: login.id }, data: { status: "failed", completed_at: new Date(), error: (req.error ?? "RuntimeでHuman Loginを完了できませんでした").slice(0, 2000) } });
+        }
+        await recordAudit(tx, {
+          organizationId: ctx.organizationId, actorType: "runtime", actorId: ctx.runtimeId,
+          action: "browser_profile.login.result", targetType: "browser_profile", targetId: profile.id,
+          sourceIp: ctx.sourceIp, result: req.status === "succeeded" ? "success" : "failure",
+          detail: { login_session_id: login.id, profile_body_returned_to_control_plane: false, auto_resumed: req.status === "succeeded" && Boolean(login.project_id) },
+        });
+      }
       if (req.status === "failed" && job.type === "start_session") {
         if (job.session_id) {
           await this.failSession(tx, job.session_id, `Runtime で作業環境を起動できませんでした: ${req.error ?? "不明なエラー"}`);
@@ -688,6 +747,7 @@ export class RuntimeApiService {
             instructions: [pull.html_url, "承認時にRequired Checksとhead SHAを再検証します", "承認後は既定branchへのmerge、デプロイ、RuntimeへのTool登録まで自動で追跡します"],
             resume_condition: { type: "git_pr_merged", change_set_id: changeSetId, pr_number: pull.number, head_sha: pull.head.sha },
           } });
+          autoMergeChangeSetId = changeSetId;
           await tx.builder_projects.update({ where: { id: projectId }, data: { status: "waiting_human_action" } });
         } else {
           await tx.builder_change_sets.update({ where: { id: change.id }, data: { status: "failed" } });
@@ -704,6 +764,7 @@ export class RuntimeApiService {
         });
       }
     });
+    if (autoMergeChangeSetId) await this.gitAutomation.tryAutoMerge(ctx.organizationId, autoMergeChangeSetId, ctx.sourceIp);
   }
 
   /** Session Worker の状態の報告 */
@@ -808,7 +869,10 @@ export class RuntimeApiService {
   /** 承認依頼（Tool Gateway から）。同じセッション・同じ引数の依頼があればそれを返す（POL-04） */
   async createApproval(ctx: RuntimeContext, req: ApprovalRequest): Promise<ApprovalResponse> {
     return this.deps.db.org(ctx.organizationId, async (tx) => {
-      const session = await tx.agent_sessions.findFirst({ where: { id: req.session_id, runtime_id: ctx.runtimeId, ended_at: null } });
+      const session = await tx.agent_sessions.findFirst({
+        where: { id: req.session_id, runtime_id: ctx.runtimeId, ended_at: null },
+        include: { run: { include: { deployment: true } } },
+      });
       if (!session) throw notFound("セッション");
       const existing = await tx.approvals.findFirst({
         where: { session_id: session.id, args_hash: req.args_hash, tool: req.tool, status: { in: ["pending", "approved"] } },
@@ -816,6 +880,20 @@ export class RuntimeApiService {
       });
       if (existing) return { approval_id: existing.id, status: await this.currentStatus(tx, existing) };
 
+      const auto = req.risk
+        ? await evaluateOrganizationAutoApproval(tx, ctx.organizationId, {
+            actionKind: "api_call",
+            stage: session.run.deployment.stage as "staging" | "production",
+            operation: req.tool,
+            risk: req.risk,
+            host: req.destination_host ?? null,
+            method: req.method ?? null,
+            requestedRecords: req.requested_records ?? null,
+            now: new Date(),
+          })
+        : { policy: null, decision: { action: "manual_required" as const, reason: "Runtimeがrisk情報を送信していません" } };
+      const autoApproved = Boolean(auto.policy && auto.decision.action === "auto_approve");
+      const decidedAt = autoApproved ? new Date() : null;
       const approval = await tx.approvals.create({
         data: {
           organization_id: ctx.organizationId,
@@ -826,25 +904,37 @@ export class RuntimeApiService {
           args_hash: req.args_hash,
           args_preview: req.args_preview,
           reason: req.reason,
+          status: autoApproved ? "approved" : "pending",
           expires_at: new Date(Date.now() + req.timeout_minutes * 60 * 1000),
+          decided_at: decidedAt,
+          auto_approved: autoApproved,
+          auto_approval_policy_id: autoApproved ? auto.policy!.id : null,
+          auto_approval_policy_version: autoApproved ? auto.policy!.version : null,
+          auto_approval_reason: autoApproved ? auto.decision.reason : null,
         },
       });
-      await appendRunEvent(tx, { id: session.run_id, organization_id: session.organization_id }, "approval.requested", `${req.tool} の実行に承認が必要です: ${req.reason}`, {
-        approval_id: approval.id,
-        tool: req.tool,
-        args_preview: req.args_preview,
-      });
+      await appendRunEvent(
+        tx,
+        { id: session.run_id, organization_id: session.organization_id },
+        autoApproved ? "approval.decided" : "approval.requested",
+        autoApproved ? `${req.tool} を組織Policyが自動承認しました` : `${req.tool} の実行に承認が必要です: ${req.reason}`,
+        autoApproved
+          ? { approval_id: approval.id, tool: req.tool, policy_id: auto.policy!.id, policy_version: auto.policy!.version, reason: auto.decision.reason }
+          : { approval_id: approval.id, tool: req.tool, args_preview: req.args_preview },
+      );
       await recordAudit(tx, {
         organizationId: ctx.organizationId,
-        actorType: "runtime",
-        actorId: ctx.runtimeId,
-        action: "approval.request",
+        actorType: autoApproved ? "system" : "runtime",
+        actorId: autoApproved ? "organization_policy" : ctx.runtimeId,
+        action: autoApproved ? "approval.auto_approve" : "approval.request",
         targetType: "approval",
         targetId: approval.id,
         sourceIp: ctx.sourceIp,
-        detail: { tool: req.tool, run_id: session.run_id },
+        detail: autoApproved
+          ? { tool: req.tool, run_id: session.run_id, policy_id: auto.policy!.id, policy_version: auto.policy!.version, reason: auto.decision.reason }
+          : { tool: req.tool, run_id: session.run_id },
       });
-      return { approval_id: approval.id, status: "pending" };
+      return { approval_id: approval.id, status: autoApproved ? "approved" : "pending" };
     });
   }
 

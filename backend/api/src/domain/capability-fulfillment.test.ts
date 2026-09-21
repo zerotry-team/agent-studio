@@ -21,12 +21,12 @@ describe("classifyCapabilityFulfillment", () => {
 
   it("kintoneは自社利用でもAgent Studio共通Toolへ送る", () => {
     const result = classifyCapabilityFulfillment("自社のkintoneから案件を取得したい", missing("kintoneの案件を取得する"));
-    expect(result).toMatchObject({ mode: "shared_tool", owner: "agent_studio", availability_target_minutes: 15 });
+    expect(result).toMatchObject({ mode: "shared_provider_adapter", owner: "agent_studio", availability_target_minutes: 15 });
   });
 
   it("社内DBは企業専用Runtime Toolへ送る", () => {
     const result = classifyCapabilityFulfillment("自社のDBから顧客履歴を取得したい", missing("顧客履歴を取得する"));
-    expect(result).toMatchObject({ mode: "organization_tool", owner: "organization", execution_location: "runtime" });
+    expect(result).toMatchObject({ mode: "organization_private_adapter", owner: "organization", execution_location: "runtime" });
   });
 
   it("登録済み企業専用Toolの再利用先をStudioではなくRuntimeに保つ", () => {
@@ -55,7 +55,7 @@ describe("classifyCapabilityFulfillment", () => {
       "会社のGitHubリポジトリへ専用バックエンドを作り、社内サーバーへ接続する",
       missing("企業専用Runtimeから社内システムの必要情報を取得する"),
     );
-    expect(result).toMatchObject({ mode: "organization_tool", owner: "organization", execution_location: "runtime" });
+    expect(result).toMatchObject({ mode: "organization_private_adapter", owner: "organization", execution_location: "runtime" });
   });
 
   it("モデルだけで完結する能力はバックエンドを作らない", () => {
@@ -90,6 +90,6 @@ describe("classifyCapabilityFulfillment", () => {
 
   it("外部サービスへの送信はモデルだけで完了扱いにしない", () => {
     const result = classifyCapabilityFulfillment("メールで見積書を送信する", missing("外部へメールを送信する"));
-    expect(result).toMatchObject({ mode: "shared_tool", owner: "agent_studio" });
+    expect(result).toMatchObject({ mode: "shared_provider_adapter", owner: "agent_studio" });
   });
 });

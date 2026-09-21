@@ -36,6 +36,13 @@ function shellName(request: string) {
   return firstLine.length > 60 ? `${firstLine.slice(0, 59)}…` : firstLine;
 }
 
+export interface AutomaticProductionApproval {
+  approvalId: string;
+  policyId: string;
+  policyVersion: number;
+  reason: string;
+}
+
 export class BuilderProjectService {
   private readonly environments: EnvironmentService;
   private readonly runs: RunService;
@@ -727,7 +734,7 @@ export class BuilderProjectService {
   }
 
   /** Previewで固定した同一Buildを、管理者承認後にProductionへ昇格し限定Runを開始する。 */
-  async approveProduction(actor: MemberActor, id: string): Promise<BuilderProjectDto> {
+  async approveProduction(actor: MemberActor, id: string, automatic?: AutomaticProductionApproval): Promise<BuilderProjectDto> {
     requireRole(actor, "admin");
     const candidate = await this.deps.db.run(scopeOf(actor), async (tx) => {
       const project = await tx.builder_projects.findFirst({ where: { id, organization_id: actor.organizationId } });
@@ -798,7 +805,7 @@ export class BuilderProjectService {
       });
       await tx.human_actions.update({
         where: { id: candidate.action.id },
-        data: { status: "completed", completed_by: actor.userId, completed_at: new Date() },
+        data: { status: "completed", completed_by: automatic ? null : actor.userId, completed_at: new Date() },
       });
       await tx.builder_validation_runs.create({
         data: {
@@ -811,12 +818,40 @@ export class BuilderProjectService {
         },
       });
       await tx.builder_projects.update({ where: { id }, data: { status: "validating" } });
-      await recordAudit(tx, auditBy(actor, {
-        action: "builder.production.approve",
-        targetType: "builder_release",
-        targetId: candidate.release.id,
-        detail: { project_id: id, build_id: production.build_id, deployment_id: production.id, run_id: run.id, same_build: true },
-      }));
+      if (automatic) {
+        await tx.approvals.update({
+          where: { id: automatic.approvalId },
+          data: { status: "consumed", consumed_at: new Date() },
+        });
+        await recordAudit(tx, {
+          organizationId: actor.organizationId,
+          actorType: "system",
+          actorId: automatic.policyId,
+          actorLabel: "Organization Policy",
+          sourceIp: null,
+          action: "builder.production.auto_promote",
+          targetType: "builder_release",
+          targetId: candidate.release.id,
+          detail: {
+            project_id: id,
+            build_id: production.build_id,
+            deployment_id: production.id,
+            run_id: run.id,
+            same_build: true,
+            approval_id: automatic.approvalId,
+            policy_id: automatic.policyId,
+            policy_version: automatic.policyVersion,
+            reason: automatic.reason,
+          },
+        });
+      } else {
+        await recordAudit(tx, auditBy(actor, {
+          action: "builder.production.approve",
+          targetType: "builder_release",
+          targetId: candidate.release.id,
+          detail: { project_id: id, build_id: production.build_id, deployment_id: production.id, run_id: run.id, same_build: true },
+        }));
+      }
     });
     return this.get(actor, id);
   }

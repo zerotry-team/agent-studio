@@ -43,6 +43,11 @@ output "bootstrap_token_secret_id" {
   value       = aws_secretsmanager_secret.bootstrap_token.name
 }
 
+output "browser_profile_bucket" {
+  description = "暗号化Browser Profile本文を保存する顧客Runtime内Bucket。Browser無効時はnull。"
+  value       = local.browser_enabled ? aws_s3_bucket.browser_profiles[0].id : null
+}
+
 output "connection_secret_ids" {
   description = "業務システムの認証情報を入れるシークレットの名前（接続名 → シークレット名）"
   value       = { for name, s in aws_secretsmanager_secret.connection : name => s.name }

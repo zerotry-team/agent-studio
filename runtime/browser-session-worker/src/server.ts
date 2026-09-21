@@ -41,7 +41,9 @@ export function createBrowserServer(session: BrowserSession, version: string): S
 
     const mcp = new McpServer({ name: "agent-studio-browser-session-worker", version }, { capabilities: { tools: {} } });
     mcp.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: BROWSER_TOOLS.filter((tool) => tool.name !== "browser_exec_js" || session.config.codeExecutionEnabled),
+      tools: BROWSER_TOOLS.filter((tool) =>
+        (tool.name !== "browser_exec_js" || session.config.codeExecutionEnabled)
+        && (tool.name !== "computer_action" || session.config.computerActionsEnabled)),
     }));
     mcp.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const args = request.params.arguments;

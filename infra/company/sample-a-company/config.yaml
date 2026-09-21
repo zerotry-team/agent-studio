@@ -264,5 +264,22 @@ runtime:
                 expects: { type: string }
               required: [code]
               additionalProperties: false
+          - name: computer_action
+            risk: external_send
+            reads_untrusted_content: true
+            description: "許可されたBrowser window内で限定Computer Actionを実行し、Screenshotを返します"
+            input_schema:
+              type: object
+              properties:
+                action: { type: string, enum: [click, type, scroll, drag] }
+                x: { type: number }
+                y: { type: number }
+                to_x: { type: number }
+                to_y: { type: number }
+                value: { type: string }
+                delta_x: { type: number }
+                delta_y: { type: number }
+              required: [action]
+              additionalProperties: false
 
     policies: []

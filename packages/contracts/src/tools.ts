@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { toolNameSchema } from "./common.js";
+import { responseBoundarySchema } from "./response-boundary.js";
 
 /**
  * ツールの実行場所（TOOL-02）
@@ -63,6 +64,8 @@ export const studioFunctionSpecSchema = z.discriminatedUnion("handler", [
       idempotency_key_field: toolNameSchema.optional(),
       /** API が必須とする固定ヘッダ（例: Notion-Version）。認証情報は入れず Connection で管理する */
       headers: z.record(staticHeaderNameSchema, z.string().min(1).max(200)).optional(),
+      /** Raw responseをControl Plane・モデルへ残す前に適用するデータ境界。 */
+      response_boundary: responseBoundarySchema.optional(),
     })
     .strict(),
   z
@@ -79,6 +82,13 @@ export const studioFunctionSpecSchema = z.discriminatedUnion("handler", [
     .object({
       handler: z.literal("openai_image_to_social_media"),
       /** 画像生成は組織ごとのOpenAI Projectで実行し、成果物はConnectorのmedia_idとして返す。 */
+      model: z.string().min(1).max(100).default("gpt-image-2.5-flare"),
+    })
+    .strict(),
+  z
+    .object({
+      handler: z.literal("openai_image_artifact"),
+      /** Agent Studio標準の画像Artifact生成。外部Provider Connectionを要求しない。 */
       model: z.string().min(1).max(100).default("gpt-image-2.5-flare"),
     })
     .strict(),

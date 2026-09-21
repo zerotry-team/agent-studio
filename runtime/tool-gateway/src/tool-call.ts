@@ -1,6 +1,7 @@
 import {
   canonicalJson,
   evaluatePolicies,
+  requestedRecordCount,
   toolCallHash,
   type ApprovalResponse,
   type PolicyDecision,
@@ -115,7 +116,7 @@ export class ToolCallService {
 
     let approvalId: string | undefined;
     if (decision.action === "require_approval") {
-      const outcome = await this.awaitApproval(grant, name, argsObject, argsHash, decision, record);
+      const outcome = await this.awaitApproval(grant, tool, argsObject, argsHash, decision, record);
       if (outcome.kind === "blocked") return outcome.result;
       approvalId = outcome.approvalId;
     }
@@ -124,13 +125,14 @@ export class ToolCallService {
 
   private async awaitApproval(
     grant: SessionGrant,
-    name: string,
+    tool: CatalogTool,
     args: Record<string, unknown>,
     argsHash: string,
     decision: Extract<PolicyDecision, { action: "require_approval" }>,
     record: (decision: "denied" | "approval_required" | "failed", detail?: string) => void,
   ): Promise<ApprovalOutcome> {
     const { controller, logger } = this.deps;
+    const name = tool.name;
     const log = logger.child({ session_id: grant.session_id, tool: name, args_hash: argsHash });
 
     let approval: ApprovalResponse;
@@ -143,6 +145,14 @@ export class ToolCallService {
         args_preview: canonicalJson(args).slice(0, ARGS_PREVIEW_MAX),
         reason: decision.reason.slice(0, 1000),
         timeout_minutes: decision.timeout_minutes,
+        risk: tool.risk,
+        ...(tool.target.kind === "http"
+          ? {
+              destination_host: new URL(tool.target.tool.http.url.replace(/\{[A-Za-z_][A-Za-z0-9_]*\}/g, "x")).hostname,
+              method: tool.target.tool.http.method,
+            }
+          : {}),
+        ...(requestedRecordCount(args) !== null ? { requested_records: requestedRecordCount(args)! } : {}),
       });
     } catch (err) {
       log.warn({ err: errorMessage(err) }, "承認依頼を送れませんでした");

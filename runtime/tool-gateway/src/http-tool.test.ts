@@ -119,6 +119,11 @@ describe("executeHttpTool（ローカルの HTTP サーバーに対して）", (
           res.end();
           return;
         }
+        if (req.url?.startsWith("/contract")) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ contract_id: "123", customer_name: "田中太郎", bank_account: "secret", status: "active", updated_at: "2026-09-22" }));
+          return;
+        }
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
       });
@@ -153,6 +158,21 @@ describe("executeHttpTool（ローカルの HTTP サーバーに対して）", (
     expect(text).toContain("HTTP 404");
     expect(text).toContain("商品が見つかりません");
     expect(out.auditDetail).toBe("HTTP 404");
+  });
+
+  it("社内APIのRaw responseから許可fieldだけをモデルへ返す", async () => {
+    const out = await executeHttpTool(
+      tool({
+        method: "GET",
+        url: `${base}/contract`,
+        output_schema: { type: "object", required: ["status"], properties: { status: { type: "string" } } },
+        response_boundary: { allowed_fields: ["status", "updated_at"], max_bytes: 65536, max_records: 10 },
+      }),
+      {},
+      { secrets },
+    );
+    expect(out.result.isError).toBeUndefined();
+    expect((out.result.content[0] as { text: string }).text).toBe('{"status":"active","updated_at":"2026-09-22"}');
   });
 
   it("応答は 100KB で切り詰める", async () => {

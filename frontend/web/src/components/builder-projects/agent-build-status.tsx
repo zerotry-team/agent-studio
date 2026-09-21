@@ -52,6 +52,8 @@ function fulfillmentLabel(mode: string | undefined) {
     configure: "接続を設定",
     shared_tool: "Agent Studio共通Toolを追加",
     organization_tool: "企業専用Runtime Toolを追加",
+    shared_provider_adapter: "Agent Studio共通Adapterを追加",
+    organization_private_adapter: "企業専用Runtime Adapterを追加",
   }[mode ?? ""] ?? null;
 }
 
@@ -218,7 +220,11 @@ function Details({ project }: { project: BuilderProjectDto }) {
       })}</ol></section> : null}
       <section><h3 className="text-sm font-semibold text-gray-900">変更</h3><ul className="mt-2 space-y-2 text-sm text-gray-600">{project.change_sets.map((change) => <li key={change.id}>{change.summary} <Badge tone={change.status === "applied" ? "success" : "neutral"}>{change.status}</Badge></li>)}{!project.change_sets.length ? <li>まだありません</li> : null}</ul></section>
       <section><h3 className="text-sm font-semibold text-gray-900">直近の検証</h3>{latestValidation ? <div className="mt-2 text-sm text-gray-600"><Badge tone={latestValidation.status === "passed" ? "success" : latestValidation.status === "failed" ? "danger" : "warning"}>{latestValidation.status}</Badge> {latestValidation.suite}{latestValidation.error ? <p className="mt-1 text-red-700">{latestValidation.error}</p> : null}</div> : <p className="mt-2 text-sm text-gray-500">まだありません</p>}</section>
-      <section><h3 className="text-sm font-semibold text-gray-900">試行履歴</h3><ul className="mt-2 space-y-1 font-mono text-xs text-gray-500">{project.runs.map((run) => <li key={run.id}>attempt {run.attempt}: {run.status} / {run.correlation_id}</li>)}</ul></section>
+      <section><h3 className="text-sm font-semibold text-gray-900">試行履歴</h3><ul className="mt-2 space-y-2 font-mono text-xs text-gray-500">{project.runs.map((run) => <li key={run.id}>
+        <p>attempt {run.attempt}: {run.status} / {run.correlation_id}</p>
+        {run.error_class ? <p className="mt-0.5 text-red-700">{run.error_class}{run.error_fingerprint ? ` / ${run.error_fingerprint.slice(0, 12)}` : ""}</p> : null}
+        {run.next_action ? <p className="mt-0.5 font-sans text-gray-700">次の操作: {run.next_action}</p> : null}
+      </li>)}</ul></section>
     </div>
   </details>;
 }
@@ -233,7 +239,10 @@ export function AgentBuildStatus({ project, onChanged }: { project: BuilderProje
     {pending ? <NextAction action={pending} projectId={project.id} projectRequest={project.request} onChanged={onChanged} /> : null}
     <BuildProgress project={project} />
     {canResume ? <div><Button variant="secondary" loading={resume.pending} icon={<RefreshCw className="h-4 w-4" />} onClick={() => resume.mutate(project.id)}>再実行</Button></div> : null}
-    {project.status === "failed" && project.runs[0]?.error ? <Alert tone="danger" title="作成処理が停止しました">{project.runs[0].error}</Alert> : null}
+    {["failed", "blocked"].includes(project.status) && project.runs[0]?.error ? <Alert tone="danger" title="作成処理が停止しました">
+      <p>{project.runs[0].error}</p>
+      {project.runs[0].next_action ? <p className="mt-1 font-medium">次の操作: {project.runs[0].next_action}</p> : null}
+    </Alert> : null}
     {!pending ? <Alert tone={project.status === "completed" || project.status === "production_pending_approval" ? "success" : "info"}>{project.status === "completed" ? "作成とProductionの最終確認まで完了しました。" : project.status === "production_pending_approval" ? "Previewの確認が完了しました。本番で使えるようにするには管理者の承認が必要です。" : "現在、人による操作は必要ありません。処理が進むと自動で更新されます。"}</Alert> : null}
     {release ? <Card><CardHeader title="Preview到達点" description={release.status} /><CardBody className="flex flex-wrap gap-2"><ButtonLink href={`/agents/${release.agent_id}?tab=preview`}>Previewを開く</ButtonLink>{release.preview_run_id ? <ButtonLink href={`/runs/${release.preview_run_id}`} variant="primary">Run結果</ButtonLink> : null}</CardBody></Card> : null}
     <Details project={project} />

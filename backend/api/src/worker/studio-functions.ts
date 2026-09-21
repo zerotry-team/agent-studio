@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
+import { filterResponseFields, validateJsonSchema } from "@agent-studio/contracts";
 import type { Env } from "../env.js";
 import type { CompiledFunctionTool } from "../domain/manifest-compiler.js";
+import { inspectArtifact } from "../domain/artifact-security.js";
 import type { TenantDb } from "../infrastructure/db/tenant-db.js";
 import { assertPublicUrl, isPrivateAddress } from "../infrastructure/http/public-url.js";
 import type { SecretStore } from "../infrastructure/secrets/secret-store.js";
+import { artifactPrefix, type ObjectStore } from "../infrastructure/storage/object-store.js";
 
 const TIMEOUT_MS = 15_000;
 const IMAGE_TIMEOUT_MS = 120_000;
@@ -12,6 +15,29 @@ const MAX_SOCIAL_MEDIA_BYTES = 3 * 1024 * 1024;
 
 const ZENN_TITLE_MAX = 70;
 const ZENN_BODY_MAX = 100_000;
+
+async function readResponseLimited(response: Response, limit: number): Promise<{ text: string; truncated: boolean }> {
+  if (!response.body) return { text: "", truncated: false };
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    await response.body.cancel().catch(() => undefined);
+    return { text: "", truncated: true };
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return { text: new TextDecoder().decode(Buffer.concat(chunks)), truncated: false };
+    if (size + value.byteLength > limit) {
+      if (limit > size) chunks.push(value.subarray(0, limit - size));
+      await reader.cancel().catch(() => undefined);
+      return { text: new TextDecoder().decode(Buffer.concat(chunks)), truncated: true };
+    }
+    chunks.push(value);
+    size += value.byteLength;
+  }
+}
 
 interface ZennArticleInput {
   title: string;
@@ -96,7 +122,8 @@ export class StudioFunctionExecutor {
   constructor(
     private readonly db: TenantDb,
     private readonly secrets: SecretStore,
-    private readonly env?: Pick<Env, "NODE_ENV" | "OPENAI_API_KEY">,
+    private readonly env?: Pick<Env, "NODE_ENV" | "OPENAI_API_KEY" | "ARTIFACTS_BUCKET">,
+    private readonly objects?: ObjectStore,
   ) {}
 
   async execute(
@@ -122,7 +149,91 @@ export class StudioFunctionExecutor {
       case "openai_image_to_social_media":
         if (!context) throw new Error("実行コンテキストがありません");
         return this.openAiImageToSocialMedia(organizationId, tool, args, context);
+      case "openai_image_artifact":
+        if (!context) throw new Error("実行コンテキストがありません");
+        return this.openAiImageArtifact(organizationId, tool, args, context);
     }
+  }
+
+  private async generateOpenAiImage(
+    organizationId: string,
+    model: string,
+    promptValue: unknown,
+  ): Promise<{ bytes: Buffer; revisedPrompt?: string; usage?: unknown }> {
+    const prompt = requiredText(promptValue, "画像の説明", 8_000);
+    const settings = await this.db.org(organizationId, (tx) =>
+      tx.organization_openai_settings.findUnique({ where: { organization_id: organizationId } }),
+    );
+    let openAiKey = settings?.app_key_secret_arn ? await this.secrets.get(settings.app_key_secret_arn) : null;
+    if (!openAiKey && this.env?.NODE_ENV !== "production") openAiKey = this.env?.OPENAI_API_KEY ?? null;
+    if (!openAiKey) throw new Error("OpenAIの接続が未設定です。設定から接続してください");
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${openAiKey}`,
+      "content-type": "application/json",
+      "user-agent": "agent-studio-image-tool",
+    };
+    if (settings?.openai_project_id) headers["openai-project"] = settings.openai_project_id;
+    const response = await fetch("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model, prompt, size: "1024x1024", quality: "medium", output_format: "png" }),
+      redirect: "error",
+      signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS),
+    });
+    const payload = (await response.json().catch(() => null)) as {
+      data?: Array<{ b64_json?: unknown; revised_prompt?: unknown }>;
+      usage?: unknown;
+      error?: { message?: unknown };
+    } | null;
+    const result = payload?.data?.[0];
+    const base64 = typeof result?.b64_json === "string" ? result.b64_json : null;
+    if (!response.ok || !base64) {
+      const detail = typeof payload?.error?.message === "string" ? payload.error.message.slice(0, 500) : "画像データがありません";
+      throw new Error(`OpenAIで画像を生成できませんでした（HTTP ${response.status}）: ${detail}`);
+    }
+    const bytes = Buffer.from(base64, "base64");
+    if (bytes.byteLength > MAX_SOCIAL_MEDIA_BYTES) throw new Error("生成画像がArtifact上限を超えました");
+    return {
+      bytes,
+      ...(typeof result?.revised_prompt === "string" ? { revisedPrompt: result.revised_prompt } : {}),
+      ...(payload?.usage ? { usage: payload.usage } : {}),
+    };
+  }
+
+  private async openAiImageArtifact(
+    organizationId: string,
+    tool: CompiledFunctionTool,
+    args: Record<string, unknown>,
+    context: { agentId: string; stage: "staging" | "production"; runId: string },
+  ): Promise<string> {
+    if (tool.spec.handler !== "openai_image_artifact") throw new Error("画像生成設定が不完全です");
+    if (!this.env?.ARTIFACTS_BUCKET || !this.objects) throw new Error("画像Artifactの保存先が設定されていません");
+    const model = tool.spec.model;
+    const generated = await this.generateOpenAiImage(organizationId, model, args.prompt);
+    const sha256 = createHash("sha256").update(generated.bytes).digest("hex");
+    const path = `generated-image-${sha256.slice(0, 16)}.png`;
+    const inspected = inspectArtifact(path, generated.bytes);
+    const objectKey = `${artifactPrefix(organizationId, context.runId)}${path}`;
+    if (inspected.scanStatus !== "passed") throw new Error("生成画像がArtifact安全検査を通過しませんでした");
+    await this.objects.put(this.env.ARTIFACTS_BUCKET, objectKey, generated.bytes, "image/png");
+    await this.db.org(organizationId, async (tx) => {
+      await tx.run_artifacts.upsert({
+        where: { organization_id_run_id_path: { organization_id: organizationId, run_id: context.runId, path } },
+        create: { organization_id: organizationId, run_id: context.runId, path, object_key: objectKey, mime_type: "image/png", size_bytes: generated.bytes.byteLength, sha256, scan_status: "passed", scan_engine: inspected.scanEngine, source: "openai_image_generation", retained_until: new Date(Date.now() + 30 * 24 * 60 * 60_000) },
+        update: { object_key: objectKey, size_bytes: generated.bytes.byteLength, sha256, scan_status: "passed", scan_engine: inspected.scanEngine, retained_until: new Date(Date.now() + 30 * 24 * 60 * 60_000) },
+      });
+      await tx.audit_logs.create({ data: {
+        organization_id: organizationId,
+        actor_type: "system",
+        actor_id: context.runId,
+        action: "model.image.generate",
+        target_type: "run",
+        target_id: context.runId,
+        result: "success",
+        detail: { tool: tool.name, model, artifact_path: path, mime_type: "image/png", bytes: generated.bytes.byteLength, sha256, safety_status: "provider_accepted", usage: generated.usage ?? null },
+      } });
+    });
+    return JSON.stringify({ artifact_path: path, mime_type: "image/png", bytes: generated.bytes.byteLength, sha256, model, safety_status: "provider_accepted", ...(generated.revisedPrompt ? { revised_prompt: generated.revisedPrompt } : {}), ...(generated.usage ? { usage: generated.usage } : {}) });
   }
 
   private async linkedSecret(
@@ -166,45 +277,9 @@ export class StudioFunctionExecutor {
       throw new Error("画像生成連携の設定が不完全です");
     }
     const spec = tool.spec;
-    const prompt = requiredText(args.prompt, "画像の説明", 8_000);
-    const settings = await this.db.org(organizationId, (tx) =>
-      tx.organization_openai_settings.findUnique({ where: { organization_id: organizationId } }),
-    );
-    let openAiKey = settings?.app_key_secret_arn ? await this.secrets.get(settings.app_key_secret_arn) : null;
-    if (!openAiKey && this.env?.NODE_ENV !== "production") openAiKey = this.env?.OPENAI_API_KEY ?? null;
-    if (!openAiKey) throw new Error("OpenAIの接続が未設定です。設定から接続してください");
-
-    const openAiHeaders: Record<string, string> = {
-      authorization: `Bearer ${openAiKey}`,
-      "content-type": "application/json",
-      "user-agent": "agent-studio-image-tool",
-    };
-    if (settings?.openai_project_id) openAiHeaders["openai-project"] = settings.openai_project_id;
-    const imageResponse = await fetch("https://api.openai.com/v1/images/generations", {
-      method: "POST",
-      headers: openAiHeaders,
-      body: JSON.stringify({
-        model: spec.model,
-        prompt,
-        size: "1024x1024",
-        quality: "medium",
-        output_format: "png",
-      }),
-      redirect: "error",
-      signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS),
-    });
-    const imagePayload = (await imageResponse.json().catch(() => null)) as {
-      data?: Array<{ b64_json?: unknown; revised_prompt?: unknown }>;
-      error?: { message?: unknown };
-    } | null;
-    const imageResult = imagePayload?.data?.[0];
-    const base64 = typeof imageResult?.b64_json === "string" ? imageResult.b64_json : null;
-    if (!imageResponse.ok || !base64) {
-      const detail = typeof imagePayload?.error?.message === "string" ? imagePayload.error.message.slice(0, 500) : "画像データがありません";
-      throw new Error(`OpenAIで画像を生成できませんでした（HTTP ${imageResponse.status}）: ${detail}`);
-    }
-    const bytes = Buffer.from(base64, "base64");
-    if (bytes.byteLength > MAX_SOCIAL_MEDIA_BYTES) throw new Error("生成画像がSocial Routerの上限を超えました");
+    const generated = await this.generateOpenAiImage(organizationId, spec.model, args.prompt);
+    const bytes = generated.bytes;
+    const base64 = bytes.toString("base64");
 
     const [connector, secret] = await Promise.all([
       this.db.org(organizationId, (tx) => tx.connectors.findFirst({ where: { organization_id: organizationId, id: tool.connector_id! } })),
@@ -267,7 +342,7 @@ export class StudioFunctionExecutor {
       media_id: mediaId,
       mime_type: "image/png",
       bytes: bytes.byteLength,
-      ...(typeof imageResult?.revised_prompt === "string" ? { revised_prompt: imageResult.revised_prompt } : {}),
+      ...(generated.revisedPrompt ? { revised_prompt: generated.revisedPrompt } : {}),
     });
   }
 
@@ -412,7 +487,9 @@ export class StudioFunctionExecutor {
       redirect: "error",
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    const text = (await response.text()).slice(0, MAX_OUTPUT);
+    const boundary = tool.spec.response_boundary;
+    const read = await readResponseLimited(response, boundary?.max_bytes ?? MAX_OUTPUT);
+    const text = read.text;
     await this.db.org(organizationId, async (tx) => {
       await tx.audit_logs.create({
         data: {
@@ -428,7 +505,25 @@ export class StudioFunctionExecutor {
       });
     });
     if (!response.ok) throw new Error(`連携サービスがエラーを返しました（HTTP ${response.status}）: ${text.slice(0, 500)}`);
-    return text || JSON.stringify({ accepted: response.status === 202, status: response.status });
+    if (read.truncated) throw new Error("連携サービスの応答が許可されたサイズ上限を超えています");
+    if (!text) return JSON.stringify({ accepted: response.status === 202, status: response.status });
+    if (boundary || tool.output_schema !== undefined) {
+      let value: unknown;
+      try {
+        value = JSON.parse(text);
+      } catch {
+        throw new Error("連携サービスの応答がJSONではありません");
+      }
+      if (tool.output_schema !== undefined) {
+        try {
+          validateJsonSchema(value, tool.output_schema);
+        } catch (error) {
+          throw new Error(`連携サービスのresponse schemaが変わっています: ${(error as Error).message}`);
+        }
+      }
+      return JSON.stringify(boundary ? filterResponseFields(value, boundary) : value);
+    }
+    return text;
   }
 
   private async httpWebhook(organizationId: string, tool: CompiledFunctionTool, args: Record<string, unknown>): Promise<string> {

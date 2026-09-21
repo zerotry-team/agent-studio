@@ -1,9 +1,51 @@
-# 実装状況（2026-09-21 時点）
+# 実装状況（2026-09-22 時点）
 
 要件定義書（docs/requirements.md）の §15 のフェーズごとに、実装したもの・確認したこと・残っていることをまとめる。
 「確認済み」は、ローカルでは Docker の PostgreSQL と擬似 OpenAI を使った自動テスト・画面操作まで。
 AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適用、ECS の安定化、Control Plane の `/health` まで確認済み。
 以下の従来フェーズ表は初期基盤の記録として残し、Agent版Vercel MVPの最新状態は次節を正とする。
+
+## 最終完成仕様 v1.0 対応表（正本）
+
+ステータスは `implemented`（実装のみ）、`tested_fake`（fixture/fakeを含む自動テスト）、`tested_local_real`（ローカル実プロセス/実Provider）、`tested_cloud_real`（実AWS/production）、`blocked_human`（資格情報・管理者承認・外部送信等のHuman Gate）のいずれかで表す。下位環境の成功を実AWS成功として扱わない。
+
+| Workstream | 状態 | 2026-09-22の証跡と境界 |
+|---|---|---|
+| WS-01 正本化 | implemented | 本表と最終仕様を相互参照。古い履歴は削除せず、現在の判定を本表へ集約 |
+| WS-02 自律診断・再実行 | tested_fake | 13 failure class、error fingerprint、class別上限/backoff/next action、lease所有者検査、遅延失敗拒否を実装。通常Workerと各integration Harnessを一意のqueueで分離し、別HarnessのJobをclaimしない契約テストを追加。自動追加commitの実Provider E2Eは未確認 |
+| WS-03 モデル標準能力 | tested_fake | text/vision/OCR/image generation/web search/computer use Catalog、不要Custom Tool抑止、画像Artifact保存を実装。実OpenAIのOCR/画像/ニュース3本は未実施 |
+| WS-04 Connection/Human Login | tested_fake | Browser Profile/Login Session/RLS/15分失効/Runtime結果照合/同一Builder自動再開、顧客Runtime内SSE-KMS Bucketを実装。Login Relay/Profile Brokerの実人間操作は未完成 |
+| WS-05 Browser/Artifact/Computer | tested_fake | Artifact ID、MIME、size、SHA-256、安全検査、保持期限、Run/tenant分離、短期download URL、限定Computer Actionと操作後Screenshotを実装。Download→承認付きUploadは未実装 |
+| WS-06 企業Runtime/AWS | tested_local_real | private repo/PR/package/heartbeat/Tool登録の縦切りとRuntime Terraformは既存実装。新規組織の実AWS apply、実DB、upgrade/orphan/署名不一致の一括Cloud E2Eは未実施 |
+| WS-07 Adapter分離 | tested_fake | `shared_provider_adapter` / `organization_private_adapter`を追加し、既存の企業Repository強制を維持。共通Adapterの複数組織公開E2Eは未実施 |
+| WS-08 Factoring | tested_fake | F-01〜F-08、可/否/保留、fail closed、承認、Provider Job/permalink契約はfixtureで成功。実Provider投稿はHuman Gate |
+| WS-09 Production運用 | tested_fake | Worker/readiness、Runtime/deployment/drift health、Deployment API key、HMAC webhook、replay protection、rate/day cap、schedule、rollback、組織単位のfail-closed自動承認Policyと緊急停止を実装。実障害Cloud検証は未完 |
+| WS-10 Agent UX | tested_local_real | 自然言語入口、Human Action、stage/log/elapsed/ETA/retry、Production health gateはローカル画面で既存確認。今回差分の全画面回帰は未実施 |
+| WS-11 Cloud deploy | implemented | deploy設定欠落をhard fail、`/health/ready`、稼働task image SHA照合、migration/API/Web SHA記録を追加。対象commitのstaging/production実deployは未実施 |
+
+### E2E-01〜17の現在地
+
+| ID | 状態 | 未完了境界 |
+|---|---|---|
+| 01 文章生成・分類 | tested_fake | 実Production未実施 |
+| 02 画像OCR | implemented | 実OpenAI入力Artifact E2E未実施 |
+| 03 画像生成 | implemented | 実OpenAI生成/費用値E2E未実施 |
+| 04 最新ニュース | implemented | 出典付き実Web Search E2E未実施 |
+| 05 接続済みSaaS | tested_local_real | 実Production再検証待ち |
+| 06 未接続OAuth | tested_fake | 実Provider consent待ち |
+| 07 公開OpenAPI | tested_local_real | Production再検証待ち |
+| 08 公開MCP | tested_local_real | Production再検証待ち |
+| 09 公開Web | tested_local_real | Cloud Browser再検証待ち |
+| 10 Human Login | tested_fake | 実Login Relay/Profile Broker未完成 |
+| 11 企業専用DB | tested_local_real | 実AWS Runtime/実検証DB未実施 |
+| 12 汎用Provider | implemented | 共通Repository mergeと複数組織利用未実施 |
+| 13 承認付き書込 | tested_local_real | 対象Providerの最終外部作用はHuman Gate |
+| 14 Factoring | tested_fake | 実Provider投稿/permalinkはHuman Gate |
+| 15 自動修復 | tested_fake | schema/testへの追加commitとCI再走の実Git E2E未実施 |
+| 16 障害復旧 | tested_fake | 実AWS Worker/Runtime停止再開未実施 |
+| 17 Rollback | tested_fake | 実Production rollback後代表Run未実施 |
+
+したがって、現時点では最終Definition of Done未達であり「Agent Studio完成」とは報告しない。
 
 ## Builder Agent（2026-09-21）
 
@@ -65,7 +107,7 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 - X公開は固定の匿名payloadだけを許可し、reject、長い数字、URL、mention、追加項目を実行直前にも拒否する。最終本文と投稿先を表示する明示承認、本文hash固定、`logical_post_id`のbody除外、`publish_post`一回、Provider Job `succeeded`待ち、post ID/permalinkのRun証跡表示まで実装した。
 - 実ブラウザで`/agents/new`から架空ファクタリングAgentを作成し、同一Agent詳細の不足情報カード、回答後の自動再開、Agent一覧の`準備待ち`表示まで確認した（Agent `c437d2b2-ac93-4dda-be8d-2fd2a2d19f18`）。
 - 認証が必要なOpenAPI / MCPはConnection接続テストまたはOAuth code交換後に自動再開する。実Provider認証を伴うBuilder Project E2Eは各Providerの資格情報が必要。
-- Human Login browser profileの暗号化保存とログイン成功による自動再開は未実装。Code WorkspaceはAgents API Session、`codex exec-server`、隔離workspace準備、生成・テスト・local commit、Artifact証跡反映、GitHub Appのbranch/PR、merge後package/Tool登録まで実装した。
+- Human Login browser profileのControl Planeメタデータ、顧客Runtime内SSE-KMS保存先、Login Session、Runtime結果検証、自動再開は実装済み。人が操作するOutbound RelayとProfile Brokerは未実装。Code WorkspaceはAgents API Session、`codex exec-server`、隔離workspace準備、生成・テスト・local commit、Artifact証跡反映、GitHub Appのbranch/PR、merge後package/Tool登録まで実装した。
 - 最終Definition of Doneのうち、実GitHub Appの権限更新後に行うprivate repository自動作成、branch/PR/CI/Agent Studio承認によるmerge、実Self-hosted Runtimeへの署名package配布、実Environment Key + local Docker `codex exec-server`、F-01〜F-08の実Preview Run、検証用Xアカウントへの実投稿とpermalink確認は外部資格情報・最終承認が必要なため未実施。これらを実施するまでは完成扱いにしない。
 - 実ブラウザProject `4a13c3fd-e649-4f51-9ecf-aff9e06a600f` で6件の業務質問へ非機微なデモ回答を入れ、問い合わせ履歴・社内否決一覧のRepository質問、2件の`code_workspace` Change Set、反社照合`browser_flow` Change Set、Code Workspace Runtime待ちへの遷移を確認した。旧standalone `codex exec`経路はEnvironment KeyでHTTP 401となったため使用を止め、個人Codex認証や長期OpenAI API Keyをmount/injectせず、Agents API Session + `codex exec-server`へ置き換えた。実OpenAI/実Dockerでの再受け入れは未実施。
 - 顧客AWSへのTerraform applyは意図的にHuman Actionとして残し、BuilderはPlanとRuntime登録後の自動再開までを担当する。
@@ -126,13 +168,13 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 - Browser専用Egress Proxyを追加し、FQDN allowlist、IP literal、private/link-local/metadata系address拒否を強制。`proxy` modeではBrowser TaskのSecurity Groupから直接Internet向け80/443を削除した。
 - `browser-automation` Connectorを1能力として扱い、Build時に内部Action群へ展開。`authenticated_restricted`では`browser_exec_js`をContract、Gateway、Workerの3箇所で無効化した。
 - Agent作成後はBrowser内部Actionを個別表示せず、必要なConnectionと許可ドメインだけを確認する。Browser接続範囲が未設定の間はPreviewを作成しないことをAPI結合テストと実ブラウザで確認した。
-- 新しいBrowser Worker + Egress ProxyをDocker上で接続し、Proxy経由で`https://example.com`を開き、画像応答とSnapshot内容を確認した。AWS上の実OpenAI E2E、Browser Profile/Human Login、Upload/Download、Computer Actionは未確認・未実装。
+- 新しいBrowser Worker + Egress ProxyをDocker上で接続し、Proxy経由で`https://example.com`を開き、画像応答とSnapshot内容を確認した。Browser ProfileのControl Plane契約、Artifact downloadメタデータ、限定Computer Actionは追加したが、AWS上の実OpenAI E2E、Human Login Relay、承認付きUploadは未確認・未実装。
 
 残件:
 
 - Providerへの定期Health check（手動の実接続確認は実装済み）。
 - Project SettingsのInstructions、Permissions、Environment選択画面。
-- Deployment単位のAPI Key、Webhook trigger、利用制限の管理UI。
+- Deployment単位のAPI Key、Webhook trigger、rate/day capはAPI実装済み。管理UIは未実装。
 
 ## 決めたこと（要件定義書 §16 の推奨をすべて採用）
 
@@ -205,8 +247,8 @@ SDK（`openai` 7.x）の型を調べた結果（docs/reference/openai-agents-sdk
 
 | 対象 | 方法 | 結果 |
 |---|---|---|
-| 型・単体テスト | `yarn type-check` / `yarn test`（全ワークスペース） | 型検査成功、332 件すべて成功 |
-| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration --run --maxWorkers=1 --minWorkers=1`（PostgreSQL） | 49 件すべて成功。Builderの質問・回答・自動Discovery・公開/Human Login Browser Flow・Browser Runtime自動再開・複数Connector固定・修正後再開、OpenAPI / MCP生成 → Preview Run、GitHub App branch/PR/merge/package/Tool登録、Workflow v2、承認付きX投稿とProvider Job成功待ち、同一BuildのProduction昇格を含む |
+| 型・単体テスト | `yarn type-check` / `yarn lint` / `yarn test`（全ワークスペース） | 型・lint成功、421 件すべて成功 |
+| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration --run --maxWorkers=1 --minWorkers=1`（PostgreSQL、通常Worker稼働中） | 59 件すべて成功。Builderの質問・回答・自動Discovery・公開/Human Login Browser Flow・Browser Runtime自動再開・複数Connector固定・修正後再開、OpenAPI / MCP生成 → Preview Run、GitHub App branch/PR/merge/package/Tool登録、Workflow v2、承認付き外部作用とProvider Job成功待ち、同一BuildのProduction昇格、組織Policyによる自動昇格、Harness単位queue分離を含む |
 | ビルド | `yarn build`、`docker build`（api / web / runtime の全イメージ） | 成功 |
 | Terraform | `fmt` / `validate`（5 つのルートモジュール）、モックのプロバイダーでの apply | 成功 |
 | ワークフロー | actionlint | 指摘なし |
