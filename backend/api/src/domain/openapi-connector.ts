@@ -281,6 +281,9 @@ export function inspectOpenApi(input: BuilderOpenApiInput): BuilderOpenApiPropos
   if (operations.length === 0) throw validationError("安全に生成できるOpenAPI Operationがありません");
   if (!operations.some((operation) => operation.selected)) throw validationError("生成対象のOperationを1つ以上選んでください");
   if (input.internal_api) {
+    if (authentication.authType === "none") {
+      throw validationError("社内APIのProduction契約には認証設定が必要です");
+    }
     const unsafe = operations.filter((operation) => operation.selected && (!operation.output_schema || !operation.response_boundary));
     if (unsafe.length > 0) {
       throw validationError(`社内APIのProduction契約にはresponse schemaとx-agent-studio-response-fieldsが必要です: ${unsafe.map((operation) => operation.operation_id).join(", ")}`);

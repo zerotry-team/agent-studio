@@ -401,14 +401,12 @@ export class EnvironmentService {
     if (unresolved) throw preconditionFailed(`必要な能力「${unresolved.requirement}」を解決できていません`);
 
     const connectorIds = [...new Set(resolution.requirements.flatMap((requirement) => (requirement.connector_id ? [requirement.connector_id] : [])))];
-    const [connectors, links, environment] = await Promise.all([
-      tx.connectors.findMany({ where: { organization_id: organizationId, id: { in: connectorIds } } }),
-      tx.agent_connection_links.findMany({
-        where: { organization_id: organizationId, agent_id: agentId, stage, connector_id: { in: connectorIds } },
-        include: { connection: true },
-      }),
-      tx.agent_environment_configs.findUnique({ where: { agent_id_stage: { agent_id: agentId, stage } } }),
-    ]);
+    const connectors = await tx.connectors.findMany({ where: { organization_id: organizationId, id: { in: connectorIds } } });
+    const links = await tx.agent_connection_links.findMany({
+      where: { organization_id: organizationId, agent_id: agentId, stage, connector_id: { in: connectorIds } },
+      include: { connection: true },
+    });
+    const environment = await tx.agent_environment_configs.findUnique({ where: { agent_id_stage: { agent_id: agentId, stage } } });
 
     const allowedTools = new Set<string>();
     let hasConnectorRequirement = false;

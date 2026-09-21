@@ -384,21 +384,19 @@ export class AgentService {
         },
       });
       if (!agent) throw notFound("エージェント");
-      const [links, environments, builds, deployments, connectors] = await Promise.all([
-        tx.agent_connection_links.findMany({
-          where: { agent_id: id, organization_id: actor.organizationId },
-          include: { connector: true, connection: true },
-          orderBy: [{ stage: "asc" }, { created_at: "asc" }],
-        }),
-        tx.agent_environment_configs.findMany({ where: { agent_id: id, organization_id: actor.organizationId } }),
-        tx.agent_builds.findMany({ where: { agent_id: id, organization_id: actor.organizationId }, orderBy: { build_number: "desc" } }),
-        tx.deployments.findMany({
-          where: { agent_id: id, organization_id: actor.organizationId },
-          include: { agent: true, agent_version: true, runtime_profile: { include: { runtime: true } }, build: true, runs: { orderBy: { created_at: "desc" }, take: 20 } },
-          orderBy: { created_at: "desc" },
-        }),
-        tx.connectors.findMany({ where: { organization_id: actor.organizationId }, select: { id: true, auth_type: true } }),
-      ]);
+      const links = await tx.agent_connection_links.findMany({
+        where: { agent_id: id, organization_id: actor.organizationId },
+        include: { connector: true, connection: true },
+        orderBy: [{ stage: "asc" }, { created_at: "asc" }],
+      });
+      const environments = await tx.agent_environment_configs.findMany({ where: { agent_id: id, organization_id: actor.organizationId } });
+      const builds = await tx.agent_builds.findMany({ where: { agent_id: id, organization_id: actor.organizationId }, orderBy: { build_number: "desc" } });
+      const deployments = await tx.deployments.findMany({
+        where: { agent_id: id, organization_id: actor.organizationId },
+        include: { agent: true, agent_version: true, runtime_profile: { include: { runtime: true } }, build: true, runs: { orderBy: { created_at: "desc" }, take: 20 } },
+        orderBy: { created_at: "desc" },
+      });
+      const connectors = await tx.connectors.findMany({ where: { organization_id: actor.organizationId }, select: { id: true, auth_type: true } });
       const dto = toAgentDto(agent, true);
       const latestBuilder = agent.builder_projects[0];
       dto.builder_project_id = latestBuilder?.id ?? null;
@@ -428,11 +426,9 @@ export class AgentService {
   async linkConnection(actor: MemberActor, agentId: string, input: LinkAgentConnectionInput): Promise<AgentProjectDto> {
     requireRole(actor, "builder");
     await this.deps.db.run(scopeOf(actor), async (tx) => {
-      const [agent, connector, connection] = await Promise.all([
-        tx.agents.findFirst({ where: { id: agentId, organization_id: actor.organizationId } }),
-        tx.connectors.findFirst({ where: { id: input.connector_id, organization_id: actor.organizationId }, include: { tools: true } }),
-        tx.connections.findFirst({ where: { id: input.connection_id, organization_id: actor.organizationId } }),
-      ]);
+      const agent = await tx.agents.findFirst({ where: { id: agentId, organization_id: actor.organizationId } });
+      const connector = await tx.connectors.findFirst({ where: { id: input.connector_id, organization_id: actor.organizationId }, include: { tools: true } });
+      const connection = await tx.connections.findFirst({ where: { id: input.connection_id, organization_id: actor.organizationId } });
       if (!agent) throw notFound("エージェント");
       if (!connector || !connection || connection.connector_id !== connector.id) {
         throw validationError("この連携サービスで利用できる接続ではありません");

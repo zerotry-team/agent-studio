@@ -175,6 +175,23 @@ describe("executeHttpTool（ローカルの HTTP サーバーに対して）", (
     expect((out.result.content[0] as { text: string }).text).toBe('{"status":"active","updated_at":"2026-09-22"}');
   });
 
+  it("社内APIのエラー本文をモデルへ返さない", async () => {
+    const out = await executeHttpTool(
+      tool({
+        method: "GET",
+        url: `${base}/fail/{id}`,
+        output_schema: { type: "object" },
+        response_boundary: { allowed_fields: ["status"], max_bytes: 65536, max_records: 10 },
+      }),
+      { id: "X" },
+      { secrets },
+    );
+    const text = (out.result.content[0] as { text: string }).text;
+    expect(out.result.isError).toBe(true);
+    expect(text).toContain("HTTP 404");
+    expect(text).not.toContain("商品が見つかりません");
+  });
+
   it("応答は 100KB で切り詰める", async () => {
     const out = await executeHttpTool(tool({ method: "GET", url: `${base}/big` }), {}, { secrets });
     const text = (out.result.content[0] as { text: string }).text;

@@ -97,4 +97,41 @@ describe("auto approval", () => {
       now: new Date("2026-09-22T00:00:00Z"),
     }).action).toBe("auto_approve");
   });
+
+  it("完全自律運転は登録済み能力のallowlist、risk、DELETE、Production flagを包括承認する", () => {
+    const autonomous = autoApprovalPolicyConfigSchema.parse({
+      ...policy,
+      mode: "full_autonomy",
+      environments: ["staging"],
+      allowed_hosts: [],
+      allowed_operations: [],
+      allowed_methods: [],
+      denied_methods: ["DELETE"],
+      production_promotion: false,
+    });
+    expect(evaluateAutoApproval(autonomous, {
+      actionKind: "api_call",
+      stage: "production",
+      operation: "delete_contract",
+      risk: "destructive",
+      host: "newly-registered.company.example",
+      method: "DELETE",
+      callsLastMinute: 0,
+      now: new Date("2026-09-22T00:00:00Z"),
+    })).toMatchObject({ action: "auto_approve", reason: expect.stringContaining("完全自律Policy") });
+  });
+
+  it("完全自律運転でも緊急停止と利用上限は越えない", () => {
+    const autonomous = autoApprovalPolicyConfigSchema.parse({ ...policy, mode: "full_autonomy", allowed_operations: [] });
+    const context = {
+      actionKind: "tool_call" as const,
+      stage: "production" as const,
+      operation: "anything",
+      risk: "financial" as const,
+      callsLastMinute: 0,
+      now: new Date("2026-09-22T00:00:00Z"),
+    };
+    expect(evaluateAutoApproval(autonomous, { ...context, emergencyStoppedAt: context.now }).action).toBe("manual_required");
+    expect(evaluateAutoApproval(autonomous, { ...context, callsLastMinute: 100 }).action).toBe("manual_required");
+  });
 });

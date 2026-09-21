@@ -32,9 +32,11 @@ function localDateTime(iso: string | null): string {
 }
 
 function Editor({ value, onSaved }: { value: AutoApprovalPolicyDto; onSaved: (value: AutoApprovalPolicyDto) => void }) {
-  const { can } = useSession();
+  const { can, membership } = useSession();
   const canManage = can("policy.manage");
   const [config, setConfig] = useState<AutoApprovalPolicyConfig>(value.config);
+  const fullAutonomy = config.mode === "full_autonomy";
+  const canEditPolicy = canManage && (!fullAutonomy || membership?.role === "owner");
   const [hosts, setHosts] = useState(value.config.allowed_hosts.join("\n"));
   const [operations, setOperations] = useState(value.config.allowed_operations.join("\n"));
   useEffect(() => {
@@ -54,11 +56,31 @@ function Editor({ value, onSaved }: { value: AutoApprovalPolicyDto; onSaved: (va
     }));
   };
 
+  const changeMode = (mode: AutoApprovalMode) => {
+    setConfig((current) => mode === "full_autonomy"
+      ? {
+          ...current,
+          mode,
+          environments: ["staging", "production"],
+          allowed_methods: [...METHODS],
+          denied_methods: [],
+          production_promotion: true,
+          automatic_retry: true,
+          automatic_rollback: true,
+        }
+      : {
+          ...current,
+          mode,
+          allowed_methods: current.allowed_methods.filter((method) => method !== "DELETE"),
+          denied_methods: ["DELETE"],
+        });
+  };
+
   return (
     <Card>
       <CardHeader
-        title="自動承認"
-        description="組織Policyが承認者になります。許可していない接続先・操作・環境は従来どおり人の承認で停止します。"
+        title="自律実行・自動承認"
+        description="Policy内自動化に加え、Ownerは登録済み能力を包括承認する完全自律運転を選べます。"
         actions={value.version > 0 ? <span className="text-xs text-gray-500">Policy v{value.version}</span> : undefined}
       />
       <CardBody className="space-y-5">
@@ -69,19 +91,25 @@ function Editor({ value, onSaved }: { value: AutoApprovalPolicyDto; onSaved: (va
           <Select
             value={config.mode}
             disabled={!canManage}
-            onChange={(event) => setConfig((current) => ({ ...current, mode: event.target.value as AutoApprovalMode }))}
+            onChange={(event) => changeMode(event.target.value as AutoApprovalMode)}
           >
             <option value="manual">個別承認</option>
             <option value="safe_operations">安全操作を自動承認</option>
             <option value="all_within_policy">すべて自動で進める</option>
+            <option value="full_autonomy" disabled={membership?.role !== "owner"}>完全自律運転（Ownerのみ）</option>
           </Select>
         </Field>
+        {fullAutonomy ? (
+          <Alert tone="warning" title="完全自律運転">
+            登録済みの能力について、外部送信・金融・破壊的操作・Productionを含め組織Policyが自動承認します。利用上限、期限、緊急停止は常に有効です。
+          </Alert>
+        ) : null}
         <div className="grid gap-5 lg:grid-cols-2">
-          <Field label="許可するAPI host" hint="完全一致のFQDNを1行に1つ。ワイルドカードやIP直指定は使えません。">
-            <Textarea value={hosts} rows={4} disabled={!canManage} placeholder="api.company.example" onChange={(event) => setHosts(event.target.value)} mono />
+          <Field label="許可するAPI host" hint={fullAutonomy ? "完全自律運転では、初回登録済みのhostをすべて対象にします。" : "完全一致のFQDNを1行に1つ。ワイルドカードやIP直指定は使えません。"}>
+            <Textarea value={hosts} rows={4} disabled={!canEditPolicy || fullAutonomy} placeholder="api.company.example" onChange={(event) => setHosts(event.target.value)} mono />
           </Field>
-          <Field label="許可する操作" hint="Tool名またはシステム操作を1行に1つ。Production昇格、再試行、Rollbackも完全一致で許可します。">
-            <Textarea value={operations} rows={6} disabled={!canManage} placeholder={'lookup_contract\nupdate_contract_status\nproduction_promotion\nbuilder_retry\nproduction_rollback'} onChange={(event) => setOperations(event.target.value)} mono />
+          <Field label="許可する操作" hint={fullAutonomy ? "完全自律運転では、登録済みToolとシステム操作を包括承認します。" : "Tool名またはシステム操作を1行に1つ。Production昇格、再試行、Rollbackも完全一致で許可します。"}>
+            <Textarea value={operations} rows={6} disabled={!canEditPolicy || fullAutonomy} placeholder={'lookup_contract\nupdate_contract_status\nproduction_promotion\nbuilder_retry\nproduction_rollback'} onChange={(event) => setOperations(event.target.value)} mono />
           </Field>
         </div>
         <div className="grid gap-5 lg:grid-cols-2">
@@ -90,7 +118,7 @@ function Editor({ value, onSaved }: { value: AutoApprovalPolicyDto; onSaved: (va
               <Checkbox
                 key={stage}
                 label={stage === "staging" ? "Preview" : "Production"}
-                disabled={!canManage}
+                disabled={!canEditPolicy || fullAutonomy}
                 checked={config.environments.includes(stage)}
                 onChange={(event) => setConfig((current) => ({
                   ...current,
@@ -99,13 +127,13 @@ function Editor({ value, onSaved }: { value: AutoApprovalPolicyDto; onSaved: (va
               />
             ))}
           </FieldSet>
-          <FieldSet legend="HTTP method" description="DELETEは拒否リストに固定され、自動承認されません。">
+          <FieldSet legend="HTTP method" description={fullAutonomy ? "完全自律運転ではDELETEを含む全methodを対象にします。" : "DELETEは拒否リストに固定され、自動承認されません。"}>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {METHODS.map((method) => (
                 <Checkbox
                   key={method}
                   label={method}
-                  disabled={!canManage || method === "DELETE"}
+                  disabled={!canEditPolicy || fullAutonomy || method === "DELETE"}
                   checked={config.allowed_methods.includes(method)}
                   onChange={(event) => toggleMethod(method, event.target.checked)}
                 />
@@ -115,17 +143,17 @@ function Editor({ value, onSaved }: { value: AutoApprovalPolicyDto; onSaved: (va
         </div>
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="1分あたりの自動承認数">
-            <Input type="number" min={1} max={10000} disabled={!canManage} value={config.limits.requests_per_minute} onChange={(event) => setConfig((current) => ({ ...current, limits: { ...current.limits, requests_per_minute: Number(event.target.value) } }))} />
+            <Input type="number" min={1} max={10000} disabled={!canEditPolicy} value={config.limits.requests_per_minute} onChange={(event) => setConfig((current) => ({ ...current, limits: { ...current.limits, requests_per_minute: Number(event.target.value) } }))} />
           </Field>
           <Field label="1回の最大レコード数">
-            <Input type="number" min={1} max={100000} disabled={!canManage} value={config.limits.max_records_per_call} onChange={(event) => setConfig((current) => ({ ...current, limits: { ...current.limits, max_records_per_call: Number(event.target.value) } }))} />
+            <Input type="number" min={1} max={100000} disabled={!canEditPolicy} value={config.limits.max_records_per_call} onChange={(event) => setConfig((current) => ({ ...current, limits: { ...current.limits, max_records_per_call: Number(event.target.value) } }))} />
           </Field>
-          <Field label="1日の費用上限（円）" hint="空欄は費用による自動承認制限なし。">
+          <Field label="1日の費用上限（円）" hint="空欄は費用制限なし。設定時は費用計測情報のない操作を手動承認へ戻します。">
             <Input
               type="number"
               min={1}
               max={100000000}
-              disabled={!canManage}
+              disabled={!canEditPolicy}
               value={config.limits.daily_cost_jpy ?? ""}
               onChange={(event) => setConfig((current) => ({ ...current, limits: { ...current.limits, daily_cost_jpy: event.target.value ? Number(event.target.value) : null } }))}
             />
@@ -133,16 +161,16 @@ function Editor({ value, onSaved }: { value: AutoApprovalPolicyDto; onSaved: (va
           <Field label="自動承認の有効期限" hint="期限切れ後は自動的に手動承認へ戻ります。">
             <Input
               type="datetime-local"
-              disabled={!canManage}
+              disabled={!canEditPolicy}
               value={localDateTime(config.expires_at)}
               onChange={(event) => setConfig((current) => ({ ...current, expires_at: event.target.value ? new Date(event.target.value).toISOString() : null }))}
             />
           </Field>
         </div>
         <div className="grid gap-3 sm:grid-cols-3">
-          <Checkbox label="Production昇格" disabled={!canManage} checked={config.production_promotion} onChange={(event) => setConfig((current) => ({ ...current, production_promotion: event.target.checked }))} />
-          <Checkbox label="自動再試行" disabled={!canManage} checked={config.automatic_retry} onChange={(event) => setConfig((current) => ({ ...current, automatic_retry: event.target.checked }))} />
-          <Checkbox label="自動Rollback" disabled={!canManage} checked={config.automatic_rollback} onChange={(event) => setConfig((current) => ({ ...current, automatic_rollback: event.target.checked }))} />
+          <Checkbox label="Production昇格" disabled={!canEditPolicy || fullAutonomy} checked={config.production_promotion} onChange={(event) => setConfig((current) => ({ ...current, production_promotion: event.target.checked }))} />
+          <Checkbox label="自動再試行" disabled={!canEditPolicy || fullAutonomy} checked={config.automatic_retry} onChange={(event) => setConfig((current) => ({ ...current, automatic_retry: event.target.checked }))} />
+          <Checkbox label="自動Rollback" disabled={!canEditPolicy || fullAutonomy} checked={config.automatic_rollback} onChange={(event) => setConfig((current) => ({ ...current, automatic_rollback: event.target.checked }))} />
         </div>
         <p className="text-xs leading-relaxed text-gray-500">Secret登録、OAuth同意、新しいhost、権限拡大、予算上限変更はこの設定では自動化されません。</p>
       </CardBody>
@@ -163,8 +191,14 @@ function Editor({ value, onSaved }: { value: AutoApprovalPolicyDto; onSaved: (va
           <Button
             icon={<Save className="h-4 w-4" />}
             loading={save.pending}
+            disabled={!canEditPolicy}
             onClick={async () => {
-              const result = await save.mutate({ ...config, allowed_hosts: lines(hosts), allowed_operations: lines(operations), denied_methods: ["DELETE"] });
+              const result = await save.mutate({
+                ...config,
+                allowed_hosts: fullAutonomy ? [] : lines(hosts),
+                allowed_operations: fullAutonomy ? [] : lines(operations),
+                denied_methods: fullAutonomy ? [] : ["DELETE"],
+              });
               if (result.ok) onSaved(result.data);
             }}
           >

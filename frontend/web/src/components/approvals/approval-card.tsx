@@ -74,9 +74,7 @@ export function ApprovalCard({ approval, canDecide, onDecided, hideRunLink = fal
                 </Link>{" "}
                 が実行しようとしています
               </>
-            ) : (
-              "エージェントが実行しようとしています"
-            )}
+            ) : approval.source === "builder" ? "Builderの変更操作です" : approval.source === "workflow" ? "Workflowの操作です" : "エージェントが実行しようとしています"}
           </p>
         </div>
         <div className="flex shrink-0 flex-col items-start gap-1 text-xs text-gray-500 sm:items-end">

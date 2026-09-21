@@ -147,7 +147,8 @@ export class BuilderGitAutomationService {
           targetType: "builder_change_set",
           targetId: candidate.change.id,
           result: "failure",
-          detail: { pr_number: pull.number, approval_id: approval.id, error: error instanceof Error ? error.message.slice(0, 500) : "merge_failed" },
+          // Providerのerror messageにはrepository URLや内部情報が含まれ得るため、監査には分類だけを残す。
+          detail: { pr_number: pull.number, approval_id: approval.id, error_class: error instanceof Error ? error.name : "merge_failed" },
         });
       });
       return "manual_required";

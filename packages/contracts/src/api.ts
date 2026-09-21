@@ -193,6 +193,10 @@ export const createConnectorSchema = z
   .refine((v) => v.adapter !== "internal_http_api" || v.operations.every((operation) => operation.output_schema && operation.response_boundary), {
     message: "社内APIの各操作にはresponse schemaとfield allowlistが必要です",
     path: ["operations"],
+  })
+  .refine((v) => v.adapter !== "internal_http_api" || v.auth_type !== "none", {
+    message: "社内APIには認証設定が必要です",
+    path: ["auth_type"],
   });
 export type CreateConnectorInput = z.input<typeof createConnectorSchema>;
 
