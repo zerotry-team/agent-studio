@@ -30,6 +30,22 @@ export const httpToolAuthSchema = z.discriminatedUnion("type", [
 ]);
 export type HttpToolAuth = z.infer<typeof httpToolAuthSchema>;
 
+/**
+ * Runtimeへdigest固定で配布されたAdapterの証跡。
+ * Tool Gatewayはこの値を実行設定からheartbeatへそのまま伝え、Control Planeが
+ * 受理済みpackageと完全一致する場合だけTool Catalogへ登録する。
+ */
+export const runtimeToolDeliverySchema = z
+  .object({
+    connector_key: slugSchema,
+    contract_hash: z.string().regex(/^[0-9a-f]{64}$/),
+    image_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    source_commit: z.string().regex(/^[0-9a-f]{40,64}$/),
+    package_signature: z.string().min(20).max(1000),
+  })
+  .strict();
+export type RuntimeToolDelivery = z.infer<typeof runtimeToolDeliverySchema>;
+
 export const runtimeHttpToolSchema = z
   .object({
     name: toolNameSchema,
@@ -37,6 +53,7 @@ export const runtimeHttpToolSchema = z
     risk: toolRiskSchema,
     reads_untrusted_content: z.boolean().default(false),
     input_schema: inputSchemaSchema,
+    delivery: runtimeToolDeliverySchema.optional(),
     http: z
       .object({
         method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
@@ -71,6 +88,7 @@ export const runtimeUpstreamMcpSchema = z
             /** Run ごとの endpoint では起動前に一覧取得できないため、設定側で schema を固定する。 */
             description: z.string().min(1).max(1000).optional(),
             input_schema: inputSchemaSchema.optional(),
+            delivery: runtimeToolDeliverySchema.optional(),
           })
           .strict(),
       )

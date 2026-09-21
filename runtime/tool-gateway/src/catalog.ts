@@ -4,6 +4,7 @@ import {
   type RuntimeHttpTool,
   type RuntimeToolCatalogEntry,
   type RuntimeToolConfig,
+  type RuntimeToolDelivery,
   type RuntimeUpstreamMcp,
   type SessionGrant,
   type ToolInputSchema,
@@ -25,6 +26,7 @@ export interface CatalogTool {
   inputSchema: ToolInputSchema;
   risk: ToolRisk;
   readsUntrustedContent: boolean;
+  delivery?: RuntimeToolDelivery;
   /** ツール・配下のサーバーに書かれた Runtime 側のポリシー */
   policies: Policy[];
   target: ToolTarget;
@@ -50,6 +52,7 @@ export function buildUpstreamTools(upstream: RuntimeUpstreamMcp, infos: Upstream
       inputSchema: schema.success ? schema.data : FALLBACK_SCHEMA,
       risk: allowed.risk,
       readsUntrustedContent: allowed.reads_untrusted_content,
+      ...(allowed.delivery ? { delivery: allowed.delivery } : {}),
       policies: upstream.policies,
       target: { kind: "upstream", upstream, toolName: allowed.name },
     });
@@ -65,6 +68,7 @@ export function buildDynamicUpstreamTools(upstream: RuntimeUpstreamMcp): Catalog
     inputSchema: tool.input_schema ?? FALLBACK_SCHEMA,
     risk: tool.risk,
     readsUntrustedContent: tool.reads_untrusted_content,
+    ...(tool.delivery ? { delivery: tool.delivery } : {}),
     policies: upstream.policies,
     target: { kind: "upstream" as const, upstream, toolName: tool.name },
   }));
@@ -90,6 +94,7 @@ export class ToolCatalog {
         inputSchema: tool.input_schema,
         risk: tool.risk,
         readsUntrustedContent: tool.reads_untrusted_content,
+        ...(tool.delivery ? { delivery: tool.delivery } : {}),
         policies: tool.policies,
         target: { kind: "http", tool },
       });
@@ -147,6 +152,7 @@ export class ToolCatalog {
       input_schema: t.inputSchema,
       risk: t.risk,
       reads_untrusted_content: t.readsUntrustedContent,
+      ...(t.delivery ? { delivery: t.delivery } : {}),
     }));
   }
 

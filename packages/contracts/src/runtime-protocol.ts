@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { toolNameSchema } from "./common.js";
 import { policySchema } from "./policy.js";
+import { runtimeToolDeliverySchema } from "./runtime-config.js";
 import { inputSchemaSchema, toolRiskSchema } from "./tools.js";
 
 /**
@@ -74,13 +75,7 @@ export const runtimeToolCatalogEntrySchema = z.object({
   input_schema: inputSchemaSchema,
   risk: toolRiskSchema,
   reads_untrusted_content: z.boolean(),
-  delivery: z.object({
-    connector_key: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-    contract_hash: z.string().regex(/^[0-9a-f]{64}$/),
-    image_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-    source_commit: z.string().regex(/^[0-9a-f]{40,64}$/),
-    package_signature: z.string().min(20).max(1000),
-  }).strict().optional(),
+  delivery: runtimeToolDeliverySchema.optional(),
 });
 export type RuntimeToolCatalogEntry = z.infer<typeof runtimeToolCatalogEntrySchema>;
 

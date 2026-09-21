@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import {
+  adapterDescriptorSchema,
   canonicalJson,
   isBrowserCapability,
   parseManifest,
@@ -56,6 +57,18 @@ type GitHubRepositoryOption = {
   repositoryUrl: string;
   baseBranch: string;
 };
+
+/**
+ * Runtime heartbeatで登録済みになった企業専用Adapterだけを、Builderの次回Buildへ戻す。
+ * provenanceは外部CI由来なのでdescriptor全体を再検証し、不正なpackageは無視する。
+ */
+export function registeredAdapterToolNames(provenances: Prisma.JsonValue[]): string[] {
+  return [...new Set(provenances.flatMap((provenance) => {
+    if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) return [];
+    const descriptor = adapterDescriptorSchema.safeParse((provenance as Record<string, unknown>).descriptor);
+    return descriptor.success ? descriptor.data.tools.map((tool) => tool.name) : [];
+  }))];
+}
 
 function githubRepositoryOptions(connections: Array<{ id: string; name: string; metadata: Prisma.JsonValue }>): GitHubRepositoryOption[] {
   return connections.flatMap((connection) => {
@@ -822,6 +835,10 @@ export class BuilderOrchestrator {
         where: { project_id: projectId, kind: "declarative_connector", status: "applied" },
         orderBy: { created_at: "desc" },
       });
+      const adapterPackages = await tx.builder_adapter_packages.findMany({
+        where: { project_id: projectId, status: "registered", health_status: "ready" },
+        select: { runtime_id: true, provenance: true, change_set: { select: { artifacts: true } } },
+      });
       const browserChanges = await tx.builder_change_sets.findMany({
         where: { project_id: projectId, kind: "browser_flow", status: { in: ["planned", "applied"] } },
         orderBy: { created_at: "desc" },
@@ -832,6 +849,12 @@ export class BuilderOrchestrator {
       const generatedConnectorNames = connectorChanges.flatMap((change) => artifactList(change.artifacts)).flatMap((artifact) =>
         artifact.type === "tool" && typeof artifact.name === "string" ? [artifact.name] : [],
       );
+      const registeredAdapterNames = registeredAdapterToolNames(adapterPackages.map((adapterPackage) => adapterPackage.provenance));
+      const registeredAdapterTopics = new Set(adapterPackages.flatMap((adapterPackage) =>
+        artifactList(adapterPackage.change_set.artifacts).flatMap((artifact) =>
+          artifact.type === "capability_topic" && typeof artifact.id === "string" ? [artifact.id] : [],
+        ),
+      ));
       const browserTopics = new Set(browserChanges.flatMap((change) => artifactList(change.artifacts)).flatMap((artifact) =>
         artifact.type === "capability_topic" && typeof artifact.id === "string" ? [artifact.id] : [],
       ));
@@ -857,8 +880,22 @@ export class BuilderOrchestrator {
         const names = new Set(catalog.flatMap((item) => typeof item.name === "string" ? [item.name] : []));
         return [...REQUIRED_BROWSER_FLOW_TOOL_NAMES].every((name) => names.has(name));
       });
+      const adapterRuntimeProfile = adapterPackages.length ? await tx.runtime_profiles.findFirst({
+        where: {
+          organization_id: organizationId,
+          type: "self_hosted",
+          runtime_id: { in: [...new Set(adapterPackages.map((adapterPackage) => adapterPackage.runtime_id))] },
+          runtime: { status: { in: ["active", "degraded"] }, gateway_url: { not: null } },
+        },
+        orderBy: { created_at: "asc" },
+      }) : null;
       const boundBrowserTools = browserChanges.length && browserToolReady && browserProfile ? browserTools : [];
-      const candidateNames = [...new Set([...generatedNames, ...generatedConnectorNames, ...boundBrowserTools.map((tool) => tool.name)])];
+      const candidateNames = [...new Set([
+        ...generatedNames,
+        ...generatedConnectorNames,
+        ...registeredAdapterNames,
+        ...boundBrowserTools.map((tool) => tool.name),
+      ])];
       if (candidateNames.length === 0) return { draft: generated, exact: false, risks: [] };
 
       const builtinNames = candidateNames.filter((name) => OPENAI_BUILTIN_TOOL_NAMES.has(name));
@@ -875,7 +912,7 @@ export class BuilderOrchestrator {
         const fn = spec?.studio_function;
         return typeof fn?.method === "string" && typeof fn.path === "string" ? `${fn.method.toUpperCase()} ${fn.path}` : null;
       };
-      const generatedSet = new Set(generatedConnectorNames);
+      const generatedSet = new Set([...generatedConnectorNames, ...registeredAdapterNames]);
       const generatedSignatures = new Set(candidates
         .filter((tool) => generatedSet.has(tool.name))
         .flatMap((tool) => operationSignature(tool) ? [operationSignature(tool)!] : []));
@@ -889,6 +926,33 @@ export class BuilderOrchestrator {
       const retainedRequirements = generated.resolution.requirements.filter((requirement) =>
         requirement.tool_names.length === 0 || requirement.tool_names.some((name) => names.includes(name)),
       ).map((requirement): CapabilityRequirementDto => {
+        const organizationTopic = `organization_${createHash("sha256").update(requirement.requirement).digest("hex").slice(0, 12)}`;
+        if (registeredAdapterNames.length > 0 && (
+          requirement.fulfillment?.mode === "organization_tool"
+          || registeredAdapterTopics.has(organizationTopic)
+        )) {
+          const adapterTools = tools.filter((tool) => registeredAdapterNames.includes(tool.name));
+          const adapterConnector = adapterTools[0]?.connector ?? null;
+          const ready = adapterTools.length === registeredAdapterNames.length
+            && (!adapterConnector || adapterConnector.auth_type === "none" || connectedConnectorIds.has(adapterConnector.id));
+          return {
+            ...requirement,
+            state: ready ? "resolved" : "needs_connection",
+            connector_id: adapterConnector?.id ?? null,
+            connector_name: adapterConnector?.name ?? "企業専用Runtime Tool",
+            tool_names: registeredAdapterNames,
+            confidence: 1,
+            reason: "署名済みAdapter packageとRuntime heartbeatが一致し、企業専用Toolを利用できます",
+            variables: [],
+            fulfillment: {
+              mode: "reuse",
+              owner: "organization",
+              execution_location: "runtime",
+              reason: "署名済みAdapter packageを企業専用Runtimeから再利用します",
+              availability_target_minutes: null,
+            },
+          };
+        }
         const browserTopic = [...browserTopics].find((topic) => requirementMatchesTopic(requirement.requirement, topic));
         if (!browserTopic || boundBrowserTools.length === 0) return requirement;
         const connector = boundBrowserTools[0]!.connector;
@@ -948,7 +1012,11 @@ export class BuilderOrchestrator {
           return `${name}@${tool.latest_version}`;
         }),
         policies: parsed.manifest.policies.filter((policy) => policy.tool === "*" || names.includes(policy.tool)),
-        environment: browserProfile ? { profile: browserProfile.key } : parsed.manifest.environment,
+        environment: adapterRuntimeProfile
+          ? { profile: adapterRuntimeProfile.key }
+          : browserProfile
+            ? { profile: browserProfile.key }
+            : parsed.manifest.environment,
       };
       return {
         exact: true,
@@ -1035,6 +1103,13 @@ export class BuilderOrchestrator {
     return this.deps.db.org(organizationId, async (tx) => {
       const current = await tx.builder_runs.findUnique({ where: { id: runId } });
       if (!current || current.status !== "running" || current.lease_owner !== this.deps.env.WORKER_ID) return false;
+      const registeredPackage = await tx.builder_adapter_packages.findFirst({
+        where: { project_id: projectId, status: "registered", health_status: "ready" },
+        select: { id: true },
+      });
+      // package登録後はCode Workspaceをもう一度準備しない。通常の生成経路で
+      // descriptor由来のToolをBuildへ固定し、Preview実行まで続行する。
+      if (registeredPackage) return false;
       const latest = await tx.capability_plans.findFirst({ where: { project_id: projectId }, orderBy: { version: "desc" } });
       if (!latest) return false;
       const previousRequirements = Array.isArray(latest.requirements)
@@ -1922,16 +1997,19 @@ export class BuilderOrchestrator {
         const run = await tx.runs.findUnique({ where: { id: release.preview_run_id } });
         if (!run || !["completed", "failed", "cancelled"].includes(run.status)) return;
         const requiredTools = new Set(release.required_tools);
-        const events = await tx.run_events.findMany({ where: { run_id: run.id, type: "tool.call" } });
-        const successfulToolNames = events.flatMap((event) => {
+        const events = await tx.run_events.findMany({ where: { run_id: run.id, type: { in: ["tool.call", "error"] } } });
+        const successfulToolNames = events.filter((event) => event.type === "tool.call").flatMap((event) => {
           const data = event.data as { name?: unknown; server_label?: unknown; status?: unknown };
           if (data.status !== "completed") return [];
           return [data.name, data.server_label].filter((value): value is string => typeof value === "string");
         });
+        const hasRunError = events.some((event) => event.type === "error");
         const usedExpectedTool = requiredTools.size === 0 || successfulToolNames.some((name) => requiredTools.has(name));
-        const succeeded = run.status === "completed" && run.outcome === "succeeded" && usedExpectedTool;
+        const succeeded = run.status === "completed" && run.outcome === "succeeded" && usedExpectedTool && !hasRunError;
         const now = new Date();
-        const error = succeeded ? null : run.error ?? (run.status === "completed" && !usedExpectedTool
+        const error = succeeded ? null : run.error ?? (hasRunError
+          ? "Preview Runの実行中にエラーが記録されました"
+          : run.status === "completed" && !usedExpectedTool
           ? "Preview Runで生成した読み取りToolが実行されませんでした"
           : `Preview Runが${run.status}/${run.outcome}で終了しました`);
         const releaseStatus = succeeded && projectTarget(await tx.builder_projects.findUniqueOrThrow({ where: { id: release.project_id } })) === "production"
@@ -1993,13 +2071,14 @@ export class BuilderOrchestrator {
         if (!release?.production_run_id || release.status !== "production_running") return;
         const run = await tx.runs.findUnique({ where: { id: release.production_run_id } });
         if (!run || !["completed", "failed", "cancelled"].includes(run.status)) return;
-        const events = await tx.run_events.findMany({ where: { run_id: run.id, type: "tool.call" } });
+        const events = await tx.run_events.findMany({ where: { run_id: run.id, type: { in: ["tool.call", "error"] } } });
+        const hasRunError = events.some((event) => event.type === "error");
         const required = new Set(release.required_tools);
-        const usedExpectedTool = required.size === 0 || events.some((event) => {
+        const usedExpectedTool = required.size === 0 || events.filter((event) => event.type === "tool.call").some((event) => {
           const data = event.data as { name?: unknown; server_label?: unknown; status?: unknown };
           return data.status === "completed" && [data.name, data.server_label].some((name) => typeof name === "string" && required.has(name));
         });
-        const succeeded = run.status === "completed" && run.outcome === "succeeded" && usedExpectedTool;
+        const succeeded = run.status === "completed" && run.outcome === "succeeded" && usedExpectedTool && !hasRunError;
         const now = new Date();
         await tx.builder_releases.update({ where: { id: release.id }, data: { status: succeeded ? "production_succeeded" : "production_failed", finished_at: now } });
         await tx.builder_validation_runs.updateMany({

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toManifestDraft } from "../application/agents.js";
 import { workflowDefinitionSchema } from "@agent-studio/contracts";
-import { buildFactoringWorkflow, codeWorkspaceQuestionsFor, ensureAnsweredSourceRequirements, ensureRequiredScenarioTools, explicitOrganizationToolDraft, humanCapabilityRequirements, intakeQuestionsFor, organizationCodeWorkspaceQuestionsFor } from "./builder-orchestrator.js";
+import { buildFactoringWorkflow, codeWorkspaceQuestionsFor, ensureAnsweredSourceRequirements, ensureRequiredScenarioTools, explicitOrganizationToolDraft, humanCapabilityRequirements, intakeQuestionsFor, organizationCodeWorkspaceQuestionsFor, registeredAdapterToolNames } from "./builder-orchestrator.js";
 import { judge, renderArgumentsTemplate, renderTemplate } from "./engines.js";
 import { isPrivateAddress } from "./studio-functions.js";
 
@@ -150,6 +150,26 @@ describe("Builder factoring workflow", () => {
 });
 
 describe("Builder conversational intake", () => {
+  it("登録済み企業Adapterのdescriptorから次回BuildへToolを戻す", () => {
+    expect(registeredAdapterToolNames([{
+      descriptor: {
+        version: 1,
+        connector: { key: "contract-lookup", display_name: "契約照会", description: "契約を読み取り専用で照会する" },
+        tools: [{
+          name: "lookup_contract",
+          description: "契約IDで契約状況と更新日だけを取得する",
+          risk: "read",
+          input_schema: { type: "object", properties: { contract_id: { type: "string" } }, required: ["contract_id"], additionalProperties: false },
+          output_schema: { type: "object" },
+        }],
+        execution: { kind: "http", health_endpoint: "/health" },
+        network: { outbound_domains: [], private_network_required: true },
+        required_connections: [{ kind: "runtime_secret", description: "社内契約DBの読み取り専用接続" }],
+        source: { repository: "example/company-tools", merge_commit: "a".repeat(40), build_context: "integrations/contracts" },
+      },
+    }, { descriptor: { tools: [{ name: "unvalidated" }] } }])).toEqual(["lookup_contract"]);
+  });
+
   it("企業専用バックエンドの明示依頼は外部モデルなしでRepository準備へ進める", () => {
     const draft = explicitOrganizationToolDraft(
       "A社専用バックエンドを作り、社内サーバーの顧客DBへA社Runtimeから接続する",

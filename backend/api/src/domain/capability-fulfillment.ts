@@ -30,11 +30,12 @@ export function classifyCapabilityFulfillment(
     };
   }
   if (requirement.state === "resolved") {
+    const runtimeReuse = requirement.fulfillment?.execution_location === "runtime";
     return {
       mode: "reuse",
-      owner: "agent_studio",
-      execution_location: requirement.connector_name === "Runtime Tool Catalog" ? "runtime" : "studio",
-      reason: "利用可能なToolを再利用します",
+      owner: runtimeReuse ? "organization" : "agent_studio",
+      execution_location: runtimeReuse || requirement.connector_name === "Runtime Tool Catalog" ? "runtime" : "studio",
+      reason: runtimeReuse ? "企業専用Runtimeへ登録済みのToolを再利用します" : "利用可能なToolを再利用します",
       availability_target_minutes: null,
     };
   }
