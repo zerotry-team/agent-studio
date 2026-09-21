@@ -1347,19 +1347,36 @@ export class BuilderOrchestrator {
           },
           orderBy: { created_at: "desc" },
         });
-        // Preview開始後にOpenAPI/MCPの契約が適用された場合、旧Buildは新しいToolを
-        // 含まない。旧Previewを成功扱いにせず中止し、最新契約から再Buildする。
+        // OpenAPI/MCP適用と初回Preview生成は並行し得るため、created_atの前後ではなく
+        // 「適用済みToolがBuildへ固定済みか」で旧Buildを判定する。
         if (activeRelease?.status === "preview_running") {
-          const newerConnectorChange = await tx.builder_change_sets.findFirst({
-            where: {
-              project_id: run.project_id,
-              kind: "declarative_connector",
-              status: "applied",
-              created_at: { gt: activeRelease.created_at },
-            },
-            select: { id: true },
-          });
-          if (newerConnectorChange) {
+          const [connectorChanges, activeBuild] = await Promise.all([
+            tx.builder_change_sets.findMany({
+              where: { project_id: run.project_id, kind: "declarative_connector", status: "applied" },
+              select: { artifacts: true },
+            }),
+            tx.agent_builds.findUnique({ where: { id: activeRelease.build_id }, select: { compiled_config: true } }),
+          ]);
+          const config = activeBuild?.compiled_config && typeof activeBuild.compiled_config === "object" && !Array.isArray(activeBuild.compiled_config)
+            ? activeBuild.compiled_config as Record<string, unknown>
+            : {};
+          const functionTools = Array.isArray(config.function_tools) ? config.function_tools : [];
+          const serviceTools = Array.isArray(config.service_mcp_tools) ? config.service_mcp_tools : [];
+          const runtimeTools = Array.isArray(config.runtime_tools) ? config.runtime_tools : [];
+          const deployedToolNames = new Set([
+            ...functionTools.flatMap((tool) => tool && typeof tool === "object" && !Array.isArray(tool) && typeof (tool as { name?: unknown }).name === "string"
+              ? [(tool as { name: string }).name]
+              : []),
+            ...serviceTools.flatMap((tool) => tool && typeof tool === "object" && !Array.isArray(tool) && typeof (tool as { name?: unknown }).name === "string"
+              ? [(tool as { name: string }).name]
+              : []),
+            ...runtimeTools.filter((name): name is string => typeof name === "string"),
+          ]);
+          const requiredConnectorTools = connectorChanges.flatMap((change) => artifactList(change.artifacts)).flatMap((artifact) =>
+            artifact.type === "tool" && typeof artifact.name === "string" ? [artifact.name] : [],
+          );
+          const missingAppliedTool = requiredConnectorTools.some((name) => !deployedToolNames.has(name));
+          if (missingAppliedTool) {
             if (activeRelease.preview_run_id) {
               const previewRun = await tx.runs.findUnique({ where: { id: activeRelease.preview_run_id } });
               if (previewRun && !["completed", "failed", "cancelled"].includes(previewRun.status)) {
