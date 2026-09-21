@@ -71,9 +71,32 @@ jobs:
           echo "::error::同じコミットのCI完了を確認できませんでした"
           exit 1
 
+  configuration:
+    name: AWS の設定を確認
+    runs-on: ubuntu-24.04
+    environment: agent-studio-${{ github.event.inputs.environment || 'staging' }}
+    outputs:
+      ok: ${{ steps.configured.outputs.ok }}
+    steps:
+      - id: configured
+        run: |
+          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ] || [ -z "${{ vars.AWS_REGION }}" ] || [ -z "${{ vars.TF_STATE_BUCKET }}" ] || [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "::error::GitHub Environment agent-studio-${STAGE} に 必須のAWS設定（Role / Region / State bucket / Account ID）が揃っていないため、デプロイできません（infra/README.md）"
+              exit 1
+            fi
+            echo "::warning::GitHub Environment agent-studio-${STAGE} のAWS設定が未完了のため、自動デプロイをスキップします"
+            echo "### デプロイをスキップ" >> "$GITHUB_STEP_SUMMARY"
+            echo "agent-studio-${STAGE} の必須AWS設定が未完了です。CIの結果には影響しません。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
   images:
     name: イメージのビルド（${{ matrix.image.name }}）
-    needs: ci
+    needs: [ci, configuration]
+    if: needs.configuration.outputs.ok == 'true'
     runs-on: ubuntu-24.04
     environment: agent-studio-${{ github.event.inputs.environment || 'staging' }}
     env:
@@ -85,29 +108,15 @@ jobs:
           - { name: api, dockerfile: backend/api/Dockerfile }
           - { name: web, dockerfile: frontend/web/Dockerfile }
     steps:
-      - name: AWS の設定を確認
-        id: configured
-        run: |
-          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ] || [ -z "${{ vars.AWS_REGION }}" ] || [ -z "${{ vars.TF_STATE_BUCKET }}" ] || [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
-            echo "::error::GitHub Environment agent-studio-${STAGE} に 必須のAWS設定（Role / Region / State bucket / Account ID）が揃っていないため、デプロイできません（infra/README.md）"
-            exit 1
-          else
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/checkout@v7
-        if: steps.configured.outputs.ok == 'true'
       - uses: aws-actions/configure-aws-credentials@v6
-        if: steps.configured.outputs.ok == 'true'
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
       - uses: aws-actions/amazon-ecr-login@v2
-        if: steps.configured.outputs.ok == 'true'
         id: ecr
       - uses: docker/setup-buildx-action@v4
-        if: steps.configured.outputs.ok == 'true'
       - uses: docker/build-push-action@v7
-        if: steps.configured.outputs.ok == 'true'
         with:
           context: .
           file: ${{ matrix.image.dockerfile }}
@@ -120,7 +129,8 @@ jobs:
   deploy:
     name: デプロイ（${{ github.event.inputs.environment || 'staging' }}）
     runs-on: ubuntu-24.04
-    needs: images
+    needs: [configuration, images]
+    if: needs.configuration.outputs.ok == 'true'
     environment: agent-studio-${{ github.event.inputs.environment || 'staging' }}
     defaults:
       run:
@@ -130,30 +140,17 @@ jobs:
       NEW_TAG: ${{ github.sha }}
       AS_LOG_MASK_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
     steps:
-      - name: AWS の設定を確認
-        id: configured
-        run: |
-          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ] || [ -z "${{ vars.AWS_REGION }}" ] || [ -z "${{ vars.TF_STATE_BUCKET }}" ] || [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
-            echo "::error::AWS の設定がないため、デプロイできません"
-            exit 1
-          else
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/checkout@v7
-        if: steps.configured.outputs.ok == 'true'
       - uses: hashicorp/setup-terraform@v4
-        if: steps.configured.outputs.ok == 'true'
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
       - uses: aws-actions/configure-aws-credentials@v6
-        if: steps.configured.outputs.ok == 'true'
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Terraform init
-        if: steps.configured.outputs.ok == 'true'
         run: |
           terraform -chdir="$ROOT" init -input=false \
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
@@ -161,7 +158,6 @@ jobs:
             -backend-config="region=${{ vars.AWS_REGION }}"
 
       - name: いま動いているイメージのタグ
-        if: steps.configured.outputs.ok == 'true'
         id: current
         run: |
           TAG=$(aws ssm get-parameter --name "/as/${STAGE}/deployed-image-tag" --query Parameter.Value --output text 2>/dev/null || echo none)
@@ -169,7 +165,6 @@ jobs:
           echo "現在のタグ: ${TAG}"
 
       - name: 基盤と migrate のタスク定義を更新（サービスはまだ今のイメージ）
-        if: steps.configured.outputs.ok == 'true'
         run: |
           terraform -chdir="$ROOT" apply -input=false -auto-approve \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
@@ -179,7 +174,6 @@ jobs:
             -var="migrate_image_tag=${NEW_TAG}"
 
       - name: マイグレーション
-        if: steps.configured.outputs.ok == 'true'
         run: |
           set -euo pipefail
           CLUSTER=$(terraform -chdir="$ROOT" output -raw cluster_name)
@@ -204,7 +198,6 @@ jobs:
           fi
 
       - name: api / worker / web を新しいイメージにする
-        if: steps.configured.outputs.ok == 'true'
         run: |
           terraform -chdir="$ROOT" apply -input=false -auto-approve \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
@@ -214,7 +207,6 @@ jobs:
             -var="migrate_image_tag=${NEW_TAG}"
 
       - name: サービスの安定を待つ
-        if: steps.configured.outputs.ok == 'true'
         run: |
           set -euo pipefail
           CLUSTER=$(terraform -chdir="$ROOT" output -raw cluster_name)
@@ -224,7 +216,6 @@ jobs:
             "$(terraform -chdir="$ROOT" output -raw web_service_name)"
 
       - name: ヘルスチェック
-        if: steps.configured.outputs.ok == 'true'
         run: |
           set -euo pipefail
           URL=$(terraform -chdir="$ROOT" output -raw public_url)
@@ -236,7 +227,6 @@ jobs:
           exit 1
 
       - name: 稼働中タスクのcommit SHAを照合
-        if: steps.configured.outputs.ok == 'true'
         run: |
           set -euo pipefail
           CLUSTER=$(terraform -chdir="$ROOT" output -raw cluster_name)
@@ -253,7 +243,6 @@ jobs:
           done
 
       - name: デプロイしたタグを記録
-        if: steps.configured.outputs.ok == 'true'
         run: |
           set -euo pipefail
           aws ssm put-parameter --name "/as/${STAGE}/deployed-image-tag" --value "${NEW_TAG}" --type String --overwrite
@@ -262,7 +251,6 @@ jobs:
           aws ssm put-parameter --name "/as/${STAGE}/web-sha" --value "${NEW_TAG}" --type String --overwrite
 
       - name: まとめ
-        if: steps.configured.outputs.ok == 'true'
         run: |
           {
             echo "### Agent Studio（${STAGE}）"
