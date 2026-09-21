@@ -52,9 +52,9 @@ variable "openai_default_model" {
 }
 
 variable "manifest_generator_model" {
-  description = "MANIFEST_GENERATOR_MODEL（Claude のモデル ID）"
+  description = "MANIFEST_GENERATOR_MODEL（OpenAI Responses API のモデル ID）"
   type        = string
-  default     = "claude-opus-5"
+  default     = "gpt-5.6"
 }
 
 variable "initial_admin_email" {

@@ -13,7 +13,7 @@
 | D-5 | OpenAI Project は企業ごと |
 | D-6 | Session Worker の通信制限は Route 53 Resolver DNS Firewall + セキュリティグループ |
 | D-8 | Runtime 側の認証情報は顧客が自社 AWS の Secrets Manager に直接登録する |
-| D-9 | 日本語 → Manifest の生成は Claude（zerotry 標準） |
+| D-9 | 日本語 → Manifest の生成は OpenAI Responses API |
 | D-10 | Workflow は自前（Postgres の状態 + Worker） |
 | D-15 | 顧客 AWS 向けは Terraform module を先に提供（CloudFormation は後続） |
 
@@ -97,7 +97,7 @@ Dockerfile はすべてリポジトリのルートをビルドコンテキスト
 | `AGENTS_API_MODE` | `openai`（ローカル・CI では `fake` も可） | 環境変数 |
 | `OPENAI_DEFAULT_MODEL` | 既定のモデル名 | 環境変数 |
 | `ANTHROPIC_API_KEY` | `as-<env>/anthropic-api-key` | シークレット |
-| `MANIFEST_GENERATOR_MODEL` | Claude のモデル ID | 環境変数 |
+| `MANIFEST_GENERATOR_MODEL` | OpenAI Responses API のモデル ID | 環境変数 |
 | `LOG_LEVEL` | `info` | 環境変数 |
 
 ### 4.4 Web の環境変数
