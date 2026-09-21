@@ -149,6 +149,28 @@ describe("JobHandler start_session", () => {
     expect(grants.lookupByTokenHash("a".repeat(64))).not.toHaveProperty("remote_url");
   });
 
+  it("Builder Sessionはexec-server起動前のworkspace準備情報だけをWorkerへ渡す", async () => {
+    const { handler, calls } = setup([{ lastStatus: "RUNNING" }]);
+    const workspace = {
+      project_id: "30000000-0000-4000-8000-000000000001",
+      change_set_id: "40000000-0000-4000-8000-000000000001",
+      capability_topic: "bank_document_source",
+      repository_url: "https://github.com/example/integrations.git",
+      base_branch: "main",
+      branch: "builder/agent/bank-document/1",
+      adapter_path: "integrations/bank-document",
+    };
+    const result = await handler.handle(startJob({ allowed_tools: [], builder_workspace: workspace }));
+    expect(result).toEqual({ status: "succeeded" });
+    expect(calls.run[0]!.overrides?.containerOverrides?.[0]?.environment).toEqual(expect.arrayContaining([
+      { name: "BUILDER_CHANGE_SET_ID", value: workspace.change_set_id },
+      { name: "BUILDER_REPOSITORY_URL", value: workspace.repository_url },
+      { name: "BUILDER_ADAPTER_PATH", value: workspace.adapter_path },
+    ]));
+    expect(JSON.stringify(calls.run[0])).not.toContain("interface_notes");
+    expect(JSON.stringify(calls.run[0])).not.toContain("CODEX_API_KEY");
+  });
+
   it("同時実行数の上限に達していたら起動せずに失敗する", async () => {
     const { handler, grants, calls } = setup([{ lastStatus: "RUNNING" }], { maxConcurrentSessions: 1 });
     grants.upsert(

@@ -17,6 +17,9 @@ import type { Logger } from "./logger.js";
 import { errorInfo } from "./logger.js";
 import { SessionMonitor } from "./monitor.js";
 import type { ControllerSecrets } from "./secrets.js";
+import type { WorkspaceExecutor } from "./workspace-executor.js";
+import type { GitPublisher } from "./git-publisher.js";
+import type { BuilderResultCollector } from "./builder-result-collector.js";
 import {
   RegistrationFailedError,
   RuntimeNotRegisteredError,
@@ -34,6 +37,9 @@ export interface ControllerDeps {
   grants: GrantStore;
   launcher: SessionLauncher;
   browserLauncher: BrowserLauncher;
+  workspaceExecutor: WorkspaceExecutor;
+  gitPublisher: GitPublisher;
+  builderResultCollector: BuilderResultCollector;
   secrets: ControllerSecrets;
   controllerVersion: string;
   fetchImpl?: typeof fetch;
@@ -72,11 +78,14 @@ export class Controller {
   private stopping = false;
 
   constructor(private readonly deps: ControllerDeps) {
-    const { config, logger, grants, launcher, browserLauncher, studio, secrets } = deps;
+    const { config, logger, grants, launcher, browserLauncher, workspaceExecutor, gitPublisher, builderResultCollector, studio, secrets } = deps;
     this.jobs = new JobHandler({
       grants,
       launcher,
       browserLauncher,
+      workspaceExecutor,
+      gitPublisher,
+      builderResultCollector,
       studio,
       secrets,
       logger,
@@ -235,7 +244,7 @@ export class Controller {
             this.reportJobResult(jobId, {
               status: "failed",
               error: "このバージョンの Runtime Controller は、このジョブに対応していません",
-            }),
+            }).then(() => undefined),
           );
         }
       }
@@ -252,29 +261,33 @@ export class Controller {
     this.track(
       (async () => {
         const result = await this.jobs.handle(job);
-        await this.reportJobResult(job.job_id, result);
+        const accepted = await this.reportJobResult(job.job_id, result);
+        if (accepted && result.status === "succeeded" && job.type === "publish_builder_branch") {
+          await this.deps.gitPublisher.cleanup?.(job);
+        }
       })().catch((err) => this.deps.logger.error({ err: errorInfo(err), job_id: job.job_id }, "ジョブの処理中にエラーが発生しました")),
     );
   }
 
-  private async reportJobResult(jobId: string, result: JobResultRequest): Promise<void> {
+  private async reportJobResult(jobId: string, result: JobResultRequest): Promise<boolean> {
     const log = this.deps.logger.child({ job_id: jobId, status: result.status });
     for (let attempt = 1; attempt <= 5; attempt++) {
       try {
         await this.deps.studio.jobResult(jobId, result);
         if (result.status === "failed") log.warn({ error: result.error }, "ジョブが失敗しました");
         else log.info("ジョブが完了しました");
-        return;
+        return true;
       } catch (err) {
         if (err instanceof StudioApiError && err.status >= 400 && err.status < 500 && err.status !== 401 && err.status !== 429) {
           log.error({ err: errorInfo(err) }, "ジョブの結果を Agent Studio が受け付けませんでした");
-          return;
+          return false;
         }
         log.warn({ err: errorInfo(err), attempt }, "ジョブの結果を送れませんでした");
         await new Promise((r) => setTimeout(r, 2_000 * attempt));
       }
     }
     log.error("ジョブの結果を送れないまま諦めました");
+    return false;
   }
 
   /** 再起動時: Agent Studio の activeSessions と、実行中の Worker を突き合わせて引き継ぐ */
@@ -370,6 +383,10 @@ export class Controller {
       gateway_url: config.gatewayPublicUrl,
       active_sessions: grants.activeSessionIds().slice(0, 1000),
       tools: (await this.fetchCatalog()).slice(0, 500),
+      // Builderは通常Runと同じexec-server Session Workerで実行する。
+      // noop launcherではEnvironment接続が成立しないため能力を広告しない。
+      // Docker launcherでは同じ隔離workspaceを使って専用branchの公開も処理する。
+      capabilities: this.deps.launcher.kind !== "noop" ? ["builder_workspace", "adapter_delivery"] : [],
     });
     await studio.heartbeat(body);
   }

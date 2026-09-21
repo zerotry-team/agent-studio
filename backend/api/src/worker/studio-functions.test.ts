@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildIdempotencyKey, buildZennArticle, prepareHttpArguments, zennArticleSlug } from "./studio-functions.js";
+import { buildIdempotencyKey, buildZennArticle, prepareHttpArguments, validateAnonymousXPost, zennArticleSlug } from "./studio-functions.js";
 
 describe("HTTP Connectorの冪等性", () => {
   it("logical_post_idをIdempotency-Key用に分離し、接続先bodyへ送らない", () => {
@@ -28,6 +28,24 @@ describe("HTTP Connectorの冪等性", () => {
       requestArgs: { logical_post_id: "provider-field" },
       logicalId: "request",
     });
+  });
+});
+
+describe("X公開payload境界", () => {
+  it("匿名ID・一般化結果・理由コードだけの固定本文を許可する", () => {
+    expect(() => validateAnonymousXPost({
+      account_id: "x-test-account",
+      text: "匿名審査ID=ANON-ABCD1234; 結果=approve_candidate; 理由=NEW_UNDER_THRESHOLD,PAYMENTS_CONSISTENT; 検証用投稿",
+      logical_post_id: "workflow-run-1",
+    })).not.toThrow();
+  });
+
+  it.each([
+    { account_id: "x", text: "株式会社実在 1000000円", logical_post_id: "r" },
+    { account_id: "x", text: "匿名審査ID=ANON-ABCD1234; 結果=reject; 理由=COMPLIANCE_HIT; 検証用投稿", logical_post_id: "r" },
+    { account_id: "x", text: "匿名審査ID=ANON-ABCD1234; 結果=hold; 理由=MANUAL_REVIEW_REQUIRED; 検証用投稿", customer_name: "禁止" },
+  ])("禁止情報・否決・追加fieldを承認済みでも拒否する", (args) => {
+    expect(() => validateAnonymousXPost(args)).toThrow();
   });
 });
 

@@ -1,5 +1,6 @@
 "use client";
 
+import type { AgentDto } from "@agent-studio/contracts";
 import { Bot, Plus } from "lucide-react";
 import Link from "next/link";
 import { listAgentsAction } from "@/actions/agents";
@@ -59,7 +60,7 @@ export default function AgentsPage() {
                 <THead>
                   <tr>
                     <TH>名前</TH>
-                    <TH className="hidden md:table-cell">キー</TH>
+                    <TH>状態</TH>
                     <TH>公開中のバージョン</TH>
                     <TH className="hidden sm:table-cell">最新バージョン</TH>
                     <TH>更新</TH>
@@ -81,7 +82,7 @@ export default function AgentsPage() {
                           </span>
                         ) : null}
                       </TD>
-                      <TD className="hidden font-mono text-xs text-gray-600 md:table-cell">{agent.key}</TD>
+                      <TD><AgentState agent={agent} /></TD>
                       <TD>
                         {agent.published_version !== null ? (
                           <Badge tone="success">v{agent.published_version} を公開中</Badge>
@@ -103,4 +104,14 @@ export default function AgentsPage() {
       </Card>
     </>
   );
+}
+
+function AgentState({ agent }: { agent: AgentDto }) {
+  const status = agent.builder_status;
+  if (["failed", "cancelled"].includes(status ?? "")) return <div className="space-y-1"><Badge tone="danger">失敗</Badge><Link href={`/agents/${agent.id}?tab=build`} className="block text-xs font-medium text-red-700 underline">原因と再実行</Link></div>;
+  if (["waiting_human_action", "blocked"].includes(status ?? "")) return <Badge tone="warning">準備待ち</Badge>;
+  if (["validating", "previewing"].includes(status ?? "")) return <Badge tone="info">Preview検証中</Badge>;
+  if (status && !["completed", "production_pending_approval", "ready_for_production"].includes(status)) return <Badge tone="info">作成中</Badge>;
+  if (agent.published_version !== null || ["completed", "production_pending_approval", "ready_for_production"].includes(status ?? "")) return <Badge tone="success">利用可能</Badge>;
+  return <Badge tone="neutral">未公開</Badge>;
 }

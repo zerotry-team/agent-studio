@@ -56,7 +56,7 @@ export function ToolSpecDetails({ spec, connections }: ToolSpecDetailsProps) {
           { label: "認証に使う接続先", value: <ConnectionName id={spec.studio_function.connection_id} connections={connections} /> },
           { label: "入力の形式（JSON Schema）", value: <JsonView value={spec.input_schema} maxHeight="20rem" />, wide: true },
         );
-      } else {
+      } else if (spec.studio_function.handler === "zenn_github_publish") {
         items.push(
           {
             label: "Zenn Connect repository",
@@ -65,6 +65,13 @@ export function ToolSpecDetails({ spec, connections }: ToolSpecDetailsProps) {
           },
           { label: "Zennアカウント", value: <Mono>{spec.studio_function.zenn_username}</Mono> },
           { label: "認証", value: "Agent ProjectのGitHub Connectionを実行時に使用" },
+          { label: "入力の形式（JSON Schema）", value: <JsonView value={spec.input_schema} maxHeight="20rem" />, wide: true },
+        );
+      } else {
+        items.push(
+          { label: "画像モデル", value: <Mono>{spec.studio_function.model}</Mono> },
+          { label: "成果物", value: "生成画像を連携サービスへ保存し、後続Tool用のmedia_idを返します" },
+          { label: "認証", value: "組織のOpenAI設定とAgent ProjectのConnectionを実行時に使用" },
           { label: "入力の形式（JSON Schema）", value: <JsonView value={spec.input_schema} maxHeight="20rem" />, wide: true },
         );
       }

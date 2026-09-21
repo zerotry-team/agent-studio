@@ -17,6 +17,9 @@ import {
   NoopBrowserLauncher,
   type BrowserLauncher,
 } from "./browser-launcher.js";
+import { DisabledWorkspaceExecutor, DockerWorkspaceExecutor, type WorkspaceExecutor } from "./workspace-executor.js";
+import { DisabledGitPublisher, DockerGitPublisher } from "./git-publisher.js";
+import { DisabledBuilderResultCollector, DockerBuilderResultCollector } from "./builder-result-collector.js";
 
 function readVersion(): string {
   try {
@@ -67,6 +70,30 @@ function createBrowserLauncher(config: ControllerConfig, logger: Logger): Browse
   }
 }
 
+function createWorkspaceExecutor(
+  config: ControllerConfig,
+  secrets: ControllerSecrets,
+  studio: StudioApi,
+  logger: Logger,
+): WorkspaceExecutor {
+  if (config.workspaceExecutor.type === "docker") {
+    return new DockerWorkspaceExecutor(
+      config.workspaceExecutor,
+      {
+        readEnvironmentKey: async () => {
+          const stored = await secrets.readEnvironmentKey();
+          if (stored) return stored;
+          const fetched = await studio.environmentKey();
+          if (fetched) await secrets.saveEnvironmentKey(fetched);
+          return fetched;
+        },
+      },
+      logger,
+    );
+  }
+  return new DisabledWorkspaceExecutor();
+}
+
 async function main(): Promise<void> {
   let config: ControllerConfig;
   try {
@@ -100,6 +127,13 @@ async function main(): Promise<void> {
   const grants = new GrantStore();
   const launcher = createLauncher(config, secrets, studio, logger);
   const browserLauncher = createBrowserLauncher(config, logger);
+  const workspaceExecutor = createWorkspaceExecutor(config, secrets, studio, logger);
+  const gitPublisher = config.launcher.type === "docker"
+    ? new DockerGitPublisher(config.launcher.image, studio, logger, config.launcher.network)
+    : new DisabledGitPublisher();
+  const builderResultCollector = config.launcher.type === "docker"
+    ? new DockerBuilderResultCollector(config.launcher.image, logger)
+    : new DisabledBuilderResultCollector();
 
   logger.info(
     {
@@ -108,13 +142,14 @@ async function main(): Promise<void> {
       identity_mode: config.identity.mode,
       launcher: launcher.kind,
       browser_launcher: browserLauncher.kind,
+      builder_workspace_executor: workspaceExecutor.kind,
       secret_store: config.secrets.store,
       max_concurrent_sessions: config.maxConcurrentSessions,
     },
     "設定を読み込みました",
   );
 
-  const controller = new Controller({ config, logger, auth, studio, grants, launcher, browserLauncher, secrets, controllerVersion: version });
+  const controller = new Controller({ config, logger, auth, studio, grants, launcher, browserLauncher, workspaceExecutor, gitPublisher, builderResultCollector, secrets, controllerVersion: version });
   await controller.start();
 
   const shutdown = (signal: string) => {

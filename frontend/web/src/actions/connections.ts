@@ -1,6 +1,6 @@
 "use server";
 
-import type { CreateConnectionInput, SetConnectionSecretInput } from "@agent-studio/contracts";
+import type { CreateConnectionInput, CreateGitHubAppConnectionInput, SetConnectionSecretInput } from "@agent-studio/contracts";
 import { runAction } from "@/lib/api/run-action";
 import { ConnectionRepository } from "@/lib/repositories";
 import {
@@ -16,6 +16,17 @@ export async function listConnectionsAction() {
 
 export async function createConnectionAction(input: CreateConnectionInput) {
   return runAction(() => new CreateConnectionService().invoke(input), "接続先を登録できませんでした");
+}
+
+export async function createGitHubAppConnectionAction(input: CreateGitHubAppConnectionInput) {
+  return runAction(() => new ConnectionRepository().createGitHubApp(input), "GitHub Appを接続できませんでした");
+}
+
+export async function provisionIntegrationRepositoryAction(sourceConnectionId: string) {
+  return runAction(
+    () => new ConnectionRepository().provisionIntegrationRepository(sourceConnectionId),
+    "企業専用Integration Repositoryを自動作成できませんでした",
+  );
 }
 
 /** 認証情報の値は書き込み専用。戻り値に値は含まれない */

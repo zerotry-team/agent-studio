@@ -5,6 +5,71 @@
 AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適用、ECS の安定化、Control Plane の `/health` まで確認済み。
 以下の従来フェーズ表は初期基盤の記録として残し、Agent版Vercel MVPの最新状態は次節を正とする。
 
+## Builder Agent（2026-09-21）
+
+要件定義書 [builder-agent-requirements.md](builder-agent-requirements.md) のBuilder Agent MVPを、Preview Run、Workflow v2、Self-hosted Plan、同一BuildのProduction昇格まで通る縦切りとして実装した。
+
+実装済み:
+
+- Agent中心UX（UX-001〜005）。`/agents/new`だけを作成入口とし、仮Agentと内部Builder Jobを同一トランザクションで作成する。作成開始直後から同じ`/agents/:id?tab=build`で状態、次の操作、検証、Preview到達点を確認でき、完成時も別Agentへ切り替えない。
+- `builder_projects.agent_id`を組織ID付き複合外部キーとして追加した。1 Agentに複数Jobを関連付けられ、旧Releaseはmigrationでbackfill、Agentのない旧Jobは初回移行または再実行時に仮Agentを自動生成する。
+- Agent一覧に`作成中 / 準備待ち / Preview検証中 / 利用可能 / 失敗`を表示し、失敗時は原因と再実行へ遷移できる。サイドバーの「作成プロジェクト」を廃止し、旧`/builder-projects/new`と詳細URLはAgent導線へ転送する。
+- Agent詳細の「作成状況」に、理由・担当・自動再開条件を備えたHuman Action、OpenAPI/MCP Discovery、直近Validation、Preview/Run導線、折りたたみ式のPlan/Change Set/Audit詳細を統合した。
+- GitHub AppとSelf-host RuntimeをAgentごとの入力ではなく組織管理者の事前設定として扱い、`設定 > 実行・開発基盤`へ集約した。RuntimeのHeartbeat、Tool件数、稼働状態とGitHub Appのrepository/base branch/接続状態を同じ画面で確認できる。Builderで基盤が不足した場合もSecret入力を表示せずこの設定へ誘導し、接続またはHeartbeat検知後に自動再開する。
+- Builder Workspace Change Setごとに`builder_workspace_sessions`を追加した。Studio/OpenAI/Environment/Runtime/Change Set ID、状態、attempt、lease、期限、最終イベント、prompt/result hash、error classだけをRLS下へ保持し、prompt本文、生成コード、Environment Keyは保存しない。
+- Builderのコード生成を通常Runと同じAgents API self-hosted Session + `start_session` + `codex exec-server`経路へ移した。SSEを入力より先に購読し、`agent.session.environment.connected`確認後だけ指示を送り、root turn完了と`/workspace/outputs/builder-result.json`の型・Change Set・変更先・全テスト成功を両方検証して成功にする。
+- Session Workerは`exec-server`起動前に非モデル処理でRepositoryをcloneし、base SHAを固定して専用branchへ切り替える。Docker launcherではChange Setごとのtmpfs workspaceを使用し、Environment Keyは従来どおりRuntime Secret Storeから`CODEX_API_KEY`へだけ注入する。
+- 成功時にbase/commit/diff hash、変更ファイル、test結果、result hashだけをValidationへ保存し、Session削除とRuntimeの`stop_session`を実行する。失敗は`environment_auth / environment_disconnected / code_agent / expired / builder_session`等へ分類する。擬似Agents APIとRuntime APIを使う結合テストで、接続前未送信、接続、成果物検証、cleanupまで確認した。
+- `builder_projects` / `builder_runs` / `builder_steps` / `capability_plans` / `capability_gaps` / `human_actions`。すべて`organization_id`、RLS、組織IDを含む複合外部キーを持つ。
+- WorkerがDBリースでBuilder Runを取得し、依頼の整理、既存RegistryへのCapability解決、Gap分類、型付きHuman Action生成を行う。Worker停止時は期限切れリースから再取得する。
+- `waiting_human_action`を失敗と分離し、完了記録後に次のBuilder Runを自動投入する。
+- Overview / Plan / Setup / Changes / Tests / Preview / Releases / Auditの8タブを持つ作成プロジェクト画面。
+- Builderロールによる作成・再実行・中止、Human Actionの担当ロール検査、監査ログと相関ID。
+- API結合テストでWorker処理と別組織からの不可視性を確認。実ブラウザでも作成フォームからProjectを作り、`draft → analyzing → planning`とCapability Plan表示まで確認した。
+- OpenAPI 3.0 / 3.1を検査し、選択したOperationからHTTP ConnectorとImmutableなTool Version 1を生成する。ローカル`$ref`は展開し、外部`$ref`、private IP、URL埋込認証情報、未対応認証は拒否する。
+- methodと操作内容からRiskをコード側で決定し、OpenAPI拡張によるRisk引き下げを禁止した。Path/Query/JSON Body、成功Response Schema、POSTの冪等性キーをTool契約へ反映する。
+- OpenAPI本文やSecretをDBへ保存せず、仕様ハッシュ・抽出メタデータ・生成Connector/Tool Version・Contract/Security/Smoke証跡だけを`Changes` / `Tests`へ保存する。
+- API Key / Bearer / OAuthを識別し、Secret値をチャットやBuilder APIで受けず、型付きHuman Actionから既存Connection画面へ誘導する。接続テスト成功時は該当Actionを自動完了し、次のBuilder Runを投入する。
+- 実ブラウザでOpenAPIの貼り付け、検査、1操作の選択生成を行い、`Changes`のConnector/Tool Version、`Tests`のContract/Security成功とSmoke待ち、`Setup`の接続Human Actionまで表示を確認した。
+- 複雑なファクタリング依頼から、過去問い合わせ履歴、口座画像の取得元、反社照合先、自社否決一覧、100万円以上の遷移先、X公開範囲を「推測してはいけない業務事実」として具体的な入力欄へ分解する。回答はProjectへ保存し、Secretや実在顧客情報を含めず次のBuilder Runへ反映して自動再開する。
+- 具体質問で解決する能力に、回答欄のない抽象的な確認カードを重ねて出さない。実ブラウザで6件へ回答し、再解析後に未回答カードが0件となること、回答内容を反映したCapability Plan v3が表示されることを確認した。
+- 各接続先の回答には任意のOpenAPI/MCP URLを指定できる。公開HTTPS、2MB上限、Secretを含むURLの拒否、契約検査、業務とのOperation関連性確認を通過した仕様だけをConnector/Immutable Toolへ自動変換し、同じBuilder Runで再計画する。X投稿Toolが未登録の場合も同じ導線を使う。
+- 複数回答から生成したConnectorを1つのBuildへ固定し、同じHTTP契約のRegistry Toolが既にある場合は、このProjectで利用者が明示した仕様を優先する。未解決Gapが1件でも残る間はPreviewを開始しない。
+- OpenAPI/MCPも既存Toolもない社内データ源は、曖昧なGapで終わらせず、実装先Repository、基点branch、生成先、安定化する入出力契約を追加で質問する。回答から`code_workspace` Change Setを作り、専用branch、組織・Run隔離workspace、main直接push禁止、テスト通過前PR禁止、Secret/顧客データ非保存をSecurity証跡へ固定する。同じ能力の抽象確認やRepository質問は重複表示しない。
+- `builder_workspace`をRuntimeの業務Toolとは別の管理能力として型付きHeartbeatへ追加した。対応Runtimeがなければ手動完了できない管理者Actionだけで停止し、能力を広告したHeartbeatで自動完了・再開する。対応RuntimeにはRepository、基点branch、専用branch、生成先、非機微な入出力契約だけをジョブとして渡す。
+- ローカルSelf-hosted Runtime向けDocker Code Workspace Executorを追加した。使い捨てコンテナ内でclone、Codexによる最小差分生成、関連test/lint/typecheck、`git diff --check`、専用branchへのlocal commitを行い、ソース本文を返さずcommit SHA、diff SHA-256、変更ファイル名、テスト終了コードだけをControl Planeへ返す。資格情報はDocker引数へ出さず環境変数で注入し、workspaceはChange Set専用volumeへ隔離する。
+- Code Workspace成功時はChange Setを`applied`へ進め、非機微なValidation証跡を固定する。同じcommitのbranch pushとPR作成はGit Connectionの自動検証条件として明示的に停止し、画面から誤って手動完了できない。
+- 反社照合のように通常のWeb画面しかない外部データ源は、URL、照合キー、公開サイトかHuman Login必須かを型付きで質問する。通常画面URLをOpenAPIとして誤検査せず、hostname単位の`browser_flow` Change Setへ変換する。
+- 公開サイトのBrowser Flowはexact domain allowlist、private IP拒否、外部コンテンツをuntrusted扱い、Snapshot証跡必須、コード実行禁止、公開Web全許可なしをSecurity証跡へ固定する。Preview開始時には生成Change Setの許可ドメインだけをBuildのBrowser接続へ反映する。
+- ログイン必須サイトは`authenticated_restricted`としてHuman Loginだけで停止し、MFA、CAPTCHA、規約同意を自動化しない。Human Loginを通常の回答カードから誤って手動完了するAPI操作も拒否する。公開サイト分岐は実ブラウザで質問回答、Change Set、許可ドメイン、操作列、Security証跡まで確認した。
+- 公開Browser Flowが確定した後の再開は、同じ要件をLLMへ再生成させず、前回Planと回答からManifestを決定的に再構成する。Browser Toolは明示されたBrowser Flowがある場合だけ採用し、URLという語だけを根拠に別のAgentへ混入させない。
+- `browser_navigate` / `browser_snapshot` / `browser_screenshot`と対応Self-hosted Runtimeが揃った場合は、安全なBrowser Action群、Runtime Profile、許可ドメインを同じPreview Buildへ固定して開始する。不足時は必要Toolを明示した管理者Actionだけで停止し、手動完了を拒否する。Runtime heartbeatでTool CatalogとGatewayを検証できるとActionを自動完了してBuilder Runを再開する。
+- 無関係または不正な仕様はConnector化せず、Discovery失敗証跡とURL修正カードを表示する。修正回答後は自動で再検査して復帰する。実ブラウザProject `c34682d8-796b-46d7-96ad-13bc2fcc6d85` では、6質問、OpenAPI URL入力、自動検査失敗、修正待ち、変更セット0件を確認した。
+- 公開HTTPSのStreamable HTTP MCPへ`tools/list`を実行し、操作名、入力JSON Schema、`readOnlyHint` / `destructiveHint`を取得する。未申告の読取属性はwrite、destructive申告はdestructiveとして安全側に固定する。
+- MCPサーバー側の操作名とStudio内のTool名を分離し、実行時の`allowed_tools`には元の操作名だけを設定する。検査後の再Discoveryで契約ハッシュが変化していた場合は生成を中止し、入力Schemaと外部入力フラグをImmutable Tool Versionへ保存する。
+- MCP Discovery成功をContract / Security / `tools/list` Smoke証跡として保存する。認証不要のread操作はAgent / Build / Preview Runへ自動で進み、擬似Agents APIの実MCP Callイベント成功までE2Eで確認した。Bearer認証はSecretをBuilderへ渡さず、Connection作成のHuman Actionで停止する。
+- 実ブラウザでMCP Discoveryフォーム、認証選択、OpenAPIとの併存レイアウト、private IP拒否エラーを確認した。
+- MCP公式Reference Server `https://example-server.modelcontextprotocol.io/budget-allocator/mcp`へ実接続し、`get-budget-data`と入力Schemaを`tools/list`で取得した。`readOnlyHint`が未申告だったため、画面と生成提案の両方でwriteへ安全側判定されることを確認した（Connector反映・外部Tool実行はしていない）。
+- Builder Change Setで生成したToolとCapability Resolverが選んだ既存Toolの和集合だけをAgent Manifestへ固定し、Registryの無関係なToolをPreview Buildへ混入させない。
+- 認証不要または接続済みの読み取りToolでは、Agent Project、Immutable Build、Preview Deployment、Preview Runを自動作成する。`builder_releases`がAgent / Build / Deployment / Run / 構成ハッシュを1組として保持する。
+- Runの`completed`だけでは完成扱いにせず、`outcome=succeeded`と選択Toolの`tool.call status=completed`を両方確認する。成功時だけProjectを`completed`（Production目標なら`production_pending_approval`）へ進め、失敗はPreview証跡へ固定する。
+- Previewタブから生成AgentとRun詳細へ遷移でき、実行中はProject画面を自動更新する。
+- 結合テストで公開OpenAPIの生成から擬似OpenAIによるTool実行、Preview成功までを確認した。さらに実OpenAIとGitHub公開APIでProject `25d47bea-e21d-491a-9b82-558cf507c038`、Build `334ac50e-4e32-44ce-82ee-a0cf9a1f1154`、Run `b2f26693-1089-41bc-b09e-081086cb4a46`を実行し、生成Toolの成功、`completed / succeeded`、画面のPreview受け入れ成功を確認した。
+
+外部環境での残検証:
+
+- GitHub App専用Connection、repository allowlist、短期Installation tokenの一回限り払い出し、Runtimeのstdin askpassによる`builder/*` push、PR冪等作成を実装した。Agent Studio上の管理者承認ではRequired Checks成功、head SHA、既定branch、企業専用Integration Repositoryであることを再検証し、squash mergeする。merge webhook受信後だけAdapter配布へ進む。秘密鍵とWebhook secretはSecret Storeだけへ保存し、通常のConnection secret更新経路から上書きできない。管理画面の専用フォームも実ブラウザで確認した。
+- 企業専用Integration Repositoryが未作成でも、接続済みGitHub Appが`Administration: write`かつ`All repositories`でインストール済みなら、組織slugからprivate Repositoryを冪等作成し、default branchを取得してConnection登録と待機中Builderの保存先差し替えまで自動化した。実装先まで判定済みのCapabilityへ「利用する連携方法」を重ねて聞かず、待機中はHuman Actionの名称を進行欄とリアルタイムログへそのまま表示する。
+- merge済みChange Setについて、Connectionへ固定したEd25519公開鍵でmerge SHA、descriptor/contract hash、OCI digest、SBOM digestのattestation署名を検証する。加えてdependency/Secret scan、provenanceを検証し、Runtime heartbeatのsource commit/digest/hash/signatureが一致したときだけConnectorと新しいTool Versionを登録する。drift時は登録せずBuilder証跡を失敗へ固定する。GitHub API fake + Runtime heartbeatの結合テストでbranch/PR/merge/package/Tool登録を通した。
+- ファクタリングRule `F-01`〜`F-08`を`factoring-v2`として決定的に実装し、Browser/DB/OCR/コンプライアンス確認不能はfail closed、全結果を担当者承認必須とした。通帳fixtureの応答は集計値だけで、生本文を返さない。
+- X公開は固定の匿名payloadだけを許可し、reject、長い数字、URL、mention、追加項目を実行直前にも拒否する。最終本文と投稿先を表示する明示承認、本文hash固定、`logical_post_id`のbody除外、`publish_post`一回、Provider Job `succeeded`待ち、post ID/permalinkのRun証跡表示まで実装した。
+- 実ブラウザで`/agents/new`から架空ファクタリングAgentを作成し、同一Agent詳細の不足情報カード、回答後の自動再開、Agent一覧の`準備待ち`表示まで確認した（Agent `c437d2b2-ac93-4dda-be8d-2fd2a2d19f18`）。
+- 認証が必要なOpenAPI / MCPはConnection接続テストまたはOAuth code交換後に自動再開する。実Provider認証を伴うBuilder Project E2Eは各Providerの資格情報が必要。
+- Human Login browser profileの暗号化保存とログイン成功による自動再開は未実装。Code WorkspaceはAgents API Session、`codex exec-server`、隔離workspace準備、生成・テスト・local commit、Artifact証跡反映、GitHub Appのbranch/PR、merge後package/Tool登録まで実装した。
+- 最終Definition of Doneのうち、実GitHub Appの権限更新後に行うprivate repository自動作成、branch/PR/CI/Agent Studio承認によるmerge、実Self-hosted Runtimeへの署名package配布、実Environment Key + local Docker `codex exec-server`、F-01〜F-08の実Preview Run、検証用Xアカウントへの実投稿とpermalink確認は外部資格情報・最終承認が必要なため未実施。これらを実施するまでは完成扱いにしない。
+- 実ブラウザProject `4a13c3fd-e649-4f51-9ecf-aff9e06a600f` で6件の業務質問へ非機微なデモ回答を入れ、問い合わせ履歴・社内否決一覧のRepository質問、2件の`code_workspace` Change Set、反社照合`browser_flow` Change Set、Code Workspace Runtime待ちへの遷移を確認した。旧standalone `codex exec`経路はEnvironment KeyでHTTP 401となったため使用を止め、個人Codex認証や長期OpenAI API Keyをmount/injectせず、Agents API Session + `codex exec-server`へ置き換えた。実OpenAI/実Dockerでの再受け入れは未実施。
+- 顧客AWSへのTerraform applyは意図的にHuman Actionとして残し、BuilderはPlanとRuntime登録後の自動再開までを担当する。
+
 ## Agent版Vercel MVP（2026-09-20）
 
 - Agent Projectを中心に、業務説明、必要なConnection/Variables、Preview、同一BuildのProduction昇格、Rollback、Health、Buildログ、Scheduleを一続きにした。AV-030、AV-043、AV-050、AV-051まで実装済み。
@@ -21,7 +86,7 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 - 実画面から `Zenn技術記事ライター` Agent（`c625e10b-9680-469a-b99c-037d6f224d51`）を作成し、Preview Run `6c9f5797-8010-48e9-8cb7-0dcc90077b08` を実行した。
 - Agent Studioのツール実行が `zerotry-team/agent-studio-zenn-content` の `articles/5bb2b20d9fc62079.md` を作成し、Zenn Connect経由で [記事](https://zenn.dev/zerotry_iwata/articles/5bb2b20d9fc62079) が公開された。ログアウト状態の実ブラウザでタイトル、本文、トピック、公開日を確認済み。
 - Runは `completed / succeeded`、ツール呼び出しは1回。Run IDから決定的なslugを生成するため、同じRunの再試行では新規記事を増やさず同じファイルを更新する。
-- 今回のBuildには承認ポリシーを設定していないため承認レコードは0件。`external_send` はリスク分類であり、現行要件では未信頼コンテンツを読むAgent（POL-07）や明示ポリシーなどの場合に承認を強制する。
+- 当時のBuildには承認ポリシーを設定していなかったため承認レコードは0件だった。現在は再発防止として、`external_send` を入力元に関係なく暗黙の承認対象にしている。
 - ただし、このE2EではZenn Connect用GitHub repositoryとAgent Studio Connectionを開発者が先に準備した。したがって「自然言語だけでAgent Studioが外部認証を含めてAgentを構築した」証拠にはしない。
 
 ### Agent Builder / Qiita（2026-09-21）
@@ -31,6 +96,25 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 - Qiita Connectorは公式API v2の `POST /api/v2/items` を使用する。記事本文・タイトル・1〜5件のタグを入力とし、リスクは `external_send`。
 - 現在の実ブラウザでは、Qiita OAuth applicationのClient ID / Client Secretが未設定であることをAgent Builder自身が検出して停止するところまで確認済み。QiitaアカウントとOAuth applicationの登録後に、実認可・Preview Run・公開記事確認を行う必要がある。
 - 外部サービス側のOAuth applicationが未準備でも行き止まりにならないよう、Agent Builder内にowner向けの初回セットアップを追加した。Client IDとClient Secretを入力すると、SecretはSecret Storeだけに保存し、そのまま利用者認証へ遷移する。owner以外には運営者対応待ちを明示し、Agentを実行可能になるまで完成扱いにしない。
+
+### Builder Project / Workflow v2 / Production（2026-09-21）
+
+- Builder Projectを業務Agentから分離し、Run/Step lease、Capability Plan、Gap、Human Action、Discovery Source、Change Set、Validation Evidence、Releaseを組織別RLS下で永続化した。OpenAPI/MCPの契約ハッシュを固定し、変更後の仕様を同じ提案としてapplyできない。
+- 認証不要のOpenAPI/MCPは、Connector/Tool生成、Contract/Security/Smoke、Immutable Build、実Preview Run、生成Toolの成功イベント確認まで自動で進む。Connection検証またはOAuth code交換が成功すると、該当Human Actionを完了してBuilder Runを自動再開する。
+- Workflow v2はAgent/Tool/Condition/Approval/Transform/Wait/Compensate、明示遷移、決定的比較、再試行、補償、永続wait、承認後再開を実装した。旧Workflowは配列順実行のまま互換性を維持する。
+- Self-hostedはBuilderが顧客AWS、リージョン、IAM roleを固定したTerraform Plan証跡を作り、applyだけを`aws_admin_action`として停止する。署名付きRuntime登録が成功すると自動でHuman Actionを完了して再開する。Runtime heartbeatのTool CatalogはRuntime Connector/Tool Versionへ同期し、Control PlaneにSecret値を保存しない。
+- Production対象はPreview成功後に管理者承認を必須とし、再コンパイルせず同じBuild IDと構成ハッシュを昇格する。限定Production Runで期待Toolの成功まで検証し、失敗時は承認時に固定した直前DeploymentへRollbackする。完了後はBuild、Deployment health、Runtime、Connectionのdriftを定期検査し、不整合時はProjectを停止する。
+- ファクタリングデモへRuntime内PDF集計、Mockコンプライアンス、決定的な可/否/保留ルール、`idempotency_key`付き審査書き戻しを追加した。PDF fixtureの生本文は応答へ含めず、月別金額、名義一致、継続月数だけを返す。
+- 必要なファクタリングToolが揃うと、申込取得、Runtime内PDF集計、コンプライアンス確認、決定的ルール、条件分岐、人間承認、冪等書き戻しを持つWorkflow v2と可・否・保留のEval CaseをBuilder成果物として自動生成する。X公開が指定されている場合は、Human Actionで確定した`account_id`、結果と一般化理由コードだけの公開文、Workflow Run IDによる冪等投稿を同じWorkflowへ固定する。
+- `external_send`は入力元に関係なく実行直前の承認を暗黙に付与する。したがって、Xや外部SNSへの公開は、Builderが生成したManifestに明示ポリシーがなくても無人実行されない。
+- `publish_post`のHTTP受付成功だけではWorkflowを完了せず、保存したProvider Jobを`get_job`で追跡し、`succeeded`になったときだけ完了する。`failed`または`unknown`では二重投稿せず失敗として停止する。
+- 初回の業務ヒアリング中は、同じ能力について推測したConnector接続を重ねて表示しない。回答後の再計画で実際に選ばれたConnectionだけを案内する。実OpenAIの要件整理には90秒の上限を設け、Worker leaseを越えて無期限に占有しない。
+- 契約も既存Toolもない社内接続は、Repository、基点branch、生成先、安定入出力を型付きHuman Actionで取得し、専用branchと隔離workspaceを持つ`code_workspace` Change Setへ変換する。Capability PlanはLLMが社内データ源を落としても不足能力を決定的に補い、解決方法を`generate_code`として表示する。
+
+現在の検証境界:
+
+- 単体テスト、本番ビルド、DB migration、API結合テストでPreview→同一Build Production昇格、Workflow v2分岐/Wait/承認/再開、Runtime登録、Tool実行を確認済み。
+- 顧客AWSへの実Terraform apply、実顧客IdPでのHuman Login profile保存、Code Workspaceの実Codexコンテナ実行と外部Git providerへのPR作成は外部資格情報と管理者操作を伴うため、このローカル検証では実行していない。Runtimeジョブ発行、成功結果の反映、Git公開待ちへの遷移はAPI結合テストで確認済み。
 
 今回追加済み:
 
@@ -121,8 +205,8 @@ SDK（`openai` 7.x）の型を調べた結果（docs/reference/openai-agents-sdk
 
 | 対象 | 方法 | 結果 |
 |---|---|---|
-| 型・単体テスト | `yarn type-check` / `yarn test`（全ワークスペース） | 型検査成功、281 件すべて成功 |
-| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration`（PostgreSQL） | 29 件すべて成功 |
+| 型・単体テスト | `yarn type-check` / `yarn test`（全ワークスペース） | 型検査成功、332 件すべて成功 |
+| 組織の分離・実行の流れ | `yarn workspace @agent-studio/api test:integration --run --maxWorkers=1 --minWorkers=1`（PostgreSQL） | 49 件すべて成功。Builderの質問・回答・自動Discovery・公開/Human Login Browser Flow・Browser Runtime自動再開・複数Connector固定・修正後再開、OpenAPI / MCP生成 → Preview Run、GitHub App branch/PR/merge/package/Tool登録、Workflow v2、承認付きX投稿とProvider Job成功待ち、同一BuildのProduction昇格を含む |
 | ビルド | `yarn build`、`docker build`（api / web / runtime の全イメージ） | 成功 |
 | Terraform | `fmt` / `validate`（5 つのルートモジュール）、モックのプロバイダーでの apply | 成功 |
 | ワークフロー | actionlint | 指摘なし |

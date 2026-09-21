@@ -25,12 +25,27 @@
 | POST | `/policies` | `createPolicySchema` | `PolicyDto` | admin |
 | PATCH | `/policies/:id` | `updatePolicySchema` | `PolicyDto` | admin |
 | DELETE | `/policies/:id` | — | 204 | admin |
+| POST | `/agent-projects` | `createAgentProjectSchema` | `CreateAgentProjectResultDto` | builder |
+| GET | `/builder-projects` | — | `BuilderProjectDto[]` | viewer |
+| POST | `/builder-projects` | `createBuilderProjectSchema` | `BuilderProjectDto` | builder（移行期間の互換API） |
+| GET | `/builder-projects/:id` | — | `BuilderProjectDto` | viewer |
+| POST | `/builder-projects/:id/agent` | — | `BuilderProjectDto` | builder（旧レコードのAgent backfill） |
+| POST | `/builder-projects/:id/resume` | — | `BuilderProjectDto` | builder |
+| POST | `/builder-projects/:id/cancel` | — | `BuilderProjectDto` | builder |
+| POST | `/builder-projects/:id/openapi/inspect` | `builderOpenApiInputSchema` | `BuilderOpenApiProposalDto` | builder |
+| POST | `/builder-projects/:id/openapi/apply` | `builderOpenApiInputSchema` | `ApplyBuilderOpenApiResultDto` | builder |
+| POST | `/builder-projects/:id/mcp/inspect` | `builderMcpInputSchema` | `BuilderMcpProposalDto` | builder |
+| POST | `/builder-projects/:id/mcp/apply` | `builderMcpInputSchema` | `ApplyBuilderMcpResultDto` | builder |
+| POST | `/builder-projects/:id/self-hosted/plan` | `createRuntimeSchema` | `BuilderProjectDto` | admin |
+| POST | `/builder-projects/:id/production/approve` | — | `BuilderProjectDto` | admin |
+| POST | `/builder-human-actions/:id/complete` | — | `BuilderProjectDto` | Human Actionの`assignee_role`以上 |
 | GET | `/tools` | — | `ToolDto[]` | viewer |
 | POST | `/tools` | `createToolInputSchema` | `ToolDto` | builder |
 | GET | `/tools/:id` | — | `ToolDto`（`versions` 付き） | viewer |
 | POST | `/tools/:id/versions` | `createToolVersionSchema` | `ToolVersionDto` | builder |
 | GET | `/connections` | — | `ConnectionDto[]` | viewer |
 | POST | `/connections` | `createConnectionSchema` | `ConnectionDto` | admin |
+| POST | `/connections/github-app` | `createGitHubAppConnectionSchema` | `ConnectionDto`（秘密鍵・Webhook secretを返さない） | admin |
 | PUT | `/connections/:id/secret` | `setConnectionSecretSchema` | 204 | admin（scope が studio / openai_vault のとき） |
 | DELETE | `/connections/:id` | — | 204 | admin |
 | GET | `/agents` | — | `AgentDto[]` | viewer |
@@ -38,6 +53,8 @@
 | POST | `/agents/generate` | `generateManifestSchema` | `GenerateManifestResultDto` | builder |
 | POST | `/agents/validate` | `createAgentSchema` | `ManifestValidationDto` | builder |
 | GET | `/agents/:id` | — | `AgentDto`（`versions` 付き） | viewer |
+| GET | `/agents/:id/project` | — | `AgentProjectDto`（`build_jobs` 付き） | viewer |
+| GET | `/agents/:id/build-jobs` | — | `BuilderProjectDto[]` | viewer |
 | POST | `/agents/:id/versions` | `createAgentVersionSchema` | `AgentVersionDto` | builder |
 | POST | `/agents/:id/versions/:version/publish` | — | `AgentVersionDto` | builder |
 | GET | `/agents/:id/eval-cases` | — | `EvalCaseDto[]` | viewer |
@@ -76,4 +93,12 @@
 | GET | `/audit-logs` | `?limit=&before=` | `AuditLogDto[]` | admin |
 | GET | `/usage` | `?month=YYYY-MM` | `UsageDto` | admin |
 
+GitHub App webhookは認証不要の`POST /webhooks/github`で受けるが、`X-Hub-Signature-256`、delivery ID、repository ID allowlistを必須とする。mergeイベントはProvider APIでPR head SHAとRequired Checksを再検証する。Preview配布イベントはmerge SHA、descriptor/contract hash、OCI digest、SBOM digestのattestationをConnection固定のEd25519公開鍵で検証し、dependency/Secret scanとprovenanceも検証する。
+
+Runtime向け`POST /runtime/v1/jobs/:id/git-credential`は、対象Runtimeへlease済みの`publish_builder_branch` Jobに限って1回だけ短期Installation tokenを返す。Tokenは永続化せず、Runtimeはstdin経由のaskpassで許可repositoryの`builder/*` branchだけへpushする。
+
 ヘルスチェック: `GET /health`（認証なし）。
+
+`BuilderProjectDto.releases`は、Builderが生成したAgent、Immutable Build、Preview Deployment、Preview Run、構成ハッシュとPreview受け入れ状態を返す。Projectの`completed`はPreview Runが終端になっただけでは成立せず、選択した読み取りToolの成功イベントと`outcome=succeeded`を確認した場合だけ設定する。
+
+MCPのinspectは公開HTTPSのStreamable HTTPサーバーに対する`tools/list`だけを実行し、入力Schemaと注釈を返す。applyは再Discoveryした契約ハッシュがinspect時と一致する場合だけConnector / Tool Versionを生成する。サーバー側の操作名は`provider_operation_name`として保持し、Studio内のTool名と分離してallowlistへ使用する。Secret値はどちらのBuilder APIも受け取らない。

@@ -17,3 +17,4 @@ export * from "./workflow.repository";
 export * from "./audit-log.repository";
 export * from "./usage.repository";
 export * from "./schedule.repository";
+export * from "./builder-project.repository";

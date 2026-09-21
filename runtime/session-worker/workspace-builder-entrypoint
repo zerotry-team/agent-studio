@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+  echo "[workspace-builder] $*" >&2
+}
+
+required=(
+  CODEX_API_KEY BUILDER_PROJECT_ID BUILDER_CHANGE_SET_ID BUILDER_CAPABILITY_TOPIC
+  BUILDER_REPOSITORY_URL BUILDER_BASE_BRANCH BUILDER_BRANCH BUILDER_ADAPTER_PATH BUILDER_INTERFACE_NOTES
+)
+for name in "${required[@]}"; do
+  if [[ -z "${!name:-}" ]]; then
+    log "必須の環境変数が設定されていません: $name"
+    exit 64
+  fi
+done
+
+workspace="/workspace"
+repo="$workspace/repo"
+events="/tmp/codex-events.jsonl"
+final_message="/tmp/final.txt"
+
+rm -rf "$repo"
+mkdir -p "$workspace"
+
+log "Repositoryを隔離workspaceへcloneします（project_id=${BUILDER_PROJECT_ID}、change_set_id=${BUILDER_CHANGE_SET_ID}）"
+git clone --depth 1 --branch "$BUILDER_BASE_BRANCH" "$BUILDER_REPOSITORY_URL" "$repo"
+cd "$repo"
+base_commit="$(git rev-parse HEAD)"
+git switch -c "$BUILDER_BRANCH"
+
+prompt="$(cat <<EOF
+あなたはAgent StudioのCode Agentです。この使い捨てコンテナ内のRepositoryだけを変更してください。
+
+目的:
+- capability: ${BUILDER_CAPABILITY_TOPIC}
+- 生成先: ${BUILDER_ADAPTER_PATH}
+- 安定化する入出力契約: ${BUILDER_INTERFACE_NOTES}
+
+必須条件:
+- 既存の構成・規約・テスト方式を先に調べ、最小差分で実装する。
+- 変更は生成先と、その実装に直接必要なテスト・設定に限定する。
+- Secret、認証情報、実在顧客データ、口座画像を作成・出力・commitしない。
+- 外部送信は行わない。git push、PR作成、Production変更を行わない。
+- 入力を業務用の安定したスキーマへ変換し、失敗を明示的な型またはエラーで返す。
+- Repositoryで利用できるtest、lint、typecheckのうち関連するものを実行する。
+- 失敗した検証を隠さない。検証が通るまで修正するか、解決不能なら変更を残さず失敗理由を返す。
+EOF
+)"
+
+log "Codexで実装と検証を開始します"
+printf '%s\n' "$prompt" | codex exec \
+  --dangerously-bypass-approvals-and-sandbox \
+  --ephemeral \
+  --ignore-user-config \
+  --json \
+  --output-last-message "$final_message" \
+  -C "$repo" - >"$events"
+
+git diff --check
+if [[ -z "$(git status --porcelain)" ]]; then
+  log "Code Agentが変更を生成しませんでした"
+  exit 65
+fi
+
+git config user.name "Agent Studio Builder"
+git config user.email "builder@agent-studio.invalid"
+git add -A
+git commit -m "build: generate ${BUILDER_CAPABILITY_TOPIC} adapter"
+
+BASE_COMMIT="$base_commit" CODEX_EVENTS="$events" node /usr/local/lib/workspace-result.mjs "$repo" /result/result.json
+log "Code Workspaceの非機微な証跡を作成しました"

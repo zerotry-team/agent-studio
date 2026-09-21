@@ -10,12 +10,13 @@ import { MemoryObjectStore } from "../infrastructure/storage/object-store.js";
 import { createLogger } from "../logger.js";
 import { WorkerScheduler } from "../worker/scheduler.js";
 import { StudioFunctionExecutor } from "../worker/studio-functions.js";
+import type { Deps } from "../application/deps.js";
 
 /**
  * 結合テスト用の環境。アプリ（Hono）と Worker を同じプロセスで動かし、OpenAI は擬似実装を使う。
  * DB は DATABASE_URL（アプリ用ロール）/ DIRECT_URL（所有者: テストデータの準備用）。
  */
-export function createHarness() {
+export function createHarness(overrides: Partial<Deps> = {}) {
   const env = loadEnv({
     ...process.env,
     NODE_ENV: "test",
@@ -33,7 +34,7 @@ export function createHarness() {
   const logger = createLogger(env.LOG_LEVEL, "test");
   const database = createDatabase(env);
   const objects = new MemoryObjectStore();
-  const deps = buildDeps(env, logger, database, { secrets: new MemorySecretStore(), objects });
+  const deps = buildDeps(env, logger, database, { secrets: new MemorySecretStore(), objects, ...overrides });
   const app = createApp(deps, buildServices(deps));
   const admin = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DIRECT_URL! }) });
 

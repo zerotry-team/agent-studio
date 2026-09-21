@@ -23,6 +23,8 @@ interface FakeSession {
   subscribers: Set<EventQueue>;
   items: AgentSessionItem[];
   functionTools: Set<string>;
+  /** Studio内server_label -> MCPサーバー側の操作名 */
+  mcpTools: Map<string, string>;
   turnSeq: number;
   pending: { turnId: string; callId: string; name: string } | null;
   metadata: Record<string, string>;
@@ -96,6 +98,11 @@ export class FakeAgentsApi implements AgentsApi {
     const functionTools = new Set(
       (params.agent?.tools ?? []).filter((t) => t.type === "function").map((t) => (t as { name: string }).name),
     );
+    const mcpTools = new Map<string, string>();
+    for (const raw of (params.agent?.tools ?? []).filter((tool) => tool.type === "mcp")) {
+      const tool = raw as { server_label: string; allowed_tools?: string[] };
+      for (const remoteName of tool.allowed_tools ?? []) mcpTools.set(tool.server_label, remoteName);
+    }
     const session: FakeSession = {
       id,
       environment,
@@ -104,6 +111,7 @@ export class FakeAgentsApi implements AgentsApi {
       subscribers: new Set(),
       items: [],
       functionTools,
+      mcpTools,
       turnSeq: 0,
       pending: null,
       metadata: params.metadata ?? {},
@@ -225,6 +233,27 @@ export class FakeAgentsApi implements AgentsApi {
       { type: "agent.session.turn.created", session_id: session.id, turn_id: turnId, turn: this.turn(session, turnId, "in_progress") },
     ];
 
+    const builderContract = /<builder-result\s+change-set="([0-9a-f-]{36})"\s+adapter-path="([^"]+)"\s*\/>/i.exec(text);
+    if (builderContract) {
+      const result = {
+        change_set_id: builderContract[1],
+        base_sha: "a".repeat(40),
+        commit_sha: "b".repeat(40),
+        diff_sha256: "c".repeat(64),
+        summary: "擬似Code AgentがAdapterと契約テストを生成しました",
+        changed_files: [`${builderContract[2]}/index.ts`, `${builderContract[2]}/index.test.ts`],
+        tests: [
+          { command: "yarn test", status: "passed", exit_code: 0 },
+          { command: "git diff --check", status: "passed", exit_code: 0 },
+        ],
+      };
+      session.artifacts.push({
+        id: `art_${randomUUID()}`,
+        path: "/workspace/outputs/builder-result.json",
+        data: Buffer.from(JSON.stringify(result)),
+      });
+    }
+
     if (text.includes("[[fail]]")) {
       session.status = "idle";
       events.push(
@@ -248,6 +277,29 @@ export class FakeAgentsApi implements AgentsApi {
         { type: "agent.session.requires_action", session: this.snapshot(session) },
       );
       this.emitLater(session, events);
+      return;
+    }
+    if (call && session.mcpTools.has(call[1]!)) {
+      const serverLabel = call[1]!;
+      const remoteName = session.mcpTools.get(serverLabel)!;
+      const args = call[2] ?? "{}";
+      const item = {
+        type: "mcp_call",
+        id: `mcp_${randomUUID()}`,
+        server_label: serverLabel,
+        name: remoteName,
+        arguments: args,
+        output: JSON.stringify({ ok: true, source: "fake-mcp", tool: remoteName }),
+        error: null,
+        status: "completed",
+        turn_id: turnId,
+      };
+      session.items.push(item as unknown as AgentSessionItem);
+      this.emitLater(session, [
+        ...events,
+        { type: "agent.session.turn.item.done", session_id: session.id, turn_id: turnId, output_index: 0, item },
+      ]);
+      this.finishTurn(session, turnId, `MCP操作 ${remoteName} の結果を確認しました`);
       return;
     }
 

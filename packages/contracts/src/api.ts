@@ -3,7 +3,7 @@ import { memberRoleSchema, slugSchema, stageSchema, toolNameSchema, type MemberR
 import type { AgentManifest } from "./manifest.js";
 import { policySchema, type Policy } from "./policy.js";
 import type { ApprovalStatus } from "./runtime-protocol.js";
-import type { ToolExecutionLocation, ToolRisk, ToolVersionSpec } from "./tools.js";
+import type { ToolExecutionLocation, ToolInputSchema, ToolRisk, ToolVersionSpec } from "./tools.js";
 import { staticHeaderNameSchema, toolVersionSpecSchema } from "./tools.js";
 
 /**
@@ -122,6 +122,8 @@ export type ConnectorAuthType = z.infer<typeof connectorAuthTypeSchema>;
 export const connectorOperationSchema = z
   .object({
     name: toolNameSchema,
+    /** MCPサーバーが公開する元の操作名。Studio内の安全なTool名と異なる場合だけ指定する。 */
+    provider_operation_name: z.string().trim().min(1).max(128).optional(),
     display_name: z.string().trim().min(1).max(100),
     description: z.string().trim().min(1).max(1000),
     method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
@@ -138,6 +140,8 @@ export const connectorOperationSchema = z
       })
       .loose()
       .default({ type: "object", properties: {}, additionalProperties: false }),
+    /** OpenAPIの成功レスポンスから抽出したJSON Schema。実行結果の契約検証に使う。 */
+    output_schema: z.unknown().optional(),
   })
   .strict();
 export type ConnectorOperationInput = z.input<typeof connectorOperationSchema>;
@@ -222,6 +226,7 @@ export type DiscoverMcpToolsInput = z.infer<typeof discoverMcpToolsSchema>;
 export interface DiscoveredMcpToolDto {
   name: string;
   description: string;
+  input_schema: ToolInputSchema;
   /** true: 読み取り専用 / false: 書き換えあり / null: サーバーが申告していない */
   read_only: boolean | null;
   /** true: 取り消せない操作だと申告している */
@@ -282,6 +287,48 @@ export const createConnectionSchema = z
   });
 export type CreateConnectionInput = z.infer<typeof createConnectionSchema>;
 
+export const githubAppPermissionsSchema = z.object({
+  /** 企業専用Integration Repositoryを自動作成する場合だけ使用する。 */
+  administration: z.literal("write").optional(),
+  contents: z.literal("write"),
+  pull_requests: z.literal("write"),
+  checks: z.literal("read"),
+  metadata: z.literal("read"),
+}).strict();
+
+/** GitHub Appの秘密値は書き込み専用で、Connection DTOへは一切返さない。 */
+export const createGitHubAppConnectionSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  app_id: z.string().regex(/^\d+$/).max(30),
+  private_key: z.string().min(100).max(20000),
+  webhook_secret: z.string().min(16).max(2000),
+  installation_id: z.string().regex(/^\d+$/).max(30),
+  repository_id: z.string().regex(/^\d+$/).max(30),
+  owner: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/),
+  repository: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/),
+  /** 接続時にGitHub APIからdefault branchを取得する。未指定時の仮値はmain。 */
+  base_branch: z.string().regex(/^[A-Za-z0-9._/-]+$/).max(200).default("main"),
+  /** Adapter CIがattestationへ署名するEd25519公開鍵（秘密値ではない）。 */
+  package_signing_public_key: z.string().includes("BEGIN PUBLIC KEY").min(80).max(10000),
+  permissions: githubAppPermissionsSchema.default({ administration: "write", contents: "write", pull_requests: "write", checks: "read", metadata: "read" }),
+}).strict();
+export type CreateGitHubAppConnectionInput = z.input<typeof createGitHubAppConnectionSchema>;
+
+export interface GitHubAppConnectionMetadata {
+  provider: "github_app";
+  app_id: string;
+  installation_id: string;
+  repository_id: string;
+  owner: string;
+  repository: string;
+  base_branch: string;
+  repository_url: string;
+  /** Agent Studio本体と企業専用Toolの保存先を混同しない。 */
+  repository_purpose?: "agent_studio_core" | "organization_integrations";
+  package_signing_public_key: string;
+  permissions: z.infer<typeof githubAppPermissionsSchema>;
+}
+
 /** 認証情報の値を設定する（書き込み専用。読み出す API はない） */
 export const setConnectionSecretSchema = z
   .object({
@@ -324,6 +371,7 @@ export interface ConnectionDto {
   runtime_id: string | null;
   runtime_secret_name: string | null;
   header_name: string | null;
+  metadata: Record<string, unknown>;
   has_secret: boolean;
   status: "connected" | "expired" | "revoked" | "error";
   last_validated_at: string | null;
@@ -391,6 +439,10 @@ export interface AgentDto {
   browser_allowed_domains: string[];
   latest_version: number;
   published_version: number | null;
+  /** 最新の作成Job。Agent一覧では内部Jobを展開せず状態だけを見せる。 */
+  builder_project_id: string | null;
+  builder_status: BuilderProjectStatus | null;
+  builder_error: string | null;
   created_at: string;
   updated_at: string;
   versions?: AgentVersionDto[];
@@ -422,6 +474,25 @@ export interface CapabilityVariableDto {
   example: string | null;
   required: boolean;
 }
+export type CapabilityFulfillmentMode =
+  | "model"
+  | "reuse"
+  | "configure"
+  | "shared_tool"
+  | "organization_tool";
+
+/**
+ * 利用者の目的を実行可能にするため、Builderがどこで能力を用意するか。
+ * 実装方式（OpenAPI/MCP/コード）は内部詳細であり、通常画面では mode を説明に使う。
+ */
+export interface CapabilityFulfillmentDto {
+  mode: CapabilityFulfillmentMode;
+  owner: "model" | "agent_studio" | "organization";
+  execution_location: "model" | "studio" | "runtime";
+  reason: string;
+  /** shared_toolをmainへmergeした後、利用可能通知までの運用目標。保証時間ではない。 */
+  availability_target_minutes: number | null;
+}
 export interface CapabilityRequirementDto {
   requirement: string;
   state: CapabilityState;
@@ -432,6 +503,8 @@ export interface CapabilityRequirementDto {
   reason: string;
   /** この能力を使うために利用者が入力する値。能力に紐づかない設定値は作らない。 */
   variables: CapabilityVariableDto[];
+  /** 旧レコードとの互換性のためoptional。Builder再計画時に必ず付与する。 */
+  fulfillment?: CapabilityFulfillmentDto;
 }
 export interface CapabilityResolutionDto {
   requirements: CapabilityRequirementDto[];
@@ -461,7 +534,9 @@ export interface GenerateManifestResultDto {
   resolution: CapabilityResolutionDto;
 }
 
-export const createAgentProjectSchema = generateManifestSchema;
+export const createAgentProjectSchema = generateManifestSchema.extend({
+  target: z.enum(["preview", "production"]).default("preview"),
+}).strict();
 export type CreateAgentProjectInput = z.infer<typeof createAgentProjectSchema>;
 
 export const linkAgentConnectionSchema = z
@@ -508,6 +583,7 @@ export interface AgentBuildDto {
 
 export interface AgentProjectDto {
   agent: AgentDto;
+  build_jobs: BuilderProjectDto[];
   connection_links: AgentConnectionLinkDto[];
   environments: AgentEnvironmentConfigDto[];
   builds: AgentBuildDto[];
@@ -735,6 +811,8 @@ export interface RunDto {
     status: "pending" | "processing" | "succeeded" | "failed" | "unknown";
     attempts: number;
     last_checked_at: string | null;
+    provider_post_id: string | null;
+    permalink: string | null;
   }>;
   events?: RunEventDto[];
 }
@@ -770,8 +848,319 @@ export interface ApprovalDto {
 }
 
 // ---------------------------------------------------------------------------
+// Builder Agent（作成作業。日常業務を実行する Agent とは分離）
+// ---------------------------------------------------------------------------
+export const builderProjectStatusSchema = z.enum([
+  "draft",
+  "analyzing",
+  "discovering",
+  "planning",
+  "waiting_human_action",
+  "implementing",
+  "validating",
+  "previewing",
+  "ready_for_production",
+  "production_pending_approval",
+  "completed",
+  "blocked",
+  "failed",
+  "cancelled",
+]);
+export type BuilderProjectStatus = z.infer<typeof builderProjectStatusSchema>;
+export const builderTargetSchema = z.enum(["preview", "production"]);
+export type BuilderTarget = z.infer<typeof builderTargetSchema>;
+
+export const createBuilderProjectSchema = z
+  .object({
+    request: z.string().trim().min(20).max(20_000),
+    target: builderTargetSchema.default("preview"),
+  })
+  .strict();
+export type CreateBuilderProjectInput = z.input<typeof createBuilderProjectSchema>;
+
+export const builderOpenApiInputSchema = z
+  .object({
+    document: z.record(z.string(), z.unknown()),
+    source_url: z.url().refine((url) => url.startsWith("https://"), "https の URL を指定してください").optional(),
+    connector_key: slugSchema.optional(),
+    connector_name: z.string().trim().min(1).max(100).optional(),
+    selected_operation_ids: z.array(z.string().trim().min(1).max(300)).max(100).optional(),
+  })
+  .strict();
+export type BuilderOpenApiInput = z.infer<typeof builderOpenApiInputSchema>;
+
+export const builderMcpInputSchema = z
+  .object({
+    server_url: z.url().refine((url) => url.startsWith("https://"), "https の URL を指定してください"),
+    connector_key: slugSchema.optional(),
+    connector_name: z.string().trim().min(1).max(100).optional(),
+    auth_type: z.enum(["none", "static_bearer"]).default("none"),
+    selected_tool_names: z.array(z.string().trim().min(1).max(128)).max(100).optional(),
+    expected_content_hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  })
+  .strict();
+export type BuilderMcpInput = z.input<typeof builderMcpInputSchema>;
+
+export interface BuilderMcpOperationDto extends ConnectorOperationInput {
+  remote_name: string;
+  selected: boolean;
+  input_schema: ToolInputSchema;
+  read_only: boolean | null;
+  destructive: boolean;
+}
+
+export interface BuilderMcpProposalDto {
+  source: {
+    title: string;
+    spec_version: "MCP";
+    source_url: string;
+    content_hash: string;
+  };
+  connector: {
+    key: string;
+    name: string;
+    description: string;
+    adapter: "mcp";
+    base_url: string;
+    auth_type: "none" | "static_bearer";
+  };
+  authentication: {
+    kind: "none" | "bearer";
+    requires_human_action: boolean;
+  };
+  operations: BuilderMcpOperationDto[];
+  warnings: string[];
+}
+
+export interface BuilderOpenApiOperationDto extends ConnectorOperationInput {
+  operation_id: string;
+  selected: boolean;
+  method: NonNullable<ConnectorOperationInput["method"]>;
+  path: string;
+  input_schema: NonNullable<ConnectorOperationInput["input_schema"]>;
+}
+
+export interface BuilderOpenApiProposalDto {
+  source: {
+    title: string;
+    spec_version: string;
+    source_url: string | null;
+    content_hash: string;
+  };
+  connector: {
+    key: string;
+    name: string;
+    description: string;
+    adapter: "http_openapi";
+    base_url: string;
+    auth_type: ConnectorAuthType;
+    default_headers?: Record<string, string>;
+  };
+  authentication: {
+    kind: "none" | "header_api_key" | "bearer" | "oauth2";
+    header_name: string | null;
+    scopes: string[];
+    requires_human_action: boolean;
+  };
+  operations: BuilderOpenApiOperationDto[];
+  warnings: string[];
+}
+
+export const humanActionTypeSchema = z.enum([
+  "oauth_consent",
+  "enter_secret",
+  "provider_app_registration",
+  "human_login",
+  "aws_admin_action",
+  "business_rule_confirmation",
+  "repository_merge",
+  "adapter_delivery",
+  "production_approval",
+]);
+export type HumanActionType = z.infer<typeof humanActionTypeSchema>;
+
+export const completeBuilderHumanActionSchema = z
+  .object({ answers: z.record(z.string(), z.string().trim().max(4000)).default({}) })
+  .strict();
+export type CompleteBuilderHumanActionInput = z.input<typeof completeBuilderHumanActionSchema>;
+
+export interface BuilderStepDto {
+  id: string;
+  kind: string;
+  status: "pending" | "running" | "completed" | "failed" | "skipped";
+  attempts: number;
+  error_class: string | null;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface BuilderRunDto {
+  id: string;
+  attempt: number;
+  status: "queued" | "running" | "waiting_human_action" | "completed" | "failed" | "cancelled";
+  correlation_id: string;
+  error_class: string | null;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  steps: BuilderStepDto[];
+}
+
+export interface CapabilityGapDto {
+  id: string;
+  requirement: string;
+  gap_type: "missing" | "ambiguous" | "needs_connection" | "unsupported";
+  resolution_strategy: "reuse" | "configure" | "generate_declarative" | "generate_code" | "browser" | "unsupported";
+  status: "open" | "resolved" | "dismissed";
+  detail: unknown;
+}
+
+export interface CapabilityPlanDto {
+  id: string;
+  version: number;
+  requirements: CapabilityRequirementDto[];
+  graph: {
+    nodes: Array<{
+      id: string;
+      label: string;
+      state: CapabilityState;
+      strategy: CapabilityGapDto["resolution_strategy"];
+      fulfillment?: CapabilityFulfillmentDto;
+    }>;
+    edges: Array<{ from: string; to: string }>;
+  };
+  risks: string[];
+  execution_locations: string[];
+  created_at: string;
+}
+
+export interface HumanActionDto {
+  id: string;
+  type: HumanActionType;
+  title: string;
+  reason: string;
+  assignee_role: MemberRole;
+  fields: Array<{
+    name: string;
+    label: string;
+    secret: boolean;
+    required?: boolean;
+    placeholder?: string;
+    description?: string;
+    options?: Array<{ value: string; label: string }>;
+  }>;
+  instructions: string[];
+  resume_condition: unknown;
+  response: Record<string, string> | null;
+  status: "pending" | "completed" | "expired" | "rejected";
+  completed_at: string | null;
+  expires_at: string | null;
+  created_at: string;
+}
+
+export interface BuilderDiscoverySourceDto {
+  id: string;
+  kind: string;
+  title: string;
+  spec_version: string | null;
+  source_url: string | null;
+  content_hash: string;
+  metadata: unknown;
+  created_at: string;
+}
+
+export interface BuilderChangeSetDto {
+  id: string;
+  kind: string;
+  status: "planned" | "applied" | "pr_open" | "merged" | "failed" | "rejected";
+  summary: string;
+  risk: ToolRisk;
+  artifacts: Array<{ type: string; id: string; name: string; version?: number }>;
+  source_hash: string | null;
+  created_at: string;
+}
+
+export interface BuilderValidationRunDto {
+  id: string;
+  suite: "schema" | "contract" | "security" | "smoke" | "preview" | "ci" | "eval" | "drift" | "code_workspace";
+  environment: "builder" | "preview" | "production";
+  status: "running" | "passed" | "failed" | "blocked";
+  evidence: unknown;
+  error_class: string | null;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface BuilderReleaseDto {
+  id: string;
+  status: "preview_running" | "preview_succeeded" | "preview_failed" | "preview_cancelled" | "production_pending_approval" | "production_running" | "production_succeeded" | "production_failed" | "rolled_back";
+  agent_id: string;
+  build_id: string;
+  preview_deployment_id: string;
+  preview_run_id: string | null;
+  production_deployment_id: string | null;
+  production_run_id: string | null;
+  rollback_target_deployment_id: string | null;
+  config_hash: string;
+  required_tools: string[];
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface BuilderProjectDto {
+  id: string;
+  agent_id: string | null;
+  request: string;
+  target: BuilderTarget;
+  status: BuilderProjectStatus;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  latest_plan: CapabilityPlanDto | null;
+  gaps: CapabilityGapDto[];
+  human_actions: HumanActionDto[];
+  discovery_sources: BuilderDiscoverySourceDto[];
+  change_sets: BuilderChangeSetDto[];
+  validation_runs: BuilderValidationRunDto[];
+  releases: BuilderReleaseDto[];
+  runs: BuilderRunDto[];
+}
+
+export interface ApplyBuilderOpenApiResultDto {
+  project: BuilderProjectDto;
+  connector: ConnectorDto;
+}
+
+export interface ApplyBuilderMcpResultDto {
+  project: BuilderProjectDto;
+  connector: ConnectorDto;
+}
+
+// ---------------------------------------------------------------------------
 // Workflow（WF）
 // ---------------------------------------------------------------------------
+const workflowTransitionSchema = {
+  next: slugSchema.optional(),
+  retries: z.number().int().min(0).max(5).optional(),
+  compensate: slugSchema.optional(),
+};
+
+export const workflowConditionSchema = z
+  .object({
+    source: z.enum(["input", "step"]),
+    step_key: slugSchema.optional(),
+    path: z.string().trim().max(500).default(""),
+    operator: z.enum(["eq", "ne", "lt", "lte", "gt", "gte", "exists", "in"]),
+    value: z.unknown().optional(),
+  })
+  .strict()
+  .refine((value) => value.source !== "step" || Boolean(value.step_key), { message: "stepを参照するときはstep_keyが必要です" });
+export type WorkflowCondition = z.infer<typeof workflowConditionSchema>;
+
 export const workflowStepSchema = z.discriminatedUnion("type", [
   z
     .object({
@@ -781,6 +1170,29 @@ export const workflowStepSchema = z.discriminatedUnion("type", [
       deployment_id: z.uuid(),
       /** {{input}} や {{steps.<key>.output}} を埋め込める */
       input_template: z.string().min(1).max(20000),
+      ...workflowTransitionSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("tool"),
+      key: slugSchema,
+      name: z.string().trim().min(1).max(100),
+      deployment_id: z.uuid(),
+      tool_name: toolNameSchema,
+      /** JSON引数。テンプレート展開後もJSON objectでなければ実行しない。 */
+      arguments_template: z.string().min(2).max(20000),
+      ...workflowTransitionSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("condition"),
+      key: slugSchema,
+      name: z.string().trim().min(1).max(100),
+      condition: workflowConditionSchema,
+      if_true: slugSchema,
+      if_false: slugSchema,
     })
     .strict(),
   z
@@ -789,16 +1201,65 @@ export const workflowStepSchema = z.discriminatedUnion("type", [
       key: slugSchema,
       name: z.string().trim().min(1).max(100),
       message: z.string().min(1).max(2000),
+      next: slugSchema.optional(),
+      on_denied: slugSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("transform"),
+      key: slugSchema,
+      name: z.string().trim().min(1).max(100),
+      output_template: z.string().min(1).max(20000),
+      next: slugSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("wait"),
+      key: slugSchema,
+      name: z.string().trim().min(1).max(100),
+      seconds: z.number().int().min(0).max(604800),
+      next: slugSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("compensate"),
+      key: slugSchema,
+      name: z.string().trim().min(1).max(100),
+      deployment_id: z.uuid(),
+      input_template: z.string().min(1).max(20000),
+      next: slugSchema.optional(),
+      retries: z.number().int().min(0).max(5).optional(),
     })
     .strict(),
 ]);
 export type WorkflowStep = z.infer<typeof workflowStepSchema>;
 
 export const workflowDefinitionSchema = z
-  .object({ steps: z.array(workflowStepSchema).min(1).max(20) })
+  .object({ version: z.literal(2).optional(), start: slugSchema.optional(), steps: z.array(workflowStepSchema).min(1).max(50) })
   .strict()
-  .refine((d) => new Set(d.steps.map((s) => s.key)).size === d.steps.length, {
-    message: "ステップのキーが重複しています",
+  .superRefine((definition, context) => {
+    const keys = definition.steps.map((step) => step.key);
+    if (new Set(keys).size !== keys.length) {
+      context.addIssue({ code: "custom", message: "ステップのキーが重複しています", path: ["steps"] });
+      return;
+    }
+    const keySet = new Set(keys);
+    const start = definition.start ?? keys[0];
+    if (start && !keySet.has(start)) context.addIssue({ code: "custom", message: "開始ステップが見つかりません", path: ["start"] });
+    const refs = (step: z.infer<typeof workflowStepSchema>): string[] => {
+      if (step.type === "condition") return [step.if_true, step.if_false];
+      if (step.type === "approval") return [step.next, step.on_denied].filter((value): value is string => Boolean(value));
+      return [step.next, "compensate" in step ? step.compensate : undefined].filter((value): value is string => Boolean(value));
+    };
+    definition.steps.forEach((step, index) => {
+      for (const ref of refs(step)) if (!keySet.has(ref)) context.addIssue({ code: "custom", message: `遷移先 ${ref} が見つかりません`, path: ["steps", index] });
+      if (step.type === "condition" && step.condition.source === "step" && step.condition.step_key && !keySet.has(step.condition.step_key)) {
+        context.addIssue({ code: "custom", message: `参照ステップ ${step.condition.step_key} が見つかりません`, path: ["steps", index, "condition"] });
+      }
+    });
   });
 export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema>;
 
@@ -807,7 +1268,7 @@ export const createWorkflowSchema = z
   .strict();
 export type CreateWorkflowInput = z.infer<typeof createWorkflowSchema>;
 
-export const workflowRunStatusSchema = z.enum(["running", "waiting_approval", "completed", "failed", "cancelled"]);
+export const workflowRunStatusSchema = z.enum(["running", "waiting_approval", "waiting_external", "completed", "failed", "cancelled"]);
 export type WorkflowRunStatus = z.infer<typeof workflowRunStatusSchema>;
 
 export interface WorkflowDto {
@@ -827,11 +1288,13 @@ export interface WorkflowRunDto {
   current_step: string | null;
   steps: {
     key: string;
-    type: "agent" | "approval";
+    type: WorkflowStep["type"];
     status: "pending" | "running" | "waiting_approval" | "completed" | "failed" | "skipped";
     run_id: string | null;
     approval_id: string | null;
     output: string | null;
+    attempts: number;
+    resume_at: string | null;
   }[];
   created_at: string;
   finished_at: string | null;

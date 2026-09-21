@@ -78,6 +78,31 @@ export class SystemDb {
       SELECT * FROM system_claim_runs(${owner}, ${leaseSeconds}::integer, ${limit}::integer)`;
   }
 
+  claimBuilderRuns(owner: string, leaseSeconds: number, limit: number) {
+    return this.prisma.$queryRaw<{ builder_run_id: string; organization_id: string }[]>`
+      SELECT * FROM system_claim_builder_runs(${owner}, ${leaseSeconds}::integer, ${limit}::integer)`;
+  }
+
+  claimBuilderWorkspaceSessions(owner: string, leaseSeconds: number, limit: number) {
+    return this.prisma.$queryRaw<{ builder_session_id: string; organization_id: string }[]>`
+      SELECT * FROM system_claim_builder_workspace_sessions(${owner}, ${leaseSeconds}::integer, ${limit}::integer)`;
+  }
+
+  listActiveBuilderPreviews(limit: number) {
+    return this.prisma.$queryRaw<{ builder_release_id: string; organization_id: string }[]>`
+      SELECT * FROM system_list_active_builder_previews(${limit}::integer)`;
+  }
+
+  listActiveBuilderProductionRuns(limit: number) {
+    return this.prisma.$queryRaw<{ builder_release_id: string; organization_id: string }[]>`
+      SELECT * FROM system_list_active_builder_production_runs(${limit}::integer)`;
+  }
+
+  listBuilderReleasesForDrift(limit: number) {
+    return this.prisma.$queryRaw<{ builder_release_id: string; organization_id: string }[]>`
+      SELECT * FROM system_list_builder_releases_for_drift(${limit}::integer)`;
+  }
+
   expireApprovals() {
     return this.prisma.$queryRaw<
       { approval_id: string; organization_id: string; run_id: string | null; workflow_run_id: string | null }[]
@@ -114,6 +139,11 @@ export class SystemDb {
   listExternalJobs(limit: number) {
     return this.prisma.$queryRaw<{ job_id: string; organization_id: string }[]>`
       SELECT * FROM system_list_external_jobs(${limit}::integer)`;
+  }
+
+  listGitHubConnections(repositoryId: string) {
+    return this.prisma.$queryRaw<{ connection_id: string; organization_id: string }[]>`
+      SELECT * FROM system_list_github_connections(${repositoryId})`;
   }
 
   claimDueSchedules(leaseSeconds: number, limit: number) {

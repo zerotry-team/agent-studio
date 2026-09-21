@@ -16,6 +16,7 @@ export type Capability =
   | "run.start" // 実行・追加の指示・中止
   | "workflow.run"
   | "agent.edit" // 作成・生成・検証・新しいバージョン・公開
+  | "builder.edit"
   | "eval.edit" // テストケースの追加・削除・テストの実行
   | "workflow.edit"
   | "tool.edit"
@@ -39,6 +40,7 @@ const MIN_ROLE: Partial<Record<Capability, MemberRole>> = {
   "run.start": "operator",
   "workflow.run": "operator",
   "agent.edit": "builder",
+  "builder.edit": "builder",
   "eval.edit": "builder",
   "workflow.edit": "builder",
   "tool.edit": "builder",

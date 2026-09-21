@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
+import type { Env } from "../env.js";
 import type { CompiledFunctionTool } from "../domain/manifest-compiler.js";
 import type { TenantDb } from "../infrastructure/db/tenant-db.js";
 import { assertPublicUrl, isPrivateAddress } from "../infrastructure/http/public-url.js";
 import type { SecretStore } from "../infrastructure/secrets/secret-store.js";
 
 const TIMEOUT_MS = 15_000;
+const IMAGE_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT = 20_000;
+const MAX_SOCIAL_MEDIA_BYTES = 3 * 1024 * 1024;
 
 const ZENN_TITLE_MAX = 70;
 const ZENN_BODY_MAX = 100_000;
@@ -72,6 +75,19 @@ export function buildIdempotencyKey(runId: string, toolName: string, logicalId: 
   return createHash("sha256").update(`${runId}:${toolName}:${logicalId}`).digest("hex");
 }
 
+const PUBLIC_FACTORING_POST = /^匿名審査ID=ANON-[A-Z0-9]{8,32}; 結果=(approve_candidate|hold); 理由=[A-Z_]+(?:,[A-Z_]+)*; 検証用投稿$/;
+
+/** Social Routerへ渡す前の最終データ境界。可候補/保留の固定形式以外は承認済みでも拒否する。 */
+export function validateAnonymousXPost(args: Record<string, unknown>): void {
+  if (typeof args.account_id !== "string" || !args.account_id.trim()) throw new Error("X投稿先アカウントがありません");
+  if (typeof args.text !== "string" || !PUBLIC_FACTORING_POST.test(args.text)) {
+    throw new Error("X投稿本文が匿名化済みファクタリング公開payload契約に一致しません");
+  }
+  if (/\d{6,}|https?:\/\/|@/.test(args.text)) throw new Error("X投稿本文に公開禁止情報の可能性があります");
+  const allowed = new Set(["account_id", "text", "logical_post_id"]);
+  if (Object.keys(args).some((key) => !allowed.has(key))) throw new Error("X投稿payloadに許可されていない項目があります");
+}
+
 /** 内部ネットワークへのリクエスト（SSRF）を防ぐ。Control Plane の VPC やメタデータに届かないようにする */
 export { assertPublicUrl, isPrivateAddress };
 
@@ -80,6 +96,7 @@ export class StudioFunctionExecutor {
   constructor(
     private readonly db: TenantDb,
     private readonly secrets: SecretStore,
+    private readonly env?: Pick<Env, "NODE_ENV" | "OPENAI_API_KEY">,
   ) {}
 
   async execute(
@@ -93,10 +110,18 @@ export class StudioFunctionExecutor {
         return this.httpWebhook(organizationId, tool, args);
       case "http_api":
         if (!context) throw new Error("実行コンテキストがありません");
+        // ファクタリング用の固定公開payloadだけに追加制約を適用する。
+        // 汎用のpublish_postまで同じ形式に限定すると、通常のSNS投稿が実行不能になる。
+        if (tool.name === "publish_post" && typeof args.text === "string" && args.text.startsWith("匿名審査ID=")) {
+          validateAnonymousXPost(args);
+        }
         return this.httpApi(organizationId, tool, args, context);
       case "zenn_github_publish":
         if (!context) throw new Error("実行コンテキストがありません");
         return this.zennGithubPublish(organizationId, tool, args, context);
+      case "openai_image_to_social_media":
+        if (!context) throw new Error("実行コンテキストがありません");
+        return this.openAiImageToSocialMedia(organizationId, tool, args, context);
     }
   }
 
@@ -104,7 +129,7 @@ export class StudioFunctionExecutor {
     organizationId: string,
     tool: CompiledFunctionTool,
     context: { agentId: string; stage: "staging" | "production"; runId: string },
-  ): Promise<{ connectionId: string; value: string }> {
+  ): Promise<{ connectionId: string; value: string; headerName: string }> {
     if (!tool.connector_id) throw new Error("連携サービスの設定が不完全です");
     const link = await this.db.org(organizationId, (tx) =>
       tx.agent_connection_links.findFirst({
@@ -124,7 +149,126 @@ export class StudioFunctionExecutor {
     }
     const value = await this.secrets.get(link.connection.secret_locator);
     if (!value) throw new Error("Connectionの認証情報を読み込めませんでした");
-    return { connectionId: link.connection.id, value };
+    return { connectionId: link.connection.id, value, headerName: link.connection.header_name ?? "Authorization" };
+  }
+
+  /**
+   * 組織のOpenAI Projectで画像を生成し、同じAgentに許可されたSocial Routerへ直接保存する。
+   * base64はDB・ログ・モデル出力へ残さず、後続のpublish_postへ渡せるmedia_idだけを返す。
+   */
+  private async openAiImageToSocialMedia(
+    organizationId: string,
+    tool: CompiledFunctionTool,
+    args: Record<string, unknown>,
+    context: { agentId: string; stage: "staging" | "production"; runId: string },
+  ): Promise<string> {
+    if (tool.spec.handler !== "openai_image_to_social_media" || !tool.connector_id) {
+      throw new Error("画像生成連携の設定が不完全です");
+    }
+    const spec = tool.spec;
+    const prompt = requiredText(args.prompt, "画像の説明", 8_000);
+    const settings = await this.db.org(organizationId, (tx) =>
+      tx.organization_openai_settings.findUnique({ where: { organization_id: organizationId } }),
+    );
+    let openAiKey = settings?.app_key_secret_arn ? await this.secrets.get(settings.app_key_secret_arn) : null;
+    if (!openAiKey && this.env?.NODE_ENV !== "production") openAiKey = this.env?.OPENAI_API_KEY ?? null;
+    if (!openAiKey) throw new Error("OpenAIの接続が未設定です。設定から接続してください");
+
+    const openAiHeaders: Record<string, string> = {
+      authorization: `Bearer ${openAiKey}`,
+      "content-type": "application/json",
+      "user-agent": "agent-studio-image-tool",
+    };
+    if (settings?.openai_project_id) openAiHeaders["openai-project"] = settings.openai_project_id;
+    const imageResponse = await fetch("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers: openAiHeaders,
+      body: JSON.stringify({
+        model: spec.model,
+        prompt,
+        size: "1024x1024",
+        quality: "medium",
+        output_format: "png",
+      }),
+      redirect: "error",
+      signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS),
+    });
+    const imagePayload = (await imageResponse.json().catch(() => null)) as {
+      data?: Array<{ b64_json?: unknown; revised_prompt?: unknown }>;
+      error?: { message?: unknown };
+    } | null;
+    const imageResult = imagePayload?.data?.[0];
+    const base64 = typeof imageResult?.b64_json === "string" ? imageResult.b64_json : null;
+    if (!imageResponse.ok || !base64) {
+      const detail = typeof imagePayload?.error?.message === "string" ? imagePayload.error.message.slice(0, 500) : "画像データがありません";
+      throw new Error(`OpenAIで画像を生成できませんでした（HTTP ${imageResponse.status}）: ${detail}`);
+    }
+    const bytes = Buffer.from(base64, "base64");
+    if (bytes.byteLength > MAX_SOCIAL_MEDIA_BYTES) throw new Error("生成画像がSocial Routerの上限を超えました");
+
+    const [connector, secret] = await Promise.all([
+      this.db.org(organizationId, (tx) => tx.connectors.findFirst({ where: { organization_id: organizationId, id: tool.connector_id! } })),
+      this.linkedSecret(organizationId, tool, context),
+    ]);
+    if (!connector?.base_url) throw new Error("Social Router連携サービスが見つかりません");
+    const mediaUrl = await assertPublicUrl(`${connector.base_url.replace(/\/$/, "")}/v1/media`);
+    const authHeader = secret.headerName.toLowerCase();
+    const mediaHeaders: Record<string, string> = {
+      accept: "application/json",
+      "content-type": "application/json",
+      "user-agent": "agent-studio-image-tool",
+      [authHeader]: authHeader === "authorization" && !/^\S+\s/.test(secret.value) ? `Bearer ${secret.value}` : secret.value,
+      "idempotency-key": buildIdempotencyKey(context.runId, tool.name, "generated-image"),
+    };
+    const mediaResponse = await fetch(mediaUrl, {
+      method: "POST",
+      headers: mediaHeaders,
+      body: JSON.stringify({ content_base64: base64, mime_type: "image/png", filename: `${context.runId}.png` }),
+      redirect: "error",
+      signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS),
+    });
+    const mediaText = (await mediaResponse.text()).slice(0, MAX_OUTPUT);
+    const mediaPayload: { data?: { id?: unknown }; id?: unknown } = (() => {
+      try {
+        return JSON.parse(mediaText) as { data?: { id?: unknown }; id?: unknown };
+      } catch {
+        return {};
+      }
+    })();
+    const mediaId = typeof mediaPayload?.data?.id === "string"
+      ? mediaPayload.data.id
+      : typeof mediaPayload?.id === "string" ? mediaPayload.id : null;
+    await this.db.org(organizationId, (tx) =>
+      tx.audit_logs.create({
+        data: {
+          organization_id: organizationId,
+          actor_type: "system",
+          actor_id: context.runId,
+          action: "credential.use",
+          target_type: "connection",
+          target_id: secret.connectionId,
+          result: mediaResponse.ok && mediaId ? "success" : "failure",
+          detail: {
+            connector_id: tool.connector_id,
+            tool: tool.name,
+            stage: context.stage,
+            status: mediaResponse.status,
+            provider: "openai_image_generation",
+            model: spec.model,
+            bytes: bytes.byteLength,
+          },
+        },
+      }),
+    );
+    if (!mediaResponse.ok || !mediaId) {
+      throw new Error(`生成画像をSocial Routerへ保存できませんでした（HTTP ${mediaResponse.status}）: ${mediaText.slice(0, 500)}`);
+    }
+    return JSON.stringify({
+      media_id: mediaId,
+      mime_type: "image/png",
+      bytes: bytes.byteLength,
+      ...(typeof imageResult?.revised_prompt === "string" ? { revised_prompt: imageResult.revised_prompt } : {}),
+    });
   }
 
   private async zennGithubPublish(
@@ -206,21 +350,27 @@ export class StudioFunctionExecutor {
     context: { agentId: string; stage: "staging" | "production"; runId: string },
   ): Promise<string> {
     if (tool.spec.handler !== "http_api" || !tool.connector_id) throw new Error("連携サービスの設定が不完全です");
-    const link = await this.db.org(organizationId, (tx) =>
-      tx.agent_connection_links.findFirst({
+    const access = await this.db.org(organizationId, async (tx) => ({
+      connector: await tx.connectors.findFirst({ where: { organization_id: organizationId, id: tool.connector_id! } }),
+      link: await tx.agent_connection_links.findFirst({
         where: {
           organization_id: organizationId,
           agent_id: context.agentId,
           connector_id: tool.connector_id!,
           stage: context.stage,
         },
-        include: { connection: true, connector: true },
+        include: { connection: true },
       }),
-    );
-    if (!link) throw new Error(`${context.stage === "staging" ? "Preview" : "Production"}のConnectionが許可されていません`);
-    if (!(link.allowed_capabilities as string[]).includes(tool.name)) throw new Error(`${tool.name} はこのAgentに許可されていません`);
-    if (link.connection.connector_id !== tool.connector_id || link.connection.status !== "connected") {
-      throw new Error("Connectionが利用できません");
+    }));
+    if (!access.connector) throw new Error("連携サービスが見つかりません");
+    const connector = access.connector;
+    const link = access.link;
+    if (connector.auth_type !== "none") {
+      if (!link) throw new Error(`${context.stage === "staging" ? "Preview" : "Production"}のConnectionが許可されていません`);
+      if (!(link.allowed_capabilities as string[]).includes(tool.name)) throw new Error(`${tool.name} はこのAgentに許可されていません`);
+      if (link.connection.connector_id !== tool.connector_id || link.connection.status !== "connected") {
+        throw new Error("Connectionが利用できません");
+      }
     }
 
     const prepared = prepareHttpArguments(tool.spec.method, args, tool.spec.idempotency_key_field);
@@ -235,8 +385,8 @@ export class StudioFunctionExecutor {
     const headers: Record<string, string> = { accept: "application/json", "user-agent": "agent-studio" };
     // API が必須とする固定ヘッダ。認証・本文の指定より先に入れ、あとから上書きされるようにする
     for (const [name, value] of Object.entries(tool.spec.headers ?? {})) headers[name.toLowerCase()] = value;
-    if (link.connector.auth_type !== "none") {
-      if (!link.connection.secret_locator) throw new Error("Connectionの認証情報が未設定です");
+    if (connector.auth_type !== "none") {
+      if (!link?.connection.secret_locator) throw new Error("Connectionの認証情報が未設定です");
       const secret = await this.secrets.get(link.connection.secret_locator);
       if (!secret) throw new Error("Connectionの認証情報を読み込めませんでした");
       const header = (link.connection.header_name ?? "Authorization").toLowerCase();
@@ -269,9 +419,9 @@ export class StudioFunctionExecutor {
           organization_id: organizationId,
           actor_type: "system",
           actor_id: context.runId,
-          action: "credential.use",
-          target_type: "connection",
-          target_id: link.connection.id,
+          action: link ? "credential.use" : "connector.call",
+          target_type: link ? "connection" : "connector",
+          target_id: link?.connection.id ?? connector.id,
           result: response.ok ? "success" : "failure",
           detail: { connector_id: tool.connector_id, tool: tool.name, stage: context.stage, status: response.status },
         },

@@ -25,6 +25,7 @@ import {
 import { conflict, notFound, preconditionFailed, validationError } from "../domain/errors.js";
 import { resolveCapabilities } from "../domain/capability-resolver.js";
 import type { ResolvedTool } from "../domain/manifest-compiler.js";
+import { OPENAI_BUILTIN_TOOL_NAMES, OPENAI_WEB_SEARCH_TOOL_NAME } from "../domain/manifest-compiler.js";
 import { recordAudit } from "../infrastructure/audit.js";
 import type { Tx } from "../infrastructure/db/tenant-db.js";
 import type { GeneratedAgent } from "../infrastructure/llm/manifest-generator.js";
@@ -36,11 +37,26 @@ import {
   toAgentDto,
   toAgentEnvironmentConfigDto,
   toAgentVersionDto,
+  toBuilderProjectDto,
   toDeploymentDto,
   toEvalCaseDto,
   toEvalRunDto,
 } from "./dto.js";
 import { createRunInTx } from "./runs.js";
+
+const builderProjectInclude = {
+  plans: { orderBy: { version: "desc" as const }, take: 1 },
+  gaps: { orderBy: { created_at: "asc" as const } },
+  human_actions: { orderBy: { created_at: "desc" as const } },
+  discovery_sources: { orderBy: { created_at: "desc" as const } },
+  change_sets: { orderBy: { created_at: "desc" as const } },
+  validation_runs: { orderBy: { created_at: "desc" as const } },
+  releases: { orderBy: { created_at: "desc" as const } },
+  runs: {
+    orderBy: { attempt: "desc" as const },
+    include: { steps: { orderBy: { created_at: "asc" as const } } },
+  },
+};
 
 /** Manifest のツール参照を、組織のツール（バージョン）に解決する */
 export async function resolveTools(
@@ -52,6 +68,24 @@ export async function resolveTools(
   const tools: ResolvedTool[] = [];
   for (const ref of refs) {
     const { name, version } = parseToolRef(ref);
+    if (name === OPENAI_WEB_SEARCH_TOOL_NAME) {
+      tools.push({
+        tool_id: "openai-builtin:web-search",
+        tool_version_id: "openai-builtin:web-search:v1",
+        name,
+        version: 1,
+        connector_id: null,
+        spec: {
+          execution_location: "openai_builtin",
+          description: "公開Webを検索し、最新情報と出典URLを取得します",
+          input_schema: { type: "object", properties: {} },
+          risk: "read",
+          reads_untrusted_content: true,
+          openai_builtin: { type: "web_search" },
+        },
+      });
+      continue;
+    }
     const tool = await tx.tools.findUnique({ where: { organization_id_name: { organization_id: organizationId, name } } });
     if (!tool) {
       errors.push(`ツール ${name} が登録されていません`);
@@ -69,11 +103,48 @@ export async function resolveTools(
       tool_version_id: v.id,
       name,
       version: v.version,
-      connector_id: tool.connector_id,
+      connector_id: tool.connector_id ?? null,
       spec: v.spec as unknown as ToolVersionSpec,
     });
   }
   return { tools, errors };
+}
+
+/**
+ * 手動でAgent VersionのManifestを更新した場合も、Buildが参照する能力解決結果を同期する。
+ * 既存要件の説明・Variable・Connection情報は保ち、追加Toolだけを独立要件として補う。
+ */
+export function reconcileVersionResolution(
+  current: CapabilityResolutionDto,
+  tools: ResolvedTool[],
+): CapabilityResolutionDto {
+  const selectedTools = [...new Set(tools.map((tool) => tool.name))];
+  const selected = new Set(selectedTools);
+  const requirements = current.requirements.flatMap((requirement) => {
+    const toolNames = requirement.tool_names.filter((name) => selected.has(name));
+    if (requirement.tool_names.length > 0 && toolNames.length === 0) return [];
+    return [{ ...requirement, tool_names: toolNames }];
+  });
+  const covered = new Set(requirements.flatMap((requirement) => requirement.tool_names));
+  for (const tool of tools) {
+    if (covered.has(tool.name)) continue;
+    requirements.push({
+      requirement: tool.name,
+      state: tool.connector_id ? "needs_connection" : "resolved",
+      connector_id: tool.connector_id ?? null,
+      connector_name: null,
+      tool_names: [tool.name],
+      confidence: 1,
+      reason: "Agent Versionで選択されました",
+      variables: [],
+    });
+  }
+  return {
+    requirements,
+    selected_tools: selectedTools,
+    missing_variables: current.missing_variables,
+    ready: requirements.every((requirement) => requirement.state === "resolved") && current.missing_variables.length === 0,
+  };
 }
 
 export class AgentService {
@@ -83,10 +154,24 @@ export class AgentService {
     return this.deps.db.run(scopeOf(actor), async (tx) => {
       const agents = await tx.agents.findMany({
         where: { organization_id: actor.organizationId },
-        include: { versions: { select: { status: true, version: true } } },
+        include: {
+          versions: { select: { status: true, version: true } },
+          builder_projects: {
+            orderBy: { updated_at: "desc" },
+            take: 1,
+            include: { runs: { orderBy: { attempt: "desc" }, take: 1, select: { error: true } } },
+          },
+        },
         orderBy: { updated_at: "desc" },
       });
-      return agents.map((a) => toAgentDto(a));
+      return agents.map((a) => {
+        const dto = toAgentDto(a);
+        const builder = a.builder_projects[0];
+        dto.builder_project_id = builder?.id ?? null;
+        dto.builder_status = builder?.status as AgentDto["builder_status"] ?? null;
+        dto.builder_error = builder?.runs[0]?.error ?? null;
+        return dto;
+      });
     });
   }
 
@@ -178,10 +263,23 @@ export class AgentService {
   async createProject(actor: MemberActor, description: string): Promise<AgentDto> {
     requireRole(actor, "builder");
     const draft = await this.generate(actor, description);
+    return this.createProjectFromDraft(actor, description, draft);
+  }
+
+  /** Builderが解決済み能力を固定したDraftからAgent Projectを作る。 */
+  async createProjectFromDraft(actor: MemberActor, description: string, draft: GenerateManifestResultDto, existingAgentId?: string): Promise<AgentDto> {
+    requireRole(actor, "builder");
     let manifest = this.parseOrThrow(draft.manifest_yaml);
     return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const shell = existingAgentId
+        ? await tx.agents.findFirst({ where: { id: existingAgentId, organization_id: actor.organizationId } })
+        : null;
+      if (existingAgentId && !shell) throw notFound("エージェント");
+      // /agents/new で作成したshellのkeyは、そのAgentを指す永続的な識別子として維持する。
+      // モデルが返す汎用keyへ変更すると、同時進行中のBuilder同士で一意制約が競合し得る。
+      if (shell) manifest = { ...manifest, agent: { ...manifest.agent, key: shell.key } };
       const siblings = await tx.agents.findMany({
-        where: { organization_id: actor.organizationId, key: { startsWith: manifest.agent.key } },
+        where: { organization_id: actor.organizationId, key: { startsWith: manifest.agent.key }, ...(existingAgentId ? { id: { not: existingAgentId } } : {}) },
         select: { key: true },
       });
       if (siblings.some((agent) => agent.key === manifest.agent.key)) {
@@ -189,6 +287,50 @@ export class AgentService {
         let suffix = 2;
         while (siblings.some((agent) => agent.key === `${base}-${suffix}`)) suffix += 1;
         manifest = { ...manifest, agent: { ...manifest.agent, key: `${base}-${suffix}` } };
+      }
+      if (existingAgentId) {
+        await tx.agents.update({ where: { id: existingAgentId }, data: {
+          key: manifest.agent.key,
+          name: manifest.agent.name,
+          description: manifest.agent.description ?? null,
+          project_brief: description,
+          capability_resolution: draft.resolution as unknown as Prisma.InputJsonValue,
+          latest_version: 1,
+        } });
+        await tx.agent_versions.upsert({
+          where: { agent_id_version: { agent_id: existingAgentId, version: 1 } },
+          create: {
+            organization_id: actor.organizationId,
+            agent_id: existingAgentId,
+            version: 1,
+            status: "published",
+            published_at: new Date(),
+            manifest: manifest as unknown as Prisma.InputJsonValue,
+            manifest_yaml: stringifyManifest(manifest),
+            created_by: actor.userId,
+          },
+          update: {
+            status: "published",
+            published_at: new Date(),
+            manifest: manifest as unknown as Prisma.InputJsonValue,
+            manifest_yaml: stringifyManifest(manifest),
+          },
+        });
+        for (const stage of ["staging", "production"] as const) {
+          await tx.agent_environment_configs.upsert({
+            where: { agent_id_stage: { agent_id: existingAgentId, stage } },
+            create: { organization_id: actor.organizationId, agent_id: existingAgentId, stage, variables: {} },
+            update: {},
+          });
+        }
+        const agent = await tx.agents.findUniqueOrThrow({ where: { id: existingAgentId }, include: { versions: true } });
+        await recordAudit(tx, auditBy(actor, {
+          action: "agent.project.builder_apply",
+          targetType: "agent",
+          targetId: agent.id,
+          detail: { key: agent.key, selected_tools: draft.resolution.selected_tools },
+        }));
+        return toAgentDto(agent, true);
       }
       const agent = await tx.agents.create({
         data: {
@@ -236,7 +378,10 @@ export class AgentService {
     return this.deps.db.run(scopeOf(actor), async (tx) => {
       const agent = await tx.agents.findFirst({
         where: { id, organization_id: actor.organizationId },
-        include: { versions: true },
+        include: {
+          versions: true,
+          builder_projects: { orderBy: { updated_at: "desc" }, include: builderProjectInclude },
+        },
       });
       if (!agent) throw notFound("エージェント");
       const [links, environments, builds, deployments, connectors] = await Promise.all([
@@ -255,12 +400,17 @@ export class AgentService {
         tx.connectors.findMany({ where: { organization_id: actor.organizationId }, select: { id: true, auth_type: true } }),
       ]);
       const dto = toAgentDto(agent, true);
+      const latestBuilder = agent.builder_projects[0];
+      dto.builder_project_id = latestBuilder?.id ?? null;
+      dto.builder_status = latestBuilder?.status as AgentDto["builder_status"] ?? null;
+      dto.builder_error = latestBuilder?.runs[0]?.error ?? null;
       dto.capability_resolution = resolveProjectReadiness(dto.capability_resolution, links, environments, connectors, "staging");
       const preview = deployments.find((deployment) => deployment.stage === "staging" && deployment.status === "active");
       const base = this.deps.env.PUBLIC_BASE_URL.replace(/\/$/, "");
       const apiBase = this.deps.env.PUBLIC_API_BASE_URL.replace(/\/$/, "");
       return {
         agent: dto,
+        build_jobs: agent.builder_projects.map(toBuilderProjectDto),
         connection_links: links.map(toAgentConnectionLinkDto),
         environments: environments.map(toAgentEnvironmentConfigDto),
         builds: builds.map(toAgentBuildDto),
@@ -411,6 +561,11 @@ export class AgentService {
       if (manifest.agent.key !== agent.key) throw validationError("agent.key は変更できません");
       const { errors } = await this.checkReferences(tx, actor.organizationId, manifest);
       if (errors.length > 0) throw validationError(errors[0]!, { errors });
+      const resolved = await resolveTools(tx, actor.organizationId, manifest.tools);
+      const capabilityResolution = reconcileVersionResolution(
+        agent.capability_resolution as unknown as CapabilityResolutionDto,
+        resolved.tools,
+      );
       const version = agent.latest_version + 1;
       const v = await tx.agent_versions.create({
         data: {
@@ -424,7 +579,12 @@ export class AgentService {
       });
       await tx.agents.update({
         where: { id },
-        data: { latest_version: version, name: manifest.agent.name, description: manifest.agent.description ?? null },
+        data: {
+          latest_version: version,
+          name: manifest.agent.name,
+          description: manifest.agent.description ?? null,
+          capability_resolution: capabilityResolution as unknown as Prisma.InputJsonValue,
+        },
       });
       await recordAudit(tx, auditBy(actor, { action: "agent.version.create", targetType: "agent", targetId: id, detail: { version } }));
       return toAgentVersionDto(v);
@@ -476,6 +636,17 @@ export class AgentService {
         connector_auth_type: t.connector?.auth_type ?? null,
       };
     });
+    toolInfos.push({
+      name: OPENAI_WEB_SEARCH_TOOL_NAME,
+      display_name: "Web検索",
+      description: "公開Webを検索し、最新情報と出典URLを取得します",
+      execution_location: "openai_builtin",
+      risk: "read",
+      input_fields: [],
+      connector_id: null,
+      connector_name: "OpenAI標準機能",
+      connector_auth_type: null,
+    });
     const generated = await this.deps.generator.generate({
       organizationId: actor.organizationId,
       description,
@@ -490,14 +661,15 @@ export class AgentService {
     const selectedLocations = new Set(
       resolution.selected_tools.flatMap((name) => {
         const selected = tools.find((tool) => tool.name === name);
-        return selected ? [selected.execution_location] : [];
+        if (selected) return [selected.execution_location];
+        return OPENAI_BUILTIN_TOOL_NAMES.has(name) ? ["openai_builtin"] : [];
       }),
     );
     const requiredProfileType = selectedLocations.has("runtime_mcp") ? "self_hosted" : undefined;
     const chosenProfile = requiredProfileType ? profiles.find((profile) => profile.type === requiredProfileType) : undefined;
     return toManifestDraft(
       generated,
-      new Set(tools.map((t) => t.name)),
+      new Set([...tools.map((t) => t.name), ...OPENAI_BUILTIN_TOOL_NAMES]),
       new Set(profiles.map((p) => p.key)),
       resolution,
       (chosenProfile ?? profiles.find((profile) => profile.type === "openai_hosted") ?? profiles[0])?.key,

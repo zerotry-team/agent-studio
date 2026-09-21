@@ -22,6 +22,10 @@ export function buildSessionCreateParams(config: CompiledAgentConfig, opts: Sess
     tools.push({ type: "function", name: f.name, description: f.description, parameters: f.parameters });
   }
 
+  for (const builtin of config.openai_builtin_tools ?? []) {
+    if (builtin === "web_search") tools.push({ type: "web_search", mode: "live" });
+  }
+
   const vaultIds = new Set<string>();
   for (const s of config.service_mcp_tools) {
     // ツール直指定の Connection を優先し、無ければ連携サービス単位の紐付けを使う

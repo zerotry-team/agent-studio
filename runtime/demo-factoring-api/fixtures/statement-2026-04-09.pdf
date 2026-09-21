@@ -1,0 +1,10 @@
+%PDF-1.4
+% Demo fixture. Runtime-only extraction source; no real account data.
+1 0 obj << /Type /Catalog >> endobj
+stream
+TX|2026-04|株式会社取引先|1200000
+TX|2026-05|株式会社取引先|1200000
+TX|2026-06|株式会社取引先|1200000
+endstream
+trailer <<>>
+%%EOF

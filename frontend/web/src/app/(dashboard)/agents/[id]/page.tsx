@@ -28,6 +28,7 @@ import { listConnectorsAction, setConnectorOAuthAppAction } from "@/actions/conn
 import { listDeploymentsAction, promoteDeploymentAction, rollbackDeploymentAction } from "@/actions/deployments";
 import { createScheduleAction, deleteScheduleAction, listSchedulesAction, updateScheduleAction } from "@/actions/schedules";
 import { AgentRun } from "@/components/agents/agent-run";
+import { AgentBuildStatus } from "@/components/builder-projects/agent-build-status";
 import { ErrorState } from "@/components/common/error-state";
 import { PageHeader } from "@/components/common/page-header";
 import { StageBadge, ToolRiskBadge } from "@/components/common/status-badges";
@@ -46,10 +47,11 @@ import { useActionQuery } from "@/hooks/use-action-query";
 import { cn } from "@/lib/utils/cn";
 import { useSession } from "@/hooks/use-session";
 
-const PROJECT_TABS = ["overview", "preview", "deployments", "runs", "settings"] as const;
+const PROJECT_TABS = ["overview", "build", "preview", "deployments", "runs", "settings"] as const;
 type ProjectTab = (typeof PROJECT_TABS)[number];
 const TAB_LABELS: Record<ProjectTab, string> = {
   overview: "Overview",
+  build: "作成状況",
   preview: "Preview",
   deployments: "Deployments",
   runs: "Runs",
@@ -67,7 +69,9 @@ export default function AgentProjectPage({ params }: { params: { id: string } })
   const connectionError = searchParams.get("connection_error");
   const [tab, setTab] = useState<ProjectTab>(urlTab);
   useEffect(() => setTab(urlTab), [urlTab]);
-  const project = useActionQuery(() => getAgentProjectAction(params.id), [params.id, organization?.id]);
+  const project = useActionQuery(() => getAgentProjectAction(params.id), [params.id, organization?.id], {
+    refetchInterval: (value) => value?.build_jobs.some((job) => ["draft", "analyzing", "discovering", "implementing", "validating", "previewing"].includes(job.status)) ? 2_000 : false,
+  });
 
   const changeTab = (next: ProjectTab) => {
     setTab(next);
@@ -103,6 +107,9 @@ export default function AgentProjectPage({ params }: { params: { id: string } })
       />
       <TabPanel id="overview" value={tab} idPrefix="project">
         <Overview project={data} connectionError={connectionError} onChanged={project.reload} onGoTo={changeTab} />
+      </TabPanel>
+      <TabPanel id="build" value={tab} idPrefix="project">
+        {data.build_jobs[0] ? <AgentBuildStatus project={data.build_jobs[0]} onChanged={project.reload} /> : <Alert tone="info">このAgentには作成中のJobがありません。</Alert>}
       </TabPanel>
       <TabPanel id="preview" value={tab} idPrefix="project">
         <Preview project={data} />
@@ -268,7 +275,16 @@ function RequirementRow({
   operations: ToolDto[];
 }) {
   const ready = requirement.state === "resolved";
-  const label = ready ? "準備済み" : requirement.state === "needs_connection" ? "未接続" : "確認が必要";
+  const fulfillment = requirement.fulfillment;
+  const label = ready
+    ? "準備済み"
+    : fulfillment?.mode === "configure"
+      ? "接続設定が必要"
+      : fulfillment?.mode === "shared_tool"
+        ? "共通Toolを追加"
+        : fulfillment?.mode === "organization_tool"
+          ? "企業専用Toolを追加"
+          : "調査中";
   const browserRequirement = requirement.tool_names.some(isBrowserCapability);
   return (
     <div className="rounded-lg border border-gray-100 px-3 py-3">
@@ -278,6 +294,14 @@ function RequirementRow({
           <div className="min-w-0">
             <p className="text-sm font-medium text-gray-900">{requirement.requirement}</p>
             {operations.length === 0 ? <p className="mt-0.5 text-xs text-gray-500">{requirement.reason}</p> : null}
+            {fulfillment && !ready ? (
+              <p className="mt-1 text-xs text-gray-600">
+                {fulfillment.reason}
+                {fulfillment.mode === "shared_tool" && fulfillment.availability_target_minutes
+                  ? `。mainへのマージ後、${fulfillment.availability_target_minutes}分以内の利用可能通知を目標にします`
+                  : ""}
+              </p>
+            ) : null}
           </div>
         </div>
         <Badge tone={ready ? "success" : "warning"}>{label}</Badge>

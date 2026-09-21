@@ -5,6 +5,8 @@ import {
   TERMINAL_RUN_STATUSES,
   canonicalJson,
   evaluatePolicies,
+  redactLogText,
+  redactLogValue,
   sha256Hex,
   toolCallHash,
   type RunStatus,
@@ -40,6 +42,14 @@ const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 
 const BROWSER_TOOL_PREFIX = "browser_";
 
+function safeWorkflowToolOutput(output: string): string {
+  try {
+    return JSON.stringify(redactLogValue(JSON.parse(output))).slice(0, 20_000);
+  } catch {
+    return redactLogText(output).slice(0, 20_000);
+  }
+}
+
 export function browserConfigForRun(config: CompiledAgentConfig): StartSessionJob["session"]["browser"] {
   const browserTools = config.runtime_tools.filter((name) => name.startsWith(BROWSER_TOOL_PREFIX) || name === "computer_action");
   if (browserTools.length === 0) return undefined;
@@ -66,7 +76,7 @@ const ENV_STATUS_LABELS: Record<string, string> = {
 };
 
 interface DriverState {
-  run: { id: string; organization_id: string; status: string; agent_id: string; stage: "staging" | "production" };
+  run: { id: string; organization_id: string; status: string; agent_id: string; stage: "staging" | "production"; workflow_run_id: string | null };
   config: CompiledAgentConfig;
   sessionRowId: string;
   openaiSessionId: string;
@@ -155,6 +165,7 @@ export class RunDriver {
         status: run.status,
         agent_id: run.deployment.agent_id,
         stage: run.deployment.stage as "staging" | "production",
+        workflow_run_id: run.workflow_run_id,
       },
       config,
       idle: false,
@@ -531,6 +542,14 @@ export class RunDriver {
             status: item.status,
             error: item.error ?? null,
           });
+          if (!failed && state.run.workflow_run_id && typeof item.output === "string") {
+            await appendRunEvent(tx, state.run, "tool.result", `${item.name} の構造化結果をWorkflowへ渡しました`, {
+              kind: "mcp",
+              name: item.server_label,
+              remote_name: item.name,
+              output: safeWorkflowToolOutput(item.output),
+            });
+          }
           break;
         }
         case "command_execution":
@@ -744,6 +763,15 @@ export class RunDriver {
         runId: this.runId,
       });
       await this.recordToolEvent(state, tool.name, `${tool.name} を実行しました`, { status: "completed" });
+      if (state.run.workflow_run_id) {
+        await this.deps.db.org(this.organizationId, (tx) =>
+          appendRunEvent(tx, state.run, "tool.result", `${tool.name} の構造化結果をWorkflowへ渡しました`, {
+            kind: "function",
+            name: tool.name,
+            output: safeWorkflowToolOutput(output),
+          }),
+        );
+      }
       await this.captureExternalJob(state, tool.name, tool.connector_id, output);
       return { success: true, output };
     } catch (e) {

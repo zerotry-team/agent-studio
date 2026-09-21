@@ -11,6 +11,18 @@ import {
   type ToolVersionSpec,
 } from "@agent-studio/contracts";
 
+export const OPENAI_WEB_SEARCH_TOOL_NAME = "web_search";
+export const OPENAI_BUILTIN_TOOL_NAMES = new Set([OPENAI_WEB_SEARCH_TOOL_NAME]);
+
+export type OpenAiBuiltinToolSpec = {
+  execution_location: "openai_builtin";
+  description: string;
+  input_schema: ToolInputSchema;
+  risk: "read";
+  reads_untrusted_content: true;
+  openai_builtin: { type: "web_search" };
+};
+
 /** Tool Gateway に接続する MCP の server_label */
 export const RUNTIME_GATEWAY_SERVER_LABEL = "agent_studio_runtime";
 export const SELF_HOSTED_WORKSPACE = "/workspace";
@@ -32,7 +44,7 @@ export interface ResolvedTool {
   name: string;
   version: number;
   connector_id?: string | null;
-  spec: ToolVersionSpec;
+  spec: ToolVersionSpec | OpenAiBuiltinToolSpec;
 }
 
 export interface CompileProfile {
@@ -85,6 +97,8 @@ export interface CompiledAgentConfig {
   environment: CompiledEnvironment;
   function_tools: CompiledFunctionTool[];
   service_mcp_tools: CompiledServiceMcpTool[];
+  /** OpenAI Agents APIが直接提供する標準能力。認証用Connectionは不要。 */
+  openai_builtin_tools?: Array<"web_search">;
   /** ブラウザで接続してよい範囲。ブラウザを使う Agent だけ意味を持つ */
   browser_access?: { access: "restricted" | "public"; allowed_domains: string[] };
   /** Tool Gateway 経由で使う Runtime のツール */
@@ -114,6 +128,7 @@ export function compileAgent(input: {
 
   const functionTools: CompiledFunctionTool[] = [];
   const serviceMcp: CompiledServiceMcpTool[] = [];
+  const openAiBuiltins: Array<"web_search"> = [];
   const runtimeTools: string[] = [];
   const riskByTool = new Map<string, ToolRisk>();
   let readsUntrusted = false;
@@ -159,6 +174,10 @@ export function compileAgent(input: {
         runtimeTools.push(t.name);
         break;
       }
+      case "openai_builtin":
+        openAiBuiltins.push(t.spec.openai_builtin.type);
+        readsUntrusted = true;
+        break;
     }
   }
 
@@ -188,21 +207,29 @@ export function compileAgent(input: {
   // 暗黙のポリシー
   const implicit: Policy[] = [];
   const explicitApprovalTools = new Set(manifest.policies.filter((p) => p.type === "approval").map((p) => p.tool));
+  const approvalTools = new Set(explicitApprovalTools);
   for (const [name, risk] of riskByTool) {
-    if (risk === "destructive" && !explicitApprovalTools.has(name)) {
-      implicit.push({ type: "approval", tool: name, timeout_minutes: 1440, reason: `${name} は取り消せない操作のため承認が必要です` });
+    if ((risk === "destructive" || risk === "financial" || risk === "external_send") && !approvalTools.has(name)) {
+      const reason = risk === "financial"
+        ? `${name} は金額・信用・契約状態に関わるため承認が必要です`
+        : risk === "external_send"
+          ? `${name} は外部へ情報を送信・公開するため承認が必要です`
+          : `${name} は取り消せない操作のため承認が必要です`;
+      implicit.push({ type: "approval", tool: name, timeout_minutes: 1440, reason });
+      approvalTools.add(name);
     }
   }
   if (readsUntrusted) {
     // POL-07: 外部の内容を読む Agent は、更新系の操作をすべて承認制にする（プロンプトインジェクション対策）
     for (const [name, risk] of riskByTool) {
-      if (WRITE_LIKE_RISKS.includes(risk) && risk !== "destructive") {
+      if (WRITE_LIKE_RISKS.includes(risk) && !approvalTools.has(name)) {
         implicit.push({
           type: "approval",
           tool: name,
           timeout_minutes: 1440,
           reason: "外部の内容を読み込むエージェントのため、更新を伴う操作には承認が必要です",
         });
+        approvalTools.add(name);
       }
     }
   }
@@ -225,6 +252,7 @@ export function compileAgent(input: {
       environment,
       function_tools: functionTools,
       service_mcp_tools: serviceMcp,
+      openai_builtin_tools: [...new Set(openAiBuiltins)],
       runtime_tools: runtimeTools,
       policies: [...input.orgPolicies, ...manifest.policies, ...implicit],
       warnings,

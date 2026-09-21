@@ -1,6 +1,8 @@
 import type { Prisma } from "@prisma/client";
+import { randomUUID } from "node:crypto";
 import {
   createToolInputSchema,
+  createGitHubAppConnectionSchema,
   createConnectorSchema,
   setConnectorOAuthAppSchema,
   updateConnectorSchema,
@@ -14,6 +16,7 @@ import {
   type DiscoverMcpToolsResultDto,
   type ConnectionDto,
   type CreateConnectionInput,
+  type CreateGitHubAppConnectionInput,
   type CreateConnectorInput,
   type CreateToolInput,
   type CreateToolVersionInput,
@@ -25,8 +28,9 @@ import {
 import { conflict, notFound, preconditionFailed, validationError } from "../domain/errors.js";
 import { recordAudit } from "../infrastructure/audit.js";
 import { assertPublicUrl } from "../infrastructure/http/public-url.js";
-import { discoverMcpTools } from "../infrastructure/mcp/discover.js";
 import { secretNames } from "../infrastructure/secrets/secret-store.js";
+import { parseGitHubAppMetadata, parseGitHubAppSecret, type GitHubAppSecret } from "../infrastructure/git/github-app.js";
+import { validatePackageSigningPublicKey } from "../infrastructure/git/adapter-signature.js";
 import { auditBy, requireRole, scopeOf, type MemberActor } from "./context.js";
 import type { Deps } from "./deps.js";
 import { toConnectionDto, toConnectorDto, toToolDto, toToolVersionDto } from "./dto.js";
@@ -74,8 +78,10 @@ function buildConnectorToolSpec(
         execution_location: "openai_service_mcp",
         description: operation.description,
         risk: operation.risk,
+        reads_untrusted_content: true,
         // 接続先のMCPサーバーが持つ同名の操作だけを許可する。認証はConnectionから実行時に解決する。
-        service_mcp: { server_url: baseUrl!, allowed_tools: [operation.name] },
+        input_schema: operation.input_schema,
+        service_mcp: { server_url: baseUrl!, allowed_tools: [operation.provider_operation_name ?? operation.name] },
       } as Prisma.InputJsonValue,
     };
   }
@@ -85,6 +91,7 @@ function buildConnectorToolSpec(
       execution_location: "studio_function",
       description: operation.description,
       input_schema: operation.input_schema,
+      ...(operation.output_schema ? { output_schema: operation.output_schema } : {}),
       risk: operation.risk,
       studio_function: {
         handler: "http_api",
@@ -193,7 +200,7 @@ export class ToolService {
   async discoverMcpTools(actor: MemberActor, raw: DiscoverMcpToolsInput): Promise<DiscoverMcpToolsResultDto> {
     requireRole(actor, "builder");
     const input = discoverMcpToolsSchema.parse(raw);
-    return { tools: await discoverMcpTools(input.server_url) };
+    return { tools: await this.deps.mcpDiscovery(input.server_url) };
   }
 
   /** 1サービスの複数能力を1トランザクションで登録する（AV-022）。 */
@@ -460,6 +467,147 @@ export class ToolService {
     });
   }
 
+  /** GitHub Appだけを使うrepository allowlist付きConnection。秘密鍵とwebhook secretはSecret Storeへ直行する。 */
+  async createGitHubAppConnection(actor: MemberActor, raw: CreateGitHubAppConnectionInput): Promise<ConnectionDto> {
+    requireRole(actor, "admin");
+    const input = createGitHubAppConnectionSchema.parse(raw);
+    try {
+      validatePackageSigningPublicKey(input.package_signing_public_key);
+    } catch (error) {
+      throw validationError(error instanceof Error ? error.message : "Adapter package署名鍵を検証できません");
+    }
+    const duplicate = await this.deps.db.run(scopeOf(actor), (tx) => tx.connections.findFirst({
+      where: { organization_id: actor.organizationId, OR: [{ name: input.name }, { metadata: { path: ["repository_id"], equals: input.repository_id } }] },
+      select: { id: true },
+    }));
+    if (duplicate) throw conflict("同じ名前またはrepositoryのGitHub App Connectionがあります");
+    const id = randomUUID();
+    const metadata = {
+      provider: "github_app" as const,
+      app_id: input.app_id,
+      installation_id: input.installation_id,
+      repository_id: input.repository_id,
+      owner: input.owner,
+      repository: input.repository,
+      base_branch: input.base_branch,
+      repository_url: `https://github.com/${input.owner}/${input.repository}.git`,
+      package_signing_public_key: input.package_signing_public_key,
+      permissions: input.permissions,
+    };
+    const secret: GitHubAppSecret = { private_key: input.private_key, webhook_secret: input.webhook_secret };
+    const repository = await this.deps.gitProvider.validateRepository(metadata, secret);
+    metadata.base_branch = repository.default_branch;
+    const locator = await this.deps.secrets.put(
+      secretNames.connection(this.deps.env.SECRETS_PREFIX, actor.organizationId, id),
+      JSON.stringify(secret),
+      { "agentstudio:organization_id": actor.organizationId, "agentstudio:provider": "github_app" },
+    );
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const connection = await tx.connections.create({
+        data: {
+          id,
+          organization_id: actor.organizationId,
+          name: input.name,
+          description: `GitHub App: ${input.owner}/${input.repository}`,
+          scope: "studio",
+          secret_locator: locator,
+          status: "connected",
+          last_validated_at: new Date(),
+          metadata,
+        },
+      });
+      await recordAudit(tx, auditBy(actor, {
+        action: "connection.github_app.create",
+        targetType: "connection",
+        targetId: id,
+        detail: { provider: "github_app", repository_id: input.repository_id, repository: `${input.owner}/${input.repository}`, permissions: input.permissions },
+      }));
+      return toConnectionDto(connection);
+    });
+  }
+
+  /** 接続済みGitHub Appを使い、会社ごとのprivate Integration Repositoryを入力なしで用意する。 */
+  async provisionOrganizationIntegrationRepository(actor: MemberActor, sourceConnectionId: string): Promise<ConnectionDto> {
+    requireRole(actor, "admin");
+    const source = await this.deps.db.run(scopeOf(actor), (tx) => tx.connections.findFirst({
+      where: { id: sourceConnectionId, organization_id: actor.organizationId, status: "connected", revoked_at: null },
+    }));
+    if (!source?.secret_locator) throw notFound("GitHub App Connection");
+    let sourceMetadata;
+    try {
+      sourceMetadata = parseGitHubAppMetadata(source.metadata);
+    } catch {
+      throw validationError("指定したConnectionはGitHub Appではありません");
+    }
+    const organization = await this.deps.db.run(scopeOf(actor), (tx) => tx.organizations.findFirst({
+      where: { id: actor.organizationId },
+      select: { slug: true, name: true },
+    }));
+    if (!organization) throw notFound("組織");
+    const existing = await this.deps.db.run(scopeOf(actor), (tx) => tx.connections.findFirst({
+      where: {
+        organization_id: actor.organizationId,
+        status: "connected",
+        revoked_at: null,
+        metadata: { path: ["repository_purpose"], equals: "organization_integrations" },
+      },
+    }));
+    if (existing) return toConnectionDto(existing);
+    const stored = await this.deps.secrets.get(source.secret_locator);
+    if (!stored) throw preconditionFailed("GitHub Appの秘密鍵が見つかりません");
+    const secret = parseGitHubAppSecret(stored);
+    const repositoryName = `agent-studio-${organization.slug}-tools`.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 100);
+    let repository;
+    try {
+      repository = await this.deps.gitProvider.provisionOrganizationRepository({
+        metadata: sourceMetadata,
+        secret,
+        name: repositoryName,
+        description: `${organization.name}専用のAgent Studio Runtime Tool`,
+      });
+    } catch (error) {
+      throw preconditionFailed(error instanceof Error ? error.message.replace(/^GitHub App request failed:\s*/i, "") : "企業専用Repositoryを作成できませんでした");
+    }
+    const [, repositorySlug] = repository.full_name.split("/");
+    if (!repositorySlug) throw preconditionFailed("作成したRepository名を確認できませんでした");
+    const id = randomUUID();
+    const metadata = {
+      ...sourceMetadata,
+      repository_id: String(repository.id),
+      repository: repositorySlug,
+      base_branch: repository.default_branch,
+      repository_url: `https://github.com/${sourceMetadata.owner}/${repositorySlug}.git`,
+      repository_purpose: "organization_integrations" as const,
+    };
+    const locator = await this.deps.secrets.put(
+      secretNames.connection(this.deps.env.SECRETS_PREFIX, actor.organizationId, id),
+      JSON.stringify(secret),
+      { "agentstudio:organization_id": actor.organizationId, "agentstudio:provider": "github_app" },
+    );
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const connection = await tx.connections.create({
+        data: {
+          id,
+          organization_id: actor.organizationId,
+          name: `${organization.name} Integration Repository`,
+          description: `GitHub App: ${sourceMetadata.owner}/${repositorySlug}`,
+          scope: "studio",
+          secret_locator: locator,
+          status: "connected",
+          last_validated_at: new Date(),
+          metadata,
+        },
+      });
+      await recordAudit(tx, auditBy(actor, {
+        action: "connection.github_app.repository.provision",
+        targetType: "connection",
+        targetId: id,
+        detail: { source_connection_id: sourceConnectionId, repository_id: String(repository.id), repository: repository.full_name, private: true },
+      }));
+      return toConnectionDto(connection);
+    });
+  }
+
   /** 認証情報の値を設定する。値は DB に保存しない（CONN-02） */
   async setConnectionSecret(actor: MemberActor, id: string, input: SetConnectionSecretInput): Promise<void> {
     requireRole(actor, "admin");
@@ -467,6 +615,9 @@ export class ToolService {
       tx.connections.findFirst({ where: { id, organization_id: actor.organizationId } }),
     );
     if (!conn) throw notFound("接続先");
+    if (conn.metadata && typeof conn.metadata === "object" && !Array.isArray(conn.metadata) && (conn.metadata as Record<string, unknown>).provider === "github_app") {
+      throw validationError("GitHub Appの秘密情報は専用の接続画面から検証して登録してください");
+    }
 
     let locator: string;
     if (conn.scope === "studio") {
@@ -603,7 +754,7 @@ export class ToolService {
       if (!conn.secret_locator && conn.scope !== "runtime") throw preconditionFailed("認証情報が設定されていません");
       return this.updateConnectionStatus(actor, conn.id, "connected", "connection.validate", { mode: "configuration" });
     }
-    if (!conn.secret_locator) throw preconditionFailed("認証情報が設定されていません");
+    if (conn.connector.auth_type !== "none" && !conn.secret_locator) throw preconditionFailed("認証情報が設定されていません");
 
     const check = conn.connector.tools.find((tool) => {
       if (tool.risk !== "read") return false;
@@ -614,16 +765,19 @@ export class ToolService {
     if (!check) throw preconditionFailed("この連携サービスには自動確認に使える読み取り操作がありません");
     const spec = check.versions[0]!.spec as unknown as { studio_function: { base_url: string; path: string } };
     const url = await assertPublicUrl(`${spec.studio_function.base_url}${spec.studio_function.path}`);
-    const secret = await this.deps.secrets.get(conn.secret_locator);
-    if (!secret) throw preconditionFailed("認証情報を読み込めませんでした。もう一度設定してください");
-    const header = (conn.header_name ?? "Authorization").toLowerCase();
-    const value = header === "authorization" && !/^\S+\s/.test(secret) ? `Bearer ${secret}` : secret;
+    const headers: Record<string, string> = { accept: "application/json", "user-agent": "agent-studio-connection-check" };
+    if (conn.connector.auth_type !== "none") {
+      const secret = await this.deps.secrets.get(conn.secret_locator!);
+      if (!secret) throw preconditionFailed("認証情報を読み込めませんでした。もう一度設定してください");
+      const header = (conn.header_name ?? "Authorization").toLowerCase();
+      headers[header] = header === "authorization" && !/^\S+\s/.test(secret) ? `Bearer ${secret}` : secret;
+    }
     let status: ConnectionDto["status"] = "error";
     let httpStatus: number | null = null;
     try {
       const response = await fetch(url, {
         method: "GET",
-        headers: { accept: "application/json", "user-agent": "agent-studio-connection-check", [header]: value },
+        headers,
         redirect: "error",
         signal: AbortSignal.timeout(15_000),
       });

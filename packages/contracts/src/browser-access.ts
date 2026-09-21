@@ -2,7 +2,8 @@ import type { BrowserAccess, CapabilityResolutionDto } from "./api.js";
 
 /** Browser内部Toolは通常画面で個別設定させず、1つの能力として扱う。 */
 export function isBrowserCapability(name: string): boolean {
-  return name.startsWith("browser_") || name === "computer_action";
+  const baseName = name.split("@", 1)[0] ?? name;
+  return baseName.startsWith("browser_") || baseName === "computer_action";
 }
 
 export function usesBrowserCapability(resolution: Pick<CapabilityResolutionDto, "selected_tools">): boolean {

@@ -4,6 +4,7 @@ import type { Services } from "./container.js";
 import { createApiRoutes } from "./presentation/api-routes.js";
 import { errorHandler, requestContext, type AppEnv } from "./presentation/middleware.js";
 import { createRuntimeRoutes } from "./presentation/runtime-routes.js";
+import { createWebhookRoutes } from "./presentation/webhook-routes.js";
 
 export function createApp(deps: Deps, services: Services) {
   const app = new Hono<AppEnv>();
@@ -19,5 +20,6 @@ export function createApp(deps: Deps, services: Services) {
 
   app.route("/api/v1", createApiRoutes(deps, services));
   app.route("/runtime/v1", createRuntimeRoutes(services.runtimeApi));
+  app.route("/webhooks", createWebhookRoutes(services.gitWebhooks));
   return app;
 }

@@ -86,6 +86,7 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
   const canCancel = canStart && !terminal;
   const canMessage = canStart && run.status !== "cancelled" && run.status !== "failed";
   const activeExternalJobs = run.external_jobs.filter((job) => job.status === "pending" || job.status === "processing");
+  const publishedJobs = run.external_jobs.filter((job) => job.status === "succeeded" && job.permalink);
 
   return (
     <>
@@ -145,6 +146,17 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
       {activeExternalJobs.length > 0 ? (
         <Alert tone="info" className="mb-6" title="外部サービスの処理結果を確認しています">
           投稿要求は受け付け済みです。Agent Studioは同じ投稿を再送せず、Job IDを使って結果だけを確認しています。
+        </Alert>
+      ) : null}
+
+      {publishedJobs.length > 0 ? (
+        <Alert tone="success" className="mb-6" title="外部投稿の完了を確認しました">
+          {publishedJobs.map((job) => (
+            <p key={job.id}>
+              Provider Job {job.provider_job_id} は成功しました。{" "}
+              <a className="font-medium underline" href={job.permalink!} target="_blank" rel="noreferrer">投稿を確認</a>
+            </p>
+          ))}
         </Alert>
       ) : null}
 

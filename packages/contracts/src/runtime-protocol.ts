@@ -74,6 +74,13 @@ export const runtimeToolCatalogEntrySchema = z.object({
   input_schema: inputSchemaSchema,
   risk: toolRiskSchema,
   reads_untrusted_content: z.boolean(),
+  delivery: z.object({
+    connector_key: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+    contract_hash: z.string().regex(/^[0-9a-f]{64}$/),
+    image_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    source_commit: z.string().regex(/^[0-9a-f]{40,64}$/),
+    package_signature: z.string().min(20).max(1000),
+  }).strict().optional(),
 });
 export type RuntimeToolCatalogEntry = z.infer<typeof runtimeToolCatalogEntrySchema>;
 
@@ -129,6 +136,8 @@ export const heartbeatRequestSchema = z
     gateway_url: z.url().max(500),
     active_sessions: z.array(z.uuid()).max(1000),
     tools: z.array(runtimeToolCatalogEntrySchema).max(500),
+    /** Controller 自身が実行できる管理能力。業務 Tool Catalog とは分離する。 */
+    capabilities: z.array(z.enum(["builder_workspace", "adapter_delivery"])).max(20).optional(),
   })
   .strict();
 export type HeartbeatRequest = z.infer<typeof heartbeatRequestSchema>;
@@ -146,6 +155,28 @@ export const sessionGrantSchema = z.object({
 });
 export type SessionGrant = z.infer<typeof sessionGrantSchema>;
 
+/** start_sessionでexec-serverを起動する前に、モデルへ資格情報を見せず準備するBuilder workspace。 */
+export const builderSessionWorkspaceSchema = z.object({
+  project_id: z.uuid(),
+  change_set_id: z.uuid(),
+  capability_topic: z.string().min(1).max(128),
+  repository_url: z.url().max(1000).refine((value) => {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash;
+    } catch {
+      return false;
+    }
+  }),
+  base_branch: z.string().min(1).max(200).regex(/^[A-Za-z0-9._/-]+$/)
+    .refine((value) => !value.startsWith("/") && !value.endsWith("/") && !value.includes("//") && !value.includes("..")),
+  branch: z.string().min(1).max(200).regex(/^[A-Za-z0-9._/-]+$/)
+    .refine((value) => !value.startsWith("/") && !value.endsWith("/") && !value.includes("//") && !value.includes("..")),
+  adapter_path: z.string().min(1).max(500)
+    .refine((value) => !value.startsWith("/") && !value.endsWith("/") && value.split("/").every((part) => Boolean(part) && part !== "." && part !== "..")),
+}).strict();
+export type BuilderSessionWorkspace = z.infer<typeof builderSessionWorkspaceSchema>;
+
 export const startSessionJobSchema = z.object({
   type: z.literal("start_session"),
   job_id: z.uuid(),
@@ -156,6 +187,7 @@ export const startSessionJobSchema = z.object({
     max_lifetime_minutes: z.number().int().min(1).max(1440),
     idle_timeout_minutes: z.number().int().min(1).max(1440),
     browser: browserSessionConfigSchema.optional(),
+    builder_workspace: builderSessionWorkspaceSchema.optional(),
   }),
 });
 
@@ -171,10 +203,112 @@ export const rotateEnvironmentKeyJobSchema = z.object({
   job_id: z.uuid(),
 });
 
+const gitRefSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9._/-]+$/)
+  .refine((value) => !value.startsWith("/") && !value.endsWith("/") && !value.includes("//") && !value.includes(".."));
+
+const repositoryPathSchema = z
+  .string()
+  .min(1)
+  .max(500)
+  .refine((value) => !value.startsWith("/") && !value.endsWith("/") && value.split("/").every((part) => Boolean(part) && part !== "." && part !== ".."));
+
+/** Builderが顧客Runtime内の隔離コンテナへ渡す、非機微なCode Workspace入力。 */
+export const builderWorkspaceJobSchema = z.object({
+  type: z.literal("builder_workspace"),
+  job_id: z.uuid(),
+  project_id: z.uuid(),
+  change_set_id: z.uuid(),
+  capability_topic: z.string().min(1).max(128),
+  repository_url: z.url().max(1000).refine((value) => {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash;
+    } catch {
+      return false;
+    }
+  }),
+  base_branch: gitRefSchema,
+  branch: gitRefSchema,
+  adapter_path: repositoryPathSchema,
+  interface_notes: z.string().min(1).max(4000),
+});
+export type BuilderWorkspaceJob = z.infer<typeof builderWorkspaceJobSchema>;
+
+/** token本体を含めず、Runtimeが実行直前に一度だけ資格情報を取得するbranch pushジョブ。 */
+export const publishBuilderBranchJobSchema = z.object({
+  type: z.literal("publish_builder_branch"),
+  job_id: z.uuid(),
+  project_id: z.uuid(),
+  change_set_id: z.uuid(),
+  connection_id: z.uuid(),
+  repository_url: z.url().refine((value) => value.startsWith("https://github.com/") && !new URL(value).username),
+  base_branch: gitRefSchema,
+  branch: gitRefSchema.refine((value) => value.startsWith("builder/"), "Builder専用branchだけを使用できます"),
+  base_sha: z.string().regex(/^[0-9a-f]{40,64}$/),
+  commit_sha: z.string().regex(/^[0-9a-f]{40,64}$/),
+}).strict();
+export type PublishBuilderBranchJob = z.infer<typeof publishBuilderBranchJobSchema>;
+
+export const gitCredentialResponseSchema = z.object({
+  username: z.literal("x-access-token"),
+  token: z.string().min(20),
+  expires_at: z.iso.datetime(),
+  repository_url: z.url(),
+}).strict();
+export type GitCredentialResponse = z.infer<typeof gitCredentialResponseSchema>;
+
+const builderWorkspaceTestResultSchema = z.object({
+  command: z.string().min(1).max(500),
+  status: z.enum(["passed", "failed"]),
+  exit_code: z.number().int().min(0).max(255),
+});
+
+/** Code WorkspaceからControl Planeへ戻してよい、Secretやソース本文を含まない証跡。 */
+export const builderWorkspaceResultSchema = z.object({
+  change_set_id: z.uuid(),
+  commit_sha: z.string().regex(/^[0-9a-f]{40,64}$/),
+  diff_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  summary: z.string().min(1).max(1000),
+  changed_files: z.array(repositoryPathSchema).min(1).max(200),
+  tests: z.array(builderWorkspaceTestResultSchema).min(1).max(50),
+});
+export type BuilderWorkspaceResult = z.infer<typeof builderWorkspaceResultSchema>;
+
+/** Agents API Artifactとして返すBuilder結果。開始時に固定したbase SHAも照合する。 */
+export const builderSessionResultSchema = builderWorkspaceResultSchema.extend({
+  base_sha: z.string().regex(/^[0-9a-f]{40,64}$/),
+});
+export type BuilderSessionResult = z.infer<typeof builderSessionResultSchema>;
+
+/** Self-hosted Session Workerの隔離volumeから、検証済み結果だけを回収する。 */
+export const collectBuilderSessionResultJobSchema = z.object({
+  type: z.literal("collect_builder_session_result"),
+  job_id: z.uuid(),
+  session_id: z.uuid(),
+  change_set_id: z.uuid(),
+}).strict();
+export type CollectBuilderSessionResultJob = z.infer<typeof collectBuilderSessionResultJobSchema>;
+
+export const gitPublishResultSchema = z.object({
+  change_set_id: z.uuid(),
+  branch: gitRefSchema,
+  base_sha: z.string().regex(/^[0-9a-f]{40,64}$/),
+  head_sha: z.string().regex(/^[0-9a-f]{40,64}$/),
+  remote_ref: z.string().startsWith("refs/heads/builder/").max(300),
+}).strict();
+export type GitPublishResult = z.infer<typeof gitPublishResultSchema>;
+
 export const runtimeJobSchema = z.discriminatedUnion("type", [
   startSessionJobSchema,
   stopSessionJobSchema,
   rotateEnvironmentKeyJobSchema,
+  builderWorkspaceJobSchema,
+  collectBuilderSessionResultJobSchema,
+  publishBuilderBranchJobSchema,
 ]);
 export type RuntimeJob = z.infer<typeof runtimeJobSchema>;
 export type StartSessionJob = z.infer<typeof startSessionJobSchema>;
@@ -185,8 +319,16 @@ export const jobResultRequestSchema = z
   .object({
     status: z.enum(["succeeded", "failed"]),
     error: z.string().max(2000).optional(),
+    // builderSessionResultはbuilderWorkspaceResultの上位互換なので先に評価し、
+    // base_shaがstripされないようにする。
+    output: z.union([builderSessionResultSchema, builderWorkspaceResultSchema, gitPublishResultSchema]).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((result, ctx) => {
+    if (result.status === "failed" && result.output) {
+      ctx.addIssue({ code: "custom", path: ["output"], message: "失敗したジョブへ成功結果は付けられません" });
+    }
+  });
 export type JobResultRequest = z.infer<typeof jobResultRequestSchema>;
 
 export const workerEventTypeSchema = z.enum(["worker_starting", "worker_running", "worker_stopped", "worker_failed"]);
@@ -252,4 +394,5 @@ export const RUNTIME_API = {
   consumeApproval: (approvalId: string) => `/runtime/v1/approvals/${approvalId}/consume`,
   audit: "/runtime/v1/audit",
   environmentKey: "/runtime/v1/environment-key",
+  gitCredential: (jobId: string) => `/runtime/v1/jobs/${jobId}/git-credential`,
 } as const;

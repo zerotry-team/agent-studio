@@ -49,6 +49,19 @@ model organizations {
   eval_runs           eval_runs[]
   external_jobs       external_jobs[]
   agent_schedules     agent_schedules[]
+  builder_projects    builder_projects[]
+  builder_runs        builder_runs[]
+  builder_steps       builder_steps[]
+  capability_plans    capability_plans[]
+  capability_gaps     capability_gaps[]
+  human_actions       human_actions[]
+  builder_sources     builder_discovery_sources[]
+  builder_changes     builder_change_sets[]
+  builder_sessions    builder_workspace_sessions[]
+  builder_validations builder_validation_runs[]
+  builder_releases    builder_releases[]
+  adapter_packages    builder_adapter_packages[]
+  git_webhook_events  git_webhook_deliveries[]
 }
 
 /// 組織ごとの OpenAI Project とキーの保管場所（SEC-11）。キーの値は持たない
@@ -117,6 +130,8 @@ model agents {
   environment_configs agent_environment_configs[]
   builds              agent_builds[]
   schedules           agent_schedules[]
+  builder_releases    builder_releases[]
+  builder_projects    builder_projects[]
 
   @@unique([organization_id, key])
   @@unique([organization_id, id])
@@ -222,6 +237,8 @@ model connections {
   runtime_id          String?   @db.Uuid
   runtime_secret_name String?
   header_name         String?
+  /// Provider固有の非機微メタデータ。GitHub Appではinstallation/repository allowlistと権限だけを保持する。
+  metadata            Json      @default("{}")
   /// studio: Secrets Manager の ARN / openai_vault: "vault_id" または "vault_id:credential_id"
   secret_locator      String?
   /// connected / expired / revoked / error
@@ -314,17 +331,21 @@ model runtimes {
   /// Session Worker から見た Tool Gateway の MCP エンドポイント（Controller が報告する）
   gateway_url        String?
   tool_catalog       Json      @default("[]")
+  /// Controller自身の管理能力（builder_workspace等）。業務Tool Catalogとは分離する。
+  capabilities       Json      @default("[]")
   last_heartbeat_at  DateTime? @db.Timestamptz(6)
   registered_at      DateTime? @db.Timestamptz(6)
   revoked_at         DateTime? @db.Timestamptz(6)
   created_at         DateTime  @default(now()) @db.Timestamptz(6)
   updated_at         DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
 
-  organization     organizations              @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  organization     organizations                @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   bootstrap_tokens runtime_bootstrap_tokens[]
   profiles         runtime_profiles[]
   connections      connections[]
   sessions         agent_sessions[]
+  builder_sessions builder_workspace_sessions[]
+  adapter_packages builder_adapter_packages[]
   jobs             runtime_jobs[]
 
   /// 1つの AWS プリンシパルは、全組織を通じて1つの Runtime にしか対応しない
@@ -385,11 +406,12 @@ model agent_builds {
   created_by         String?  @db.Uuid
   created_at         DateTime @default(now()) @db.Timestamptz(6)
 
-  organization    organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  agent           agents           @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
-  agent_version   agent_versions   @relation(fields: [organization_id, agent_version_id], references: [organization_id, id], onDelete: Restrict)
-  runtime_profile runtime_profiles @relation(fields: [organization_id, runtime_profile_id], references: [organization_id, id], onDelete: Restrict)
-  deployments     deployments[]
+  organization     organizations      @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent            agents             @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
+  agent_version    agent_versions     @relation(fields: [organization_id, agent_version_id], references: [organization_id, id], onDelete: Restrict)
+  runtime_profile  runtime_profiles   @relation(fields: [organization_id, runtime_profile_id], references: [organization_id, id], onDelete: Restrict)
+  deployments      deployments[]
+  builder_releases builder_releases[]
 
   @@unique([agent_id, build_number])
   @@unique([organization_id, id])
@@ -413,12 +435,13 @@ model deployments {
   created_by         String?  @db.Uuid
   created_at         DateTime @default(now()) @db.Timestamptz(6)
 
-  organization    organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  agent           agents           @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
-  agent_version   agent_versions   @relation(fields: [organization_id, agent_version_id], references: [organization_id, id], onDelete: Restrict)
-  runtime_profile runtime_profiles @relation(fields: [organization_id, runtime_profile_id], references: [organization_id, id], onDelete: Restrict)
-  build           agent_builds?    @relation(fields: [organization_id, build_id], references: [organization_id, id], onDelete: Restrict)
-  runs            runs[]
+  organization     organizations      @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent            agents             @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Cascade)
+  agent_version    agent_versions     @relation(fields: [organization_id, agent_version_id], references: [organization_id, id], onDelete: Restrict)
+  runtime_profile  runtime_profiles   @relation(fields: [organization_id, runtime_profile_id], references: [organization_id, id], onDelete: Restrict)
+  build            agent_builds?      @relation(fields: [organization_id, build_id], references: [organization_id, id], onDelete: Restrict)
+  runs             runs[]
+  builder_releases builder_releases[]
 
   @@unique([organization_id, id])
   @@index([organization_id, agent_id, stage, status])
@@ -447,13 +470,14 @@ model runs {
   started_at         DateTime? @db.Timestamptz(6)
   finished_at        DateTime? @db.Timestamptz(6)
 
-  organization  organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  deployment    deployments      @relation(fields: [organization_id, deployment_id], references: [organization_id, id], onDelete: Restrict)
-  sessions      agent_sessions[]
-  events        run_events[]
-  approvals     approvals[]
-  inputs        run_inputs[]
-  external_jobs external_jobs[]
+  organization     organizations      @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  deployment       deployments        @relation(fields: [organization_id, deployment_id], references: [organization_id, id], onDelete: Restrict)
+  sessions         agent_sessions[]
+  events           run_events[]
+  approvals        approvals[]
+  inputs           run_inputs[]
+  external_jobs    external_jobs[]
+  builder_releases builder_releases[]
 
   @@unique([organization_id, id])
   @@index([organization_id, created_at(sort: Desc)])
@@ -614,20 +638,23 @@ model approvals {
 
 /// Runtime Controller が取りに来るジョブ（RTM-05）
 model runtime_jobs {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organization_id String    @db.Uuid
-  runtime_id      String    @db.Uuid
-  session_id      String?   @db.Uuid
-  type            String
-  payload         Json
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id        String    @db.Uuid
+  runtime_id             String    @db.Uuid
+  session_id             String?   @db.Uuid
+  type                   String
+  payload                Json
   /// pending / leased / succeeded / failed / cancelled
-  status          String    @default("pending")
-  attempts        Int       @default(0)
-  leased_until    DateTime? @db.Timestamptz(6)
-  error           String?
-  created_at      DateTime  @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
-  completed_at    DateTime? @db.Timestamptz(6)
+  status                 String    @default("pending")
+  attempts               Int       @default(0)
+  leased_until           DateTime? @db.Timestamptz(6)
+  credential_consumed_at DateTime? @db.Timestamptz(6)
+  error                  String?
+  /// Runtimeから返された、schema検証済みの非機微なジョブ結果
+  result                 Json?
+  created_at             DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  completed_at           DateTime? @db.Timestamptz(6)
 
   organization organizations   @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   runtime      runtimes        @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Cascade)
@@ -712,6 +739,344 @@ model eval_runs {
   organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
 
   @@index([organization_id, agent_id])
+}
+
+/// Agent / Workflow を作る長時間の作成作業。日常業務を実行する agents とは権限も状態も分離する。
+model builder_projects {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  /// 利用者に見せる親。旧レコードは初回再開時にbackfillするため移行期間中のみnullable。
+  agent_id        String?   @db.Uuid
+  request         String
+  target          String    @default("preview")
+  status          String    @default("draft")
+  created_by      String?   @db.Uuid
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  completed_at    DateTime? @db.Timestamptz(6)
+
+  organization       organizations                @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  agent              agents?                      @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Restrict)
+  runs               builder_runs[]
+  plans              capability_plans[]
+  gaps               capability_gaps[]
+  human_actions      human_actions[]
+  discovery_sources  builder_discovery_sources[]
+  change_sets        builder_change_sets[]
+  workspace_sessions builder_workspace_sessions[]
+  validation_runs    builder_validation_runs[]
+  releases           builder_releases[]
+  adapter_packages   builder_adapter_packages[]
+
+  @@unique([organization_id, id])
+  @@index([organization_id, agent_id, updated_at(sort: Desc)])
+  @@index([organization_id, updated_at(sort: Desc)])
+}
+
+/// Builder Orchestrator の1試行。lease によりプロセス再起動後も別 Worker が再開できる。
+model builder_runs {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  project_id      String    @db.Uuid
+  attempt         Int
+  status          String    @default("queued")
+  budget          Json      @default("{}")
+  correlation_id  String    @db.Uuid
+  lease_owner     String?
+  lease_until     DateTime? @db.Timestamptz(6)
+  error_class     String?
+  error           String?
+  started_at      DateTime? @db.Timestamptz(6)
+  finished_at     DateTime? @db.Timestamptz(6)
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations      @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  project      builder_projects   @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Cascade)
+  steps        builder_steps[]
+  releases     builder_releases[]
+
+  @@unique([organization_id, id])
+  @@unique([project_id, attempt])
+  @@index([status, lease_until, created_at])
+}
+
+/// 冪等に再開する最小単位。input_hash は後続フェーズで成功 Step を再利用するときの判定に使う。
+model builder_steps {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  run_id          String    @db.Uuid
+  kind            String
+  status          String    @default("pending")
+  input_hash      String
+  output          Json?
+  error_class     String?
+  error           String?
+  attempts        Int       @default(0)
+  started_at      DateTime? @db.Timestamptz(6)
+  finished_at     DateTime? @db.Timestamptz(6)
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  run          builder_runs  @relation(fields: [organization_id, run_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([run_id, kind])
+  @@unique([organization_id, id])
+}
+
+model capability_plans {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id     String   @db.Uuid
+  project_id          String   @db.Uuid
+  version             Int
+  requirements        Json
+  graph               Json
+  risks               Json     @default("[]")
+  execution_locations Json     @default("[]")
+  created_at          DateTime @default(now()) @db.Timestamptz(6)
+
+  organization organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  project      builder_projects @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([project_id, version])
+  @@unique([organization_id, id])
+}
+
+model capability_gaps {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id     String   @db.Uuid
+  project_id          String   @db.Uuid
+  requirement         String
+  gap_type            String
+  resolution_strategy String
+  status              String   @default("open")
+  detail              Json     @default("{}")
+  created_at          DateTime @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  project      builder_projects @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, id])
+  @@index([project_id, status])
+}
+
+/// Secret の値は持たない。入力項目と再開条件だけを型付きで保存する。
+model human_actions {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id  String    @db.Uuid
+  project_id       String    @db.Uuid
+  type             String
+  title            String
+  reason           String
+  assignee_role    String
+  fields           Json      @default("[]")
+  instructions     Json      @default("[]")
+  resume_condition Json
+  /// Business clarification answers only. Secret fields are never accepted here.
+  response         Json?
+  status           String    @default("pending")
+  completed_by     String?   @db.Uuid
+  completed_at     DateTime? @db.Timestamptz(6)
+  expires_at       DateTime? @db.Timestamptz(6)
+  created_at       DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  organization organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  project      builder_projects @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, id])
+  @@index([project_id, status])
+}
+
+/// Builderが参照した仕様の来歴。仕様本文やSecretは保存せず、検証可能なハッシュと抽出結果だけを持つ。
+model builder_discovery_sources {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  project_id      String   @db.Uuid
+  kind            String
+  title           String
+  spec_version    String?
+  source_url      String?
+  content_hash    String
+  metadata        Json     @default("{}")
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  organization organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  project      builder_projects @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, id])
+  @@index([project_id, created_at(sort: Desc)])
+}
+
+/// Connector / Tool / code / infraへ加えた生成差分の固定記録。Secretや仕様本文は含めない。
+model builder_change_sets {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  project_id      String   @db.Uuid
+  kind            String
+  status          String
+  summary         String
+  risk            String
+  artifacts       Json     @default("[]")
+  source_hash     String?
+  base_sha        String?
+  head_sha        String?
+  pr_url          String?
+  pr_number       Int?
+  merge_sha       String?
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  organization organizations                @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  project      builder_projects             @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Cascade)
+  sessions     builder_workspace_sessions[]
+  packages     builder_adapter_packages[]
+
+  @@unique([organization_id, id])
+  @@index([project_id, created_at(sort: Desc)])
+}
+
+/// merge済みcommitから生成した署名付き・不変のAdapter成果物。package本文やSecretは保持しない。
+model builder_adapter_packages {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  project_id      String    @db.Uuid
+  change_set_id   String    @db.Uuid
+  runtime_id      String    @db.Uuid
+  status          String    @default("pending")
+  connector_key   String
+  descriptor_hash String
+  contract_hash   String
+  source_commit   String
+  image_digest    String
+  signature       String
+  provenance      Json      @default("{}")
+  health_status   String    @default("pending")
+  error_class     String?
+  error           String?
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  deployed_at     DateTime? @db.Timestamptz(6)
+  registered_at   DateTime? @db.Timestamptz(6)
+
+  organization organizations       @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  project      builder_projects    @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Cascade)
+  change_set   builder_change_sets @relation(fields: [organization_id, change_set_id], references: [organization_id, id], onDelete: Cascade)
+  runtime      runtimes            @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
+
+  @@unique([change_set_id])
+  @@unique([organization_id, id])
+  @@unique([organization_id, connector_key, image_digest])
+  @@index([runtime_id, status])
+}
+
+/// GitHub webhookのdelivery IDを保存し、署名検証済みイベントを冪等に処理する。
+model git_webhook_deliveries {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String   @db.Uuid
+  delivery_id     String
+  event           String
+  repository_id   String
+  payload_hash    String
+  processed_at    DateTime @default(now()) @db.Timestamptz(6)
+
+  organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  @@unique([organization_id, delivery_id])
+  @@unique([organization_id, id])
+}
+
+/// BuilderのCode Workspace Change SetごとのAgents API Session。prompt本文、生成コード、Environment Keyは保持しない。
+model builder_workspace_sessions {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id       String    @db.Uuid
+  project_id            String    @db.Uuid
+  change_set_id         String    @db.Uuid
+  runtime_id            String    @db.Uuid
+  openai_session_id     String?   @unique
+  openai_environment_id String?
+  /// creating / waiting_worker / connected / running / succeeded / failed / cancelled / expired
+  status                String    @default("creating")
+  attempt               Int       @default(1)
+  lease_owner           String?
+  lease_until           DateTime? @db.Timestamptz(6)
+  expires_at            DateTime  @db.Timestamptz(6)
+  last_event_at         DateTime? @db.Timestamptz(6)
+  prompt_hash           String
+  result_hash           String?
+  error_class           String?
+  error                 String?
+  /// Tool Gatewayとの互換用。平文tokenは保存しない。
+  token_hash            String
+  worker_task_arn       String?
+  created_at            DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  finished_at           DateTime? @db.Timestamptz(6)
+
+  organization organizations       @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  project      builder_projects    @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Cascade)
+  change_set   builder_change_sets @relation(fields: [organization_id, change_set_id], references: [organization_id, id], onDelete: Cascade)
+  runtime      runtimes            @relation(fields: [organization_id, runtime_id], references: [organization_id, id], onDelete: Restrict)
+
+  @@unique([change_set_id, attempt])
+  @@unique([organization_id, id])
+  @@index([status, lease_until, created_at])
+  @@index([runtime_id, status])
+}
+
+/// Contract / Security / Smoke / Previewの検証結果。証拠は非機微な構造化情報だけを保存する。
+model builder_validation_runs {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String    @db.Uuid
+  project_id      String    @db.Uuid
+  suite           String
+  environment     String
+  status          String
+  evidence        Json      @default("{}")
+  error_class     String?
+  error           String?
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  finished_at     DateTime? @db.Timestamptz(6)
+
+  organization organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  project      builder_projects @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Cascade)
+
+  @@unique([organization_id, id])
+  @@index([project_id, created_at(sort: Desc)])
+}
+
+/// Builderが生成したAgentとPreview Build/Runを1つに固定するリリース候補。
+model builder_releases {
+  id                            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id               String    @db.Uuid
+  project_id                    String    @db.Uuid
+  builder_run_id                String    @db.Uuid
+  agent_id                      String    @db.Uuid
+  build_id                      String    @db.Uuid
+  preview_deployment_id         String    @db.Uuid
+  preview_run_id                String?   @db.Uuid
+  production_deployment_id      String?   @db.Uuid
+  production_run_id             String?   @db.Uuid
+  rollback_target_deployment_id String?   @db.Uuid
+  status                        String    @default("preview_ready")
+  config_hash                   String
+  required_tools                String[]  @default([])
+  created_at                    DateTime  @default(now()) @db.Timestamptz(6)
+  finished_at                   DateTime? @db.Timestamptz(6)
+
+  organization       organizations    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  project            builder_projects @relation(fields: [organization_id, project_id], references: [organization_id, id], onDelete: Cascade)
+  builder_run        builder_runs     @relation(fields: [organization_id, builder_run_id], references: [organization_id, id], onDelete: Restrict)
+  agent              agents           @relation(fields: [organization_id, agent_id], references: [organization_id, id], onDelete: Restrict)
+  build              agent_builds     @relation(fields: [organization_id, build_id], references: [organization_id, id], onDelete: Restrict)
+  preview_deployment deployments      @relation(fields: [organization_id, preview_deployment_id], references: [organization_id, id], onDelete: Restrict)
+  preview_run        runs?            @relation(fields: [organization_id, preview_run_id], references: [organization_id, id], onDelete: Restrict)
+
+  @@unique([organization_id, id])
+  @@unique([builder_run_id])
+  @@index([project_id, created_at(sort: Desc)])
+  @@index([status, created_at])
+  @@index([production_run_id])
 }
 
 /// 監査ログ（AUD）。アプリのロールには INSERT / SELECT しか与えない

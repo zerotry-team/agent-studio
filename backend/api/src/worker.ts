@@ -9,7 +9,7 @@ const env = loadEnv();
 const logger = createLogger(env.LOG_LEVEL, "agent-studio-worker");
 const database = createDatabase(env);
 const deps = buildDeps(env, logger, database);
-const scheduler = new WorkerScheduler(deps, new StudioFunctionExecutor(deps.db, deps.secrets));
+const scheduler = new WorkerScheduler(deps, new StudioFunctionExecutor(deps.db, deps.secrets, env));
 
 const controller = new AbortController();
 const stop = (signal: string) => {

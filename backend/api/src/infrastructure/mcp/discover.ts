@@ -1,4 +1,4 @@
-import type { DiscoveredMcpToolDto } from "@agent-studio/contracts";
+import { inputSchemaSchema, type DiscoveredMcpToolDto } from "@agent-studio/contracts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { preconditionFailed } from "../../domain/errors.js";
@@ -39,9 +39,17 @@ export async function discoverMcpTools(serverUrl: string): Promise<DiscoveredMcp
       const page = await client.listTools(cursor ? { cursor } : undefined, { timeout: CONNECT_TIMEOUT_MS });
       for (const tool of page.tools) {
         const annotations = tool.annotations as ToolAnnotations | undefined;
+        if (JSON.stringify(tool.inputSchema).length > 100_000) {
+          throw preconditionFailed(`MCP操作 ${tool.name} のinputSchemaが大きすぎます`);
+        }
+        const inputSchema = inputSchemaSchema.safeParse(tool.inputSchema);
+        if (!inputSchema.success) {
+          throw preconditionFailed(`MCP操作 ${tool.name} のinputSchemaがobject形式ではありません`);
+        }
         tools.push({
           name: tool.name,
-          description: (tool.description ?? "").slice(0, 1000),
+          description: (tool.description ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 1000),
+          input_schema: inputSchema.data,
           // annotations は任意。申告がなければ不明として扱い、こちらで決めつけない
           read_only: typeof annotations?.readOnlyHint === "boolean" ? annotations.readOnlyHint : null,
           destructive: annotations?.destructiveHint === true,
