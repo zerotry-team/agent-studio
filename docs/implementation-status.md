@@ -2,7 +2,7 @@
 
 要件定義書（docs/requirements.md）の §15 のフェーズごとに、実装したもの・確認したこと・残っていることをまとめる。
 「確認済み」は、ローカルでは Docker の PostgreSQL と擬似 OpenAI を使った自動テスト・画面操作まで。
-AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適用、ECS の安定化、Control Plane の `/health` まで確認済み。
+AWS は過去の基盤commitで production の Control Plane と Sample A 社 Runtime の Terraform 適用、ECS の安定化、Control Plane の `/health` まで確認済み。現在の main SHA は GitHub Environment のAWS設定不足により未deployであり、同じ実績として扱わない。
 以下の従来フェーズ表は初期基盤の記録として残し、Agent版Vercel MVPの最新状態は次節を正とする。
 
 ## 最終完成仕様 v1.0 対応表（正本）
@@ -107,7 +107,7 @@ AWS は production の Control Plane と Sample A 社 Runtime の Terraform 適�
 - X公開は固定の匿名payloadだけを許可し、reject、長い数字、URL、mention、追加項目を実行直前にも拒否する。最終本文と投稿先を表示する明示承認、本文hash固定、`logical_post_id`のbody除外、`publish_post`一回、Provider Job `succeeded`待ち、post ID/permalinkのRun証跡表示まで実装した。
 - 実ブラウザで`/agents/new`から架空ファクタリングAgentを作成し、同一Agent詳細の不足情報カード、回答後の自動再開、Agent一覧の`準備待ち`表示まで確認した（Agent `c437d2b2-ac93-4dda-be8d-2fd2a2d19f18`）。
 - 認証が必要なOpenAPI / MCPはConnection接続テストまたはOAuth code交換後に自動再開する。実Provider認証を伴うBuilder Project E2Eは各Providerの資格情報が必要。
-- Human Login browser profileのControl Planeメタデータ、顧客Runtime内SSE-KMS保存先、Login Session、Runtime結果検証、自動再開は実装済み。人が操作するOutbound RelayとProfile Brokerは未実装。Code WorkspaceはAgents API Session、`codex exec-server`、隔離workspace準備、生成・テスト・local commit、Artifact証跡反映、GitHub Appのbranch/PR、merge後package/Tool登録まで実装した。
+- Human Login browser profileのControl Planeメタデータ、顧客Runtime内SSE-KMS保存先、Login Session、Runtime結果検証、自動再開に加え、人が操作するOutbound WebSocket Relay、Runtime側Profile Broker、切断時の再接続、revoke cleanupを実装した。実Chromiumでpassword入力、HttpOnly Cookie保存、別Browser SessionへのProfile復元を確認済み。Code WorkspaceはAgents API Session、`codex exec-server`、隔離workspace準備、生成・テスト・local commit、Artifact証跡反映、GitHub Appのbranch/PR、merge後package/Tool登録まで実装した。
 - 最終Definition of Doneのうち、実GitHub Appの権限更新後に行うprivate repository自動作成、branch/PR/CI/Agent Studio承認によるmerge、実Self-hosted Runtimeへの署名package配布、実Environment Key + local Docker `codex exec-server`、F-01〜F-08の実Preview Run、検証用Xアカウントへの実投稿とpermalink確認は外部資格情報・最終承認が必要なため未実施。これらを実施するまでは完成扱いにしない。
 - 実ブラウザProject `4a13c3fd-e649-4f51-9ecf-aff9e06a600f` で6件の業務質問へ非機微なデモ回答を入れ、問い合わせ履歴・社内否決一覧のRepository質問、2件の`code_workspace` Change Set、反社照合`browser_flow` Change Set、Code Workspace Runtime待ちへの遷移を確認した。旧standalone `codex exec`経路はEnvironment KeyでHTTP 401となったため使用を止め、個人Codex認証や長期OpenAI API Keyをmount/injectせず、Agents API Session + `codex exec-server`へ置き換えた。実OpenAI/実Dockerでの再受け入れは未実施。
 - 顧客AWSへのTerraform applyは意図的にHuman Actionとして残し、BuilderはPlanとRuntime登録後の自動再開までを担当する。
@@ -254,7 +254,7 @@ SDK（`openai` 7.x）の型を調べた結果（docs/reference/openai-agents-sdk
 | ワークフロー | actionlint | 指摘なし |
 | Runtime の実プロセス | 手元で API + Controller + Tool Gateway + 社内 API モックを動かし、MCP クライアントで呼び出し | 登録・ハートビート・ツールの絞り込み・Runtime 側の拒否・承認待ち → 承認 → 1 回だけ実行 → 監査ログ まで確認 |
 | 画面 | 開発用ログインでダッシュボード・実行の詳細を表示 | 表示できる |
-| AWS production 基盤 | GitHub Actions で Control Plane / Sample A 社 Runtime を適用し、ECS の安定化と公開 URL の `/health` を確認 | 基盤は成功。本物の OpenAI / Claude と Runtime セッションの E2E は未確認 |
+| AWS production 基盤 | 過去の基盤commitをGitHub ActionsでControl Plane / Sample A社Runtimeへ適用し、ECSの安定化と公開URLの`/health`を確認 | 過去の基盤適用は成功。現在のmain SHAはGitHub EnvironmentのAWS設定不足により未deploy。本物のOpenAI / ClaudeとRuntime SessionのCloud E2Eも未確認 |
 
 ## 気づいている改善点
 
