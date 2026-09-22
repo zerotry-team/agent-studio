@@ -95,6 +95,15 @@ data "aws_iam_policy_document" "app_task" {
       "${aws_s3_bucket.audit.arn}/*",
     ]
   }
+
+  # HeadObject は対象がまだ存在しないとき、ListBucket 権限がないと 404 ではなく
+  # 403 を返す。AuditExporter は未出力の時間帯を HeadObject で判定するため、
+  # バケット直下の ListBucket を許可する（オブジェクトの削除権限は与えない）。
+  statement {
+    sid       = "ListBuckets"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.artifacts.arn, aws_s3_bucket.audit.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "app_task" {
