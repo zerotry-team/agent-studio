@@ -57,9 +57,9 @@ resource "aws_cloudfront_distribution" "this" {
     origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
   }
 
-  # api（/api/*、/runtime/*、/health、/health/*）。振り分け自体は ALB のパス条件で行う
+  # api（/api/*、/runtime/*、/health、/health/*、/webhooks/*）。振り分け自体は ALB のパス条件で行う
   dynamic "ordered_cache_behavior" {
-    for_each = local.api_path_patterns
+    for_each = concat(local.api_path_patterns, local.webhook_path_patterns)
     content {
       path_pattern             = ordered_cache_behavior.value
       target_origin_id         = local.alb_origin_id

@@ -11,6 +11,8 @@ locals {
 
   # CloudFront でも同じパスを api に振り分ける
   api_path_patterns = ["/api/*", "/runtime/*", "/health", "/health/*"]
+  # GitHub App などからの webhook（認証は署名で行う）。ALB のルールは条件の値が 5 つまでなので別ルールにする
+  webhook_path_patterns = ["/webhooks/*"]
 }
 
 resource "aws_lb" "this" {
@@ -126,6 +128,29 @@ resource "aws_lb_listener_rule" "api" {
   condition {
     path_pattern {
       values = local.api_path_patterns
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "webhooks" {
+  listener_arn = aws_lb_listener.this.arn
+  priority     = 11
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.api.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Origin-Verify"
+      values           = [random_password.origin_verify.result]
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = local.webhook_path_patterns
     }
   }
 }
