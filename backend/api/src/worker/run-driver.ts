@@ -63,6 +63,16 @@ export class SingleFlight<T> {
   }
 }
 
+export function restoredTurnState(input: { sentInputCount: number; hasAssistantOutput: boolean; workEventCount: number }): {
+  turnStarted: boolean;
+  turnDidWork: boolean;
+} {
+  return {
+    turnStarted: input.sentInputCount > 0,
+    turnDidWork: input.hasAssistantOutput || input.workEventCount > 0,
+  };
+}
+
 function safeWorkflowToolOutput(output: string): string {
   try {
     return JSON.stringify(redactLogValue(JSON.parse(output))).slice(0, 20_000);
@@ -114,6 +124,8 @@ interface DriverState {
   turnDidWork: boolean;
   /** 入力を送ったあとターンが始まったか。始まる前の idle で打ち切らないため */
   turnStarted: boolean;
+  /** 再起動後の取りこぼしをSession itemsから復元したか */
+  recentItemsHydrated: boolean;
   callCounts: Map<string, number>;
 }
 
@@ -172,7 +184,19 @@ export class RunDriver {
         where: { run_id: this.runId, ended_at: null },
         orderBy: { created_at: "desc" },
       });
-      return { run, session };
+      const latestSentInput = await tx.run_inputs.findFirst({
+        where: { run_id: this.runId, status: "sent" },
+        orderBy: { sent_at: "desc" },
+      });
+      const sentInputCount = await tx.run_inputs.count({ where: { run_id: this.runId, status: "sent" } });
+      const evidenceWindow = latestSentInput?.sent_at ? { created_at: { gte: latestSentInput.sent_at } } : {};
+      const [workEventCount, assistantOutputCount] = await Promise.all([
+        tx.run_events.count({ where: { run_id: this.runId, type: "tool.call", ...evidenceWindow } }),
+        tx.run_events.count({
+          where: { run_id: this.runId, type: "message", data: { path: ["role"], equals: "assistant" }, ...evidenceWindow },
+        }),
+      ]);
+      return { run, session, sentInputCount, workEventCount, assistantOutputCount };
     });
     const { run } = loaded;
     if (TERMINAL_RUN_STATUSES.includes(run.status as RunStatus)) return null;
@@ -180,6 +204,11 @@ export class RunDriver {
     const config = run.deployment.compiled_config as unknown as CompiledAgentConfig;
     this.api = await this.deps.agentsApi.forOrganization(this.organizationId);
 
+    const restored = restoredTurnState({
+      sentInputCount: loaded.sentInputCount,
+      hasAssistantOutput: loaded.assistantOutputCount > 0,
+      workEventCount: loaded.workEventCount,
+    });
     const base = {
       run: {
         id: run.id,
@@ -195,8 +224,9 @@ export class RunDriver {
       lastTurnError: null,
       rootTurnIds: new Set<string>(),
       handledCalls: new Set<string>(),
-      turnDidWork: false,
-      turnStarted: false,
+      turnDidWork: restored.turnDidWork,
+      turnStarted: restored.turnStarted,
+      recentItemsHydrated: false,
       callCounts: new Map<string, number>(),
     };
 
@@ -454,6 +484,7 @@ export class RunDriver {
       case "idle":
         state.idle = true;
         state.rootTurnActive = false;
+        await this.hydrateRecentItems(state);
         return this.onIdle(state);
       default:
         state.idle = false;
@@ -599,6 +630,43 @@ export class RunDriver {
   /** セッションが空いた: 入力を送るか、承認待ちにするか、完了にする */
   private onIdle(state: DriverState): Promise<Outcome> {
     return this.idleSingleFlight.run(() => this.processIdle(state));
+  }
+
+  /**
+   * OpenAIのevent streamは再送されない。Worker再起動中に最終回答が到着していた場合は、
+   * Session itemsから結果を1回だけ復元してRunを永久待機させない。
+   */
+  private async hydrateRecentItems(state: DriverState): Promise<void> {
+    if (state.recentItemsHydrated || !state.turnStarted || state.turnDidWork) return;
+    state.recentItemsHydrated = true;
+    const items = await this.api.listRecentItems(state.openaiSessionId, 100);
+    const latestUser = items.find((item) => item.type === "message" && item.role === "user");
+    const latestTurnId = latestUser?.type === "message" ? latestUser.turn_id : null;
+    const final = items.find(
+      (item) => item.type === "message" && item.role === "assistant" && item.phase === "final_answer" && item.status === "completed"
+        && (!latestTurnId || item.turn_id === latestTurnId),
+    );
+    if (final?.type === "message") {
+      const text = outputText(final);
+      if (text.trim()) {
+        state.turnDidWork = true;
+        await this.deps.db.org(this.organizationId, async (tx) => {
+          const run = await tx.runs.findUniqueOrThrow({ where: { id: this.runId } });
+          if (run.output === text) return;
+          await tx.runs.update({ where: { id: this.runId }, data: { output: text } });
+          await appendRunEvent(tx, state.run, "message", "エージェントの回答（再接続後に復元）", { role: "assistant", text });
+        });
+      }
+    }
+    if (!state.turnDidWork) {
+      state.turnDidWork = items.some((item) =>
+        ["mcp_call", "command_execution", "web_search_call"].includes(item.type)
+          && (!latestTurnId || ("turn_id" in item && item.turn_id === latestTurnId)),
+      );
+    }
+    this.log.info({ phase: "session.restore", session_id: state.openaiSessionId, item_count: items.length,
+      turn_started: state.turnStarted, turn_did_work: state.turnDidWork,
+    }, "再起動後のターン状態を復元しました");
   }
 
   private async processIdle(state: DriverState): Promise<Outcome> {
