@@ -152,6 +152,8 @@ export function buildBuilderPreviewInput(
   }
 
   const generatesImage = previewToolNames.includes("generate_image");
+  const browserArtifact = previewToolNames.includes("browser_download");
+  const browserExec = previewToolNames.includes("browser_exec_js");
   const readToolNames = previewToolNames.filter((name) => name !== "generate_image");
   const prohibitedToolNames = toolNames.filter((name) => !previewToolNames.includes(name));
   const actions = [
@@ -160,6 +162,15 @@ export function buildBuilderPreviewInput(
       : []),
     ...(generatesImage
       ? ["generate_image を実際に1回呼び出し、テーマが未指定なら「青空の下の白い折り紙の鳥」を安全な検証用テーマとしてPNG画像を生成し、RunのArtifactとして保存する"]
+      : []),
+    ...(browserArtifact
+      ? ["browser_navigateで依頼に記載された許可ドメインを開き、browser_snapshotで画面を確認する"]
+      : []),
+    ...(browserExec
+      ? ["browser_exec_jsで固定の検証用CSV Blobからdownloadリンクを作成し、外部送信せずにbrowser_downloadへ渡す"]
+      : []),
+    ...(browserArtifact
+      ? ["browser_downloadを実際に1回呼び出してRun専用Artifactへ保存し、ファイル名とSHA-256だけを報告する"]
       : []),
   ];
   const prohibited = prohibitedToolNames.length
@@ -230,6 +241,7 @@ const BROWSER_FLOW_TOOL_NAMES = [
   "browser_download",
   "browser_upload",
 ] as const;
+const BROWSER_ARTIFACT_TOOL_NAMES = [...BROWSER_FLOW_TOOL_NAMES, "browser_exec_js"] as const;
 const REQUIRED_BROWSER_FLOW_TOOL_NAMES = new Set(["browser_navigate", "browser_snapshot", "browser_screenshot"]);
 const GENERATED_IMAGE_REQUEST = /(?:(?:画像|挿絵|イラスト|サムネイル).*(?:生成|作成|追加)|(?:生成|作成).*(?:画像|挿絵|イラスト|サムネイル))/i;
 const BROWSER_ARTIFACT_REQUEST = /browser|ブラウザ|browser_download|browser_upload|download|upload|ダウンロード|アップロード/i;
@@ -250,7 +262,7 @@ export function ensureRequiredScenarioTools(
   const requiresBrowserArtifact = BROWSER_ARTIFACT_REQUEST.test(request);
   if (requiresFreshWeb) required.add("web_search");
   if (requiresGeneratedImage) required.add("generate_image");
-  if (requiresBrowserArtifact) BROWSER_FLOW_TOOL_NAMES.forEach((name) => required.add(name));
+  if (requiresBrowserArtifact) BROWSER_ARTIFACT_TOOL_NAMES.forEach((name) => required.add(name));
   if (/ファクタリング|買取申込|審査.*(?:可|否|保留)/i.test(request)) {
     ["list_applications", "get_application", "analyze_bank_statement", "check_compliance", "evaluate_factoring_rules", "record_screening"]
       .forEach((name) => required.add(name));
@@ -312,13 +324,13 @@ export function ensureRequiredScenarioTools(
       variables: [],
     });
   }
-  if (requiresBrowserArtifact && !requirements.some((requirement) => requirement.tool_names.some((name) => BROWSER_FLOW_TOOL_NAMES.includes(name as typeof BROWSER_FLOW_TOOL_NAMES[number])))) {
+  if (requiresBrowserArtifact && !requirements.some((requirement) => requirement.tool_names.some((name) => BROWSER_ARTIFACT_TOOL_NAMES.includes(name as typeof BROWSER_ARTIFACT_TOOL_NAMES[number])))) {
     requirements.push({
       requirement: "BrowserでファイルをDownloadし、Run専用Artifactとして保存する",
       state: tools.some((tool) => tool.name === "browser_download" && tool.ready) ? "resolved" : "needs_connection",
       connector_id: tools.find((tool) => tool.name === "browser_download")?.connectorId ?? null,
       connector_name: tools.find((tool) => tool.name === "browser_download")?.connectorName ?? "Runtime Browser",
-      tool_names: tools.filter((tool) => BROWSER_FLOW_TOOL_NAMES.includes(tool.name as typeof BROWSER_FLOW_TOOL_NAMES[number])).map((tool) => tool.name),
+      tool_names: tools.filter((tool) => BROWSER_ARTIFACT_TOOL_NAMES.includes(tool.name as typeof BROWSER_ARTIFACT_TOOL_NAMES[number])).map((tool) => tool.name),
       confidence: 1,
       reason: "Browser Download/Artifact依頼をBrowser Runtimeへ固定しました",
       variables: [],
