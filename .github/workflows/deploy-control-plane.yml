@@ -221,7 +221,16 @@ jobs:
           set -euo pipefail
           URL=$(terraform -chdir="$ROOT" output -raw public_url)
           for _ in $(seq 1 30); do
-            if curl -fsS "${URL}/health/ready"; then echo; exit 0; fi
+            BODY=$(mktemp)
+            STATUS=$(curl -sS --max-redirs 0 --output "$BODY" --write-out '%{http_code}' "${URL}/health/ready" || true)
+            if [ "$STATUS" = "200" ] && jq -e '.ok == true and .env == env.STAGE' "$BODY" >/dev/null; then
+              cat "$BODY"
+              rm -f "$BODY"
+              echo
+              exit 0
+            fi
+            echo "readiness status=${STATUS} body=$(head -c 500 "$BODY")"
+            rm -f "$BODY"
             sleep 10
           done
           echo "::error::${URL}/health/ready がDB・Worker・Runtime・Deploymentをreadyと判定しません"
