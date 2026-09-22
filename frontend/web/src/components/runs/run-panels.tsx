@@ -19,7 +19,9 @@ export function RunTextPanel({
   placeholder,
   actions,
   format = "plain",
+  runId,
 }: {
+  runId?: string;
   title: string;
   text: string | null;
   placeholder: ReactNode;
@@ -32,7 +34,7 @@ export function RunTextPanel({
       <CardBody>
         {text ? (
           format === "rich" ? (
-            <RunOutput output={text} />
+            <RunOutput output={text} runId={runId} />
           ) : (
             <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-gray-900">{text}</p>
           )

@@ -82,6 +82,13 @@ export function createInternalApp(deps: InternalApiDeps): Hono {
     return grant ? c.json(grant) : c.json(errorBody("not_found", "セッションが見つかりません"), 404);
   });
 
+  app.get("/internal/sessions/:id/grant", async (c) => {
+    const id = c.req.param("id");
+    if (!UUID_RE.test(id)) return c.json(errorBody("validation_error", "セッション ID の形式が正しくありません"), 400);
+    const grant = deps.grants.get(id)?.grant;
+    return grant ? c.json(grant) : c.json(errorBody("not_found", "セッションが見つかりません"), 404);
+  });
+
   app.post("/internal/approvals", bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
     const parsed = approvalRequestSchema.safeParse(await readJson(c));
     if (!parsed.success) return c.json(errorBody("validation_error", "承認依頼の形式が正しくありません"), 400);

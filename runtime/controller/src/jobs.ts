@@ -10,6 +10,7 @@ import type { WorkspaceExecutor } from "./workspace-executor.js";
 import type { GitPublisher } from "./git-publisher.js";
 import type { BuilderResultCollector } from "./builder-result-collector.js";
 import type { BrowserProfileBroker } from "./browser-profile-broker.js";
+import { sessionOutputsToken, sessionOutputsUrl } from "./session-outputs.js";
 
 export interface JobHandlerDeps {
   grants: GrantStore;
@@ -22,6 +23,8 @@ export interface JobHandlerDeps {
   studio: Pick<StudioApi, "sessionEvent" | "environmentKey" | "browserProfile">;
   secrets: Pick<ControllerSecrets, "saveEnvironmentKey">;
   logger: Logger;
+  /** Session Worker から見た Tool Gateway の URL。作業領域の成果物の送信先に使う */
+  gatewayPublicUrl?: string;
   limits: { maxConcurrentSessions: number; sessionMaxLifetimeMinutes: number };
   /** RUNNING になるまで待つ上限 */
   startTimeoutMs?: number;
@@ -199,6 +202,9 @@ export class JobHandler {
         remoteUrl,
         environmentId,
         ...(builderWorkspace ? { builderWorkspace } : {}),
+        ...(!builderWorkspace && this.deps.gatewayPublicUrl
+          ? { outputs: { url: sessionOutputsUrl(this.deps.gatewayPublicUrl, sessionId), token: sessionOutputsToken(sessionId, grant.token_hash) } }
+          : {}),
         idempotencyToken: job.job_id,
       }));
     } catch (err) {

@@ -99,6 +99,8 @@ Runtime向け`POST /runtime/v1/jobs/:id/git-credential`は、対象Runtimeへlea
 
 Runtime向け`POST /runtime/v1/sessions/:id/artifacts`は、Tool Gatewayが`browser_download`の本文をRun Artifactとして保存するときだけ使う（Browser Worker → Tool Gateway → Controller 内部API → Agent Studio）。自分のRuntimeが持つ未終了Sessionに限り、base64本文（25MB以下）のサイズ・SHA-256を再検証し、安全検査を通ったものだけS3の`orgs/<org>/runs/<run>/browser-downloads/<artifact_id>/<filename>`へ保存する。拒否したファイルは`scan_status=rejected`の記録だけを残す。モデルへはメタデータとRun Artifact IDだけを返し、本文は返さない。
 
+Self-hostedのSession WorkerはOpenAIのArtifacts APIからファイルを取り出せないため、`/workspace/outputs`と`/workspace/generated_images`を数秒ごとに確認し、Tool Gatewayの`PUT /session-outputs/<session_id>/<相対パス>`へ送る。Authorizationは起動時にControllerが渡すSession専用token（Session IDとMCP token hashから作る）で、このSessionの成果物の保存にしか使えない。Tool Gatewayはhashを確かめて同じ`POST /runtime/v1/sessions/:id/artifacts`（`source=session_output`）へ中継する。同じ内容は1件にまとめ、内容が変われば更新する。ターン終了直後に届くことがあるため、終了から10分以内のSessionも受け付ける。Run画面の結果に含まれる`/workspace/...`のリンクは、クリック時に成果物一覧を取り直して期限付きURLを開く。
+
 ヘルスチェック: `GET /health`（認証なし）。
 
 `BuilderProjectDto.releases`は、Builderが生成したAgent、Immutable Build、Preview Deployment、Preview Run、構成ハッシュとPreview受け入れ状態を返す。Projectの`completed`はPreview Runが終端になっただけでは成立せず、選択した読み取りToolの成功イベントと`outcome=succeeded`を確認した場合だけ設定する。

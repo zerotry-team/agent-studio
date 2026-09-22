@@ -178,6 +178,7 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
 
           <RunTextPanel
             title="結果"
+            runId={run.id}
             text={run.output}
             format="rich"
             placeholder={<RunOutputPlaceholder run={run} />}
