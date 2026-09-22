@@ -4,7 +4,9 @@ import {
   heartbeatRequestSchema,
   jobResultRequestSchema,
   registerRequestSchema,
+  sessionArtifactRequestSchema,
   sessionEventRequestSchema,
+  SESSION_ARTIFACT_MAX_BYTES,
   tokenRequestSchema,
 } from "@agent-studio/contracts";
 import { Hono } from "hono";
@@ -22,7 +24,11 @@ const uuid = z.uuid();
  */
 export function createRuntimeRoutes(service: RuntimeApiService) {
   const app = new Hono<AppEnv>();
-  app.use("*", bodyLimit({ maxSize: 512 * 1024, onError: () => { throw new AppError("payload_too_large", 400, "送信内容が大きすぎます"); } }));
+  const tooLarge = () => { throw new AppError("payload_too_large", 400, "送信内容が大きすぎます"); };
+  const defaultLimit = bodyLimit({ maxSize: 512 * 1024, onError: tooLarge });
+  // Browser Downloadの本文だけはbase64で送られるため、そのルートに限って上限を広げる
+  const artifactLimit = bodyLimit({ maxSize: Math.ceil(SESSION_ARTIFACT_MAX_BYTES / 3) * 4 + 64 * 1024, onError: tooLarge });
+  app.use("*", (c, next) => (/\/sessions\/[^/]+\/artifacts$/.test(c.req.path) ? artifactLimit(c, next) : defaultLimit(c, next)));
 
   app.post("/register", async (c) => c.json(await service.register(registerRequestSchema.parse(await c.req.json()), c.get("sourceIp"))));
   app.post("/token", async (c) => c.json(await service.token(tokenRequestSchema.parse(await c.req.json()))));
@@ -46,6 +52,9 @@ export function createRuntimeRoutes(service: RuntimeApiService) {
     await service.sessionEvent(c.get("runtime"), uuid.parse(c.req.param("id")), sessionEventRequestSchema.parse(await c.req.json()));
     return c.body(null, 204);
   });
+  authed.post("/sessions/:id/artifacts", async (c) =>
+    c.json(await service.storeSessionArtifact(c.get("runtime"), uuid.parse(c.req.param("id")), sessionArtifactRequestSchema.parse(await c.req.json()))),
+  );
   authed.get("/sessions/active", async (c) => c.json({ sessions: await service.activeSessions(c.get("runtime")) }));
   authed.post("/approvals", async (c) => c.json(await service.createApproval(c.get("runtime"), approvalRequestSchema.parse(await c.req.json()))));
   authed.get("/approvals/:id", async (c) => c.json(await service.getApproval(c.get("runtime"), uuid.parse(c.req.param("id")))));

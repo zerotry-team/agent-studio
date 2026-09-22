@@ -143,6 +143,7 @@ describe("Tool Gateway（MCP over HTTP）", () => {
       createApproval: vi.fn(),
       getApproval: vi.fn(),
       consumeApproval: vi.fn(),
+      storeSessionArtifact: vi.fn(),
     };
     const connector = createUpstreamConnector({ name: "test-gateway", version: "0.0.0" });
     const catalog = new ToolCatalog(config, (u) => listUpstreamTools(connector, u), logger);

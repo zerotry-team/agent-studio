@@ -8,6 +8,7 @@ import {
   type SessionGrant,
   type ToolAuditEvent,
 } from "@agent-studio/contracts";
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { ToolCatalog } from "./catalog.js";
 import { textResult, type HttpToolOutcome } from "./http-tool.js";
@@ -74,6 +75,7 @@ function setup(opts: { created?: ApprovalResponse["status"]; statuses?: Approval
     createApproval: vi.fn(async () => ({ approval_id: APPROVAL_ID, status: opts.created ?? ("pending" as const) })),
     getApproval: vi.fn(async () => ({ approval_id: APPROVAL_ID, status: statuses.length > 1 ? statuses.shift()! : (statuses[0] ?? "pending") })),
     consumeApproval: vi.fn(async () => ({ approval_id: APPROVAL_ID, status: "consumed" as const })),
+    storeSessionArtifact: vi.fn(),
   };
   const audits: ToolAuditEvent[] = [];
   const executeHttp = vi.fn(async (): Promise<HttpToolOutcome> => ({ result: textResult('{"ok":true}', false), auditDetail: "HTTP 200" }));
@@ -262,7 +264,7 @@ describe("ToolCallService: Run専用Browser endpoint", () => {
     const upstream = { callTool: vi.fn(async () => textResult("ok", false)) };
     const service = new ToolCallService({
       catalog,
-      controller: { createApproval: vi.fn(), getApproval: vi.fn(), consumeApproval: vi.fn() },
+      controller: { createApproval: vi.fn(), getApproval: vi.fn(), consumeApproval: vi.fn(), storeSessionArtifact: vi.fn() },
       audit: { record: vi.fn() },
       executeHttp: vi.fn(),
       upstream,
@@ -302,6 +304,7 @@ describe("ToolCallService: Run専用Browser endpoint", () => {
       createApproval: vi.fn(async () => ({ approval_id: APPROVAL_ID, status: "approved" as const })),
       getApproval: vi.fn(),
       consumeApproval: vi.fn(async () => ({ approval_id: APPROVAL_ID, status: "consumed" as const })),
+      storeSessionArtifact: vi.fn(),
     };
     const service = new ToolCallService({
       catalog, controller, audit: { record: vi.fn() }, executeHttp: vi.fn(), upstream,
@@ -315,10 +318,62 @@ describe("ToolCallService: Run専用Browser endpoint", () => {
     const args = { selector: "#file", artifact_id: "artifact-1", destination: "https://example.com/upload", filename: "report.csv", sha256: "a".repeat(64) };
     await service.call(browserGrant, "browser_upload", args);
     expect(controller.createApproval).toHaveBeenCalledWith(expect.objectContaining({
-      tool: "browser_upload", args_preview: canonicalJson(args), risk: "external_send",
+      tool: "browser_upload", args_preview: canonicalJson(args), risk: "external_send", destination_host: "example.com",
       reason: "外部への送信には実行直前の承認が必要です",
     }));
     expect(controller.consumeApproval.mock.invocationCallOrder[0]!).toBeLessThan(upstream.callTool.mock.invocationCallOrder[0]!);
     expect(upstream.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("browser_downloadの本文をRun Artifactへ保存し、モデルにはメタデータだけを返す", async () => {
+    const dynamicConfig = runtimeToolConfigSchema.parse({
+      upstream_mcp: [{
+        name: "browser", url: "http://browser-session.invalid/mcp", dynamic_session_endpoint: "browser",
+        tools: [{ name: "browser_download", description: "download", input_schema: { type: "object" }, risk: "read", reads_untrusted_content: true }],
+      }],
+    });
+    const catalog = new ToolCatalog(dynamicConfig, async () => [], logger);
+    await catalog.refreshUpstreams();
+    const body = Buffer.from("id,total\n1,100\n");
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    const metadata = {
+      artifact_id: "70000000-0000-4000-8000-000000000001", filename: "report.csv", mime_type: "text/csv",
+      size_bytes: body.byteLength, sha256, scan_status: "passed", retained_until: "2099-01-01T00:00:00.000Z",
+    };
+    const upstream = { callTool: vi.fn(async () => textResult(JSON.stringify(metadata), false)) };
+    const storeSessionArtifact = vi.fn(async () => ({
+      run_artifact_id: "60000000-0000-4000-8000-000000000001",
+      path: `browser-downloads/${metadata.artifact_id}/report.csv`,
+      scan_status: "passed" as const,
+      retained_until: "2099-01-01T00:00:00.000Z",
+    }));
+    const browserFetch = vi.fn(async () => new Response(body));
+    const service = new ToolCallService({
+      catalog,
+      controller: { createApproval: vi.fn(), getApproval: vi.fn(), consumeApproval: vi.fn(), storeSessionArtifact },
+      audit: { record: vi.fn() }, executeHttp: vi.fn(), upstream,
+      approvalWaitMs: 0, approvalPollIntervalMs: 1, logger, browserFetch: browserFetch as unknown as typeof fetch,
+    });
+    const browserGrant: SessionGrant = {
+      ...grant([]),
+      allowed_tools: ["browser_download"],
+      browser: { endpoint: "http://10.40.1.25:8931/mcp/run-token", mode: "public_ephemeral", allow_public_web: false, allowed_domains: ["example.com"] },
+    };
+
+    const result = await service.call(browserGrant, "browser_download", { text: "CSVをダウンロード" });
+    expect(result.isError).toBeUndefined();
+    expect(browserFetch).toHaveBeenCalledWith(`http://10.40.1.25:8931/artifacts/run-token/${metadata.artifact_id}`, expect.any(Object));
+    expect(storeSessionArtifact).toHaveBeenCalledWith(SESSION_ID, expect.objectContaining({
+      source: "browser_download", source_artifact_id: metadata.artifact_id, filename: "report.csv", sha256, content_base64: body.toString("base64"),
+    }));
+    const output = JSON.parse(text(result));
+    expect(output).toMatchObject({ artifact_id: metadata.artifact_id, sha256, run_artifact_id: "60000000-0000-4000-8000-000000000001", stored: true });
+    expect(text(result)).not.toContain(body.toString("base64"));
+
+    // Browser Workerの本文が改ざんされていれば保存せず失敗にする
+    browserFetch.mockImplementationOnce(async () => new Response(Buffer.from("id,total\n1,999\n")));
+    const tampered = await service.call(browserGrant, "browser_download", { text: "CSVをダウンロード" });
+    expect(tampered.isError).toBe(true);
+    expect(storeSessionArtifact).toHaveBeenCalledTimes(1);
   });
 });

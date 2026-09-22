@@ -133,6 +133,17 @@ export async function callBrowserTool(session: BrowserSession, name: string, arg
           sha256: String(args.sha256 ?? ""),
         });
         const input = page.locator(String(args.selector)).first();
+        // 承認した送信先と、実際にformが送る先（action）が同じホストであることを先に確かめる
+        const action = await input.evaluate((element) => {
+          const form = (element as { form?: { action: string } | null }).form;
+          return form ? form.action : null;
+        });
+        if (!action) throw new Error("Upload先に送信用のformがありません");
+        const actionUrl = new URL(action, page.url());
+        if (actionUrl.hostname.toLowerCase() !== destination.hostname.toLowerCase()) {
+          throw new Error("formの送信先が承認されたUpload先と一致しません");
+        }
+        assertUrlAllowed(actionUrl.toString(), session.config.allowedDomains, session.config.allowPublicWeb);
         await input.setInputFiles({ name: artifact.filename, mimeType: artifact.mime_type, buffer: artifact.body });
         // file inputへの設定だけでは外部送信にならない。承認済みのこのTool内で
         // 必ず所属formをsubmitし、後続のwrite Toolによる承認バイパスを防ぐ。

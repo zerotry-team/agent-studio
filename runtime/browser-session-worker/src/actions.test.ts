@@ -12,17 +12,13 @@ const artifact = {
   body: Buffer.from("id,total\n1,100\n"),
 };
 
-function fakeSession(input: { hasForm?: boolean } = {}) {
+function fakeSession(input: { hasForm?: boolean; action?: string } = {}) {
   const setInputFiles = vi.fn(async () => undefined);
-  const evaluate = vi.fn(async (fn: (element: unknown) => void) => {
-    if (input.hasForm === false) {
-      expect(() => fn({ form: null })).toThrow("Upload先に送信用のformがありません");
-      throw new Error("Upload先に送信用のformがありません");
-    }
-    let submitted = false;
-    fn({ form: { requestSubmit: () => { submitted = true; } } });
-    expect(submitted).toBe(true);
-  });
+  let submitted = false;
+  const form = input.hasForm === false
+    ? null
+    : { action: input.action ?? "https://upload.example.com/submit", requestSubmit: () => { submitted = true; } };
+  const evaluate = vi.fn(async (fn: (element: unknown) => unknown) => fn({ form }));
   const locator = { first: () => ({ setInputFiles, evaluate }) };
   const page = {
     url: () => "https://upload.example.com/form",
@@ -31,11 +27,11 @@ function fakeSession(input: { hasForm?: boolean } = {}) {
     waitForLoadState: vi.fn(async () => undefined),
   };
   return {
-    config: { allowedDomains: ["upload.example.com"], allowPublicWeb: false },
+    config: { allowedDomains: ["upload.example.com", "other.example.com"], allowPublicWeb: false },
     countAction: vi.fn(),
     page: () => page,
     artifactForUpload: vi.fn(() => artifact),
-    ...{ pageMock: page, setInputFiles, evaluate },
+    ...{ pageMock: page, setInputFiles, evaluate, submitted: () => submitted },
   } as any;
 }
 
@@ -55,7 +51,21 @@ describe("browser_upload", () => {
       mimeType: artifact.mime_type,
       buffer: artifact.body,
     });
-    expect(session.evaluate).toHaveBeenCalledOnce();
+    expect(session.submitted()).toBe(true);
+  });
+
+  it("formの送信先が承認したUpload先と違えばファイルを設定せず送信しない", async () => {
+    const session = fakeSession({ action: "https://other.example.com/collect" });
+    const result = await callBrowserTool(session, "browser_upload", {
+      selector: "input[type=file]",
+      artifact_id: artifact.artifact_id,
+      destination: "https://upload.example.com/form",
+      filename: artifact.filename,
+      sha256: artifact.sha256,
+    });
+    expect(result.isError).toBe(true);
+    expect(session.setInputFiles).not.toHaveBeenCalled();
+    expect(session.submitted()).toBe(false);
   });
 
   it("formがないUpload先は送信せずfail closedする", async () => {
@@ -70,5 +80,6 @@ describe("browser_upload", () => {
     expect(result.isError).toBe(true);
     const first = result.content?.[0];
     expect(String(first && "text" in first ? first.text : first)).toContain("送信用のformがありません");
+    expect(session.setInputFiles).not.toHaveBeenCalled();
   });
 });
