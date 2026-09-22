@@ -12,8 +12,11 @@ __metadata:
     "@agent-studio/contracts": "workspace:^"
     "@anthropic-ai/sdk": "npm:^0.120.0"
     "@aws-sdk/client-cognito-identity-provider": "npm:^3.900.0"
+    "@aws-sdk/client-ecs": "npm:^3.900.0"
+    "@aws-sdk/client-organizations": "npm:^3.900.0"
     "@aws-sdk/client-s3": "npm:^3.900.0"
     "@aws-sdk/client-secrets-manager": "npm:^3.900.0"
+    "@aws-sdk/client-sts": "npm:^3.900.0"
     "@aws-sdk/s3-request-presigner": "npm:^3.900.0"
     "@hono/node-server": "npm:^1.19.17"
     "@hono/zod-validator": "npm:^0.9.1"
@@ -284,6 +287,22 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@aws-sdk/client-organizations@npm:^3.900.0":
+  version: 3.1136.0
+  resolution: "@aws-sdk/client-organizations@npm:3.1136.0"
+  dependencies:
+    "@aws-sdk/core": "npm:^3.978.0"
+    "@aws-sdk/credential-provider-node": "npm:^3.972.83"
+    "@aws-sdk/types": "npm:^3.974.5"
+    "@smithy/core": "npm:^3.33.3"
+    "@smithy/fetch-http-handler": "npm:^5.7.2"
+    "@smithy/node-http-handler": "npm:^4.11.3"
+    "@smithy/types": "npm:^4.17.2"
+    tslib: "npm:^2.6.2"
+  checksum: 10c0/84d4ea6ec34178bff08c7ebd659333c9a78bcea8ccdb2b6d0aad856f59efd59e339b803b406a76a9589d7c8d5f507ab355c7f940a5572db2f55f44b9ddc667eb
+  languageName: node
+  linkType: hard
+
 "@aws-sdk/client-s3@npm:^3.900.0":
   version: 3.1135.0
   resolution: "@aws-sdk/client-s3@npm:3.1135.0"
@@ -332,6 +351,23 @@ __metadata:
     "@smithy/types": "npm:^4.17.2"
     tslib: "npm:^2.6.2"
   checksum: 10c0/07f0d470318d2493e98d2cbe4645ed40b2b0c95e20564d8f141f911620dd16ab1399fc2be05d4e49376b6fd0f5398253cc83612d781e99801bc8f00f17eafb0a
+  languageName: node
+  linkType: hard
+
+"@aws-sdk/client-sts@npm:^3.900.0":
+  version: 3.1136.0
+  resolution: "@aws-sdk/client-sts@npm:3.1136.0"
+  dependencies:
+    "@aws-sdk/core": "npm:^3.978.0"
+    "@aws-sdk/credential-provider-node": "npm:^3.972.83"
+    "@aws-sdk/signature-v4-multi-region": "npm:^3.996.46"
+    "@aws-sdk/types": "npm:^3.974.5"
+    "@smithy/core": "npm:^3.33.3"
+    "@smithy/fetch-http-handler": "npm:^5.7.2"
+    "@smithy/node-http-handler": "npm:^4.11.3"
+    "@smithy/types": "npm:^4.17.2"
+    tslib: "npm:^2.6.2"
+  checksum: 10c0/478a6ac477a0cfac5d7800b263b4609bf707c3362f6d4e2d7458705fc2540b404b899333fb6fe264e90404a605d07d18dd017a43fcbfd55ddf1ab8ceedef8dff
   languageName: node
   linkType: hard
 

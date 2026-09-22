@@ -20,6 +20,10 @@ output "worker_service_name" {
   value = module.control_plane.worker_service_name
 }
 
+output "worker_task_role_arn" {
+  value = module.control_plane.worker_task_role_arn
+}
+
 output "web_service_name" {
   value = module.control_plane.web_service_name
 }

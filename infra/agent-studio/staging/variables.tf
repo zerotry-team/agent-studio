@@ -62,3 +62,21 @@ variable "initial_admin_email" {
   type        = string
   default     = ""
 }
+
+variable "managed_runtime_provisioning_role_arn" {
+  description = "Organizations管理アカウントのManaged Runtime構築ロールARN"
+  type        = string
+  default     = ""
+}
+
+variable "managed_runtime_state_bucket" {
+  description = "Managed Runtime Terraform stateバケット"
+  type        = string
+  default     = ""
+}
+
+variable "managed_runtime_account_email_domain" {
+  description = "新規AWSアカウントのメールドメイン"
+  type        = string
+  default     = "zerotry.dev"
+}

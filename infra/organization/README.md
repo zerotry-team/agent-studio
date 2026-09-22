@@ -4,6 +4,8 @@ AWS Organizations の **管理アカウント** で、Agent Studio 用のアカ�
 作ったアカウントの初期設定（infra/bootstrap）も、管理アカウントの認証情報のまま行える（各アカウントの
 `OrganizationAccountAccessRole` を引き受ける）。アカウントごとに IAM ユーザーやアクセスキーを作る必要はない。
 
+Agent Studioの画面から企業専用Runtimeを自動作成する設定は、[`docs/managed-runtime-provisioning.md`](../../docs/managed-runtime-provisioning.md)を参照。
+
 ## 全体の流れ（production の例）
 
 | # | 作業 | 実行する人 | 使う認証情報 |

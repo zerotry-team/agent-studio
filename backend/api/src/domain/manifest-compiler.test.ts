@@ -86,7 +86,7 @@ describe("compileAgent", () => {
   });
 
   it("登録前・無効な Runtime にはデプロイできない", () => {
-    for (const status of ["pending", "revoked"]) {
+    for (const status of ["provisioning", "pending", "revoked"]) {
       const profile = selfHosted(["get_product", "update_price"]);
       profile.runtime!.status = status;
       const r = compileAgent({ manifest: pricing, tools: [runtimeTool("get_product", "read"), runtimeTool("update_price", "financial")], profile, orgPolicies: [], defaultModel: "m" });

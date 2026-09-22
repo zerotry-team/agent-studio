@@ -94,6 +94,11 @@ export class SystemDb {
       SELECT * FROM system_claim_builder_workspace_sessions(${owner}, ${leaseSeconds}::integer, ${limit}::integer)`;
   }
 
+  claimManagedRuntimeProvisioning(owner: string, leaseSeconds: number, limit: number) {
+    return this.prisma.$queryRaw<{ runtime_id: string; organization_id: string }[]>`
+      SELECT * FROM system_claim_managed_runtime_provisioning(${owner}, ${leaseSeconds}::integer, ${limit}::integer)`;
+  }
+
   async resolveDeploymentApiKey(keyHash: string) {
     const rows = await this.prisma.$queryRaw<Array<{ id: string; organization_id: string; deployment_id: string; rate_limit_per_minute: number; max_runs_per_day: number }>>`
       SELECT * FROM system_resolve_deployment_api_key(${keyHash})`;
@@ -160,7 +165,7 @@ export class SystemDb {
   async readinessSnapshot() {
     const [worker, staleRuntimes, unhealthyDeployments, failedRuntimeJobs] = await Promise.all([
       this.prisma.worker_heartbeats.findFirst({ orderBy: { last_seen_at: "desc" } }),
-      this.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) AS count FROM runtimes WHERE status NOT IN ('revoked', 'pending') AND (last_heartbeat_at IS NULL OR last_heartbeat_at < now() - interval '3 minutes')`,
+      this.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) AS count FROM runtimes WHERE status NOT IN ('revoked', 'pending', 'provisioning') AND (last_heartbeat_at IS NULL OR last_heartbeat_at < now() - interval '3 minutes')`,
       this.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) AS count FROM deployments WHERE stage = 'production' AND status = 'active' AND health_status <> 'ready'`,
       this.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) AS count FROM runtime_jobs WHERE status = 'failed' AND updated_at >= now() - interval '15 minutes'`,
     ]);

@@ -43,7 +43,7 @@ export function RunStatusBadge({ status, outcome }: { status: RunStatus; outcome
 export function RuntimeStatusBadge({ status }: { status: RuntimeStatus }) {
   const s = RUNTIME_STATUS[status];
   return (
-    <Badge tone={s.tone} dot pulse={status === "pending"}>
+    <Badge tone={s.tone} dot pulse={status === "pending" || status === "provisioning"}>
       {s.label}
     </Badge>
   );

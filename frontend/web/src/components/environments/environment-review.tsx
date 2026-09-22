@@ -69,10 +69,16 @@ export function EnvironmentReview({ state, runtimes }: { state: EnvironmentWizar
         { label: "Runtime", value: `新しく作る（${PROVISIONING_TYPE_LABELS[state.choice]}）`, wide: true },
         { label: "Runtime の名前", value: state.runtimeName.trim() },
         { label: "環境", value: <StageBadge stage={state.stage} /> },
-        { label: "AWS アカウント ID", value: <Mono>{state.awsAccountId.trim()}</Mono> },
         { label: "リージョン", value: <Mono>{state.awsRegion.trim()}</Mono> },
-        { label: "IAM ロール名", value: <Mono>{state.roleName.trim()}</Mono>, wide: true },
       );
+      if (state.choice === "customer_owned") {
+        items.push(
+          { label: "AWS アカウント ID", value: <Mono>{state.awsAccountId.trim()}</Mono> },
+          { label: "IAM ロール名", value: <Mono>{state.roleName.trim()}</Mono>, wide: true },
+        );
+      } else {
+        items.push({ label: "構築", value: "AWSアカウントとRuntimeを自動で用意します", wide: true });
+      }
     }
   }
 

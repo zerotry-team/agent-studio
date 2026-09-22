@@ -18,6 +18,7 @@ import {
   createRunSchema,
   createRuntimeProfileSchema,
   createRuntimeSchema,
+  createManagedRuntimeEnvironmentSchema,
   createToolInputSchema,
   createToolVersionSchema,
   createWorkflowSchema,
@@ -332,6 +333,9 @@ export function createApiRoutes(deps: Deps, s: Services) {
   org.post("/environments", async (c) =>
     c.json(await s.environments.createProfile(c.get("member"), await json(c, createRuntimeProfileSchema)), 201),
   );
+  org.post("/managed-runtime-environments", async (c) =>
+    c.json(await s.environments.createManagedEnvironment(c.get("member"), await json(c, createManagedRuntimeEnvironmentSchema)), 202),
+  );
   org.delete("/environments/:id", async (c) => {
     await s.environments.deleteProfile(c.get("member"), id(c.req.param("id")));
     return c.body(null, 204);
@@ -344,6 +348,9 @@ export function createApiRoutes(deps: Deps, s: Services) {
     c.json(await s.environments.issueBootstrapToken(c.get("member"), id(c.req.param("id"))), 201),
   );
   org.post("/runtimes/:id/revoke", async (c) => c.json(await s.environments.revokeRuntime(c.get("member"), id(c.req.param("id")))));
+  org.post("/runtimes/:id/provisioning/retry", async (c) =>
+    c.json(await s.environments.retryManagedProvisioning(c.get("member"), id(c.req.param("id"))), 202),
+  );
   org.post("/runtimes/:id/rotate-environment-key", async (c) => {
     await s.environments.rotateEnvironmentKey(c.get("member"), id(c.req.param("id")));
     return c.body(null, 202);

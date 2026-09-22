@@ -112,6 +112,36 @@ resource "aws_iam_role_policy" "app_task" {
   policy = data.aws_iam_policy_document.app_task.json
 }
 
+# WorkerだけがOrganizations管理アカウントの構築ロールを引き受けられる。
+# API/Relayにはこの権限を付けず、利用者リクエストから直接AWSを変更できない境界にする。
+resource "aws_iam_role" "worker_task" {
+  name               = "${local.name}-worker-task"
+  description        = "Agent Studio Worker (background jobs and managed Runtime provisioning)"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+resource "aws_iam_role_policy" "worker_app" {
+  name   = "app"
+  role   = aws_iam_role.worker_task.id
+  policy = data.aws_iam_policy_document.app_task.json
+}
+
+data "aws_iam_policy_document" "worker_provisioning" {
+  count = var.managed_runtime_provisioning_role_arn != "" ? 1 : 0
+  statement {
+    sid       = "AssumeManagedRuntimeProvisioner"
+    actions   = ["sts:AssumeRole"]
+    resources = [var.managed_runtime_provisioning_role_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "worker_provisioning" {
+  count  = var.managed_runtime_provisioning_role_arn != "" ? 1 : 0
+  name   = "managed-runtime-provisioning"
+  role   = aws_iam_role.worker_task.id
+  policy = data.aws_iam_policy_document.worker_provisioning[0].json
+}
+
 # ---- web / migrate（権限なし） ----
 
 resource "aws_iam_role" "web_task" {
