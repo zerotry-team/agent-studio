@@ -52,8 +52,9 @@ async function humanAction(session: BrowserSession, body: unknown): Promise<void
 export function createBrowserServer(session: BrowserSession, version: string): Server {
   const expectedPath = `/mcp/${session.config.sessionToken}`;
   const humanPrefix = `/human/${session.config.sessionToken}`;
+  const artifactPrefix = `/artifacts/${session.config.sessionToken}/`;
   return createServer(async (req, res) => {
-    const path = (req.url ?? "/").split("?")[0];
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
     if (path === "/health") return json(res, 200, { status: "ok", mode: session.config.mode });
     if (path === `${humanPrefix}/screenshot` && req.method === "GET") {
       try {
@@ -85,6 +86,19 @@ export function createBrowserServer(session: BrowserSession, version: string): S
       } catch {
         return json(res, 500, { error: "profile_export_failed" });
       }
+    }
+    // Tool GatewayがDownload本文をRun Artifactとして保存するときだけ使う。モデルへ返すMCPとは別経路
+    if (path.startsWith(artifactPrefix) && req.method === "GET") {
+      const artifact = session.artifactBody(path.slice(artifactPrefix.length));
+      if (!artifact) return json(res, 404, { error: "not_found" });
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": String(artifact.body.byteLength),
+        "cache-control": "no-store",
+        "x-artifact-sha256": artifact.sha256,
+      });
+      res.end(artifact.body);
+      return;
     }
     if (path !== expectedPath) return json(res, 404, { error: "not_found" });
     if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });

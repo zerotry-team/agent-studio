@@ -10,6 +10,7 @@ import {
 } from "@agent-studio/contracts";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AuditSink } from "./audit.js";
+import { persistBrowserDownload } from "./browser-artifacts.js";
 import type { CatalogTool, ToolCatalog } from "./catalog.js";
 import type { ControllerApi } from "./controller-client.js";
 import { textResult, ToolInputError, type HttpToolOutcome } from "./http-tool.js";
@@ -21,7 +22,7 @@ import type { UpstreamSessionPool } from "./upstream.js";
 
 export interface ToolCallServiceDeps {
   catalog: Pick<ToolCatalog, "get" | "globalPolicies">;
-  controller: Pick<ControllerApi, "createApproval" | "getApproval" | "consumeApproval">;
+  controller: Pick<ControllerApi, "createApproval" | "getApproval" | "consumeApproval" | "storeSessionArtifact">;
   audit: AuditSink;
   executeHttp: (tool: RuntimeHttpTool, args: Record<string, unknown>) => Promise<HttpToolOutcome>;
   upstream: Pick<UpstreamSessionPool, "callTool">;
@@ -31,9 +32,21 @@ export interface ToolCallServiceDeps {
   logger: Logger;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
+  /** Browser Worker からDownload本文を取り出すfetch（テストで差し替える） */
+  browserFetch?: typeof fetch;
 }
 
 const ARGS_PREVIEW_MAX = 4000;
+
+/** browser_upload の承認に、送信先のホストを固定して見せる */
+function uploadDestinationHost(tool: CatalogTool, args: Record<string, unknown>): string | undefined {
+  if (tool.target.kind !== "upstream" || tool.target.toolName !== "browser_upload" || typeof args.destination !== "string") return undefined;
+  try {
+    return new URL(args.destination).hostname || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 type ApprovalOutcome = { kind: "approved"; approvalId: string } | { kind: "blocked"; result: CallToolResult };
 
@@ -157,7 +170,9 @@ export class ToolCallService {
               destination_host: new URL(tool.target.tool.http.url.replace(/\{[A-Za-z_][A-Za-z0-9_]*\}/g, "x")).hostname,
               method: tool.target.tool.http.method,
             }
-          : {}),
+          : uploadDestinationHost(tool, args)
+            ? { destination_host: uploadDestinationHost(tool, args)! }
+            : {}),
         ...(requestedRecordCount(args) !== null ? { requested_records: requestedRecordCount(args)! } : {}),
       });
     } catch (err) {
@@ -251,6 +266,13 @@ export class ToolCallService {
             : configured;
         if (!upstream) throw new Error("Browser Session が起動していないか、すでに失われています");
         result = await this.deps.upstream.callTool(grant, upstream, tool.target.toolName, args);
+        if (configured.dynamic_session_endpoint === "browser" && tool.target.toolName === "browser_download" && !result.isError) {
+          result = await persistBrowserDownload(grant, result, {
+            storeSessionArtifact: (sessionId, body) => this.deps.controller.storeSessionArtifact(sessionId, body),
+            fetchImpl: this.deps.browserFetch,
+          });
+          detail = "Run Artifactへ保存";
+        }
       }
       record(result.isError ? "failed" : "executed", withApproval(detail), elapsed());
       return result;

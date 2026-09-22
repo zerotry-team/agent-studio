@@ -1,4 +1,4 @@
-import { approvalRequestSchema, auditBatchRequestSchema } from "@agent-studio/contracts";
+import { approvalRequestSchema, auditBatchRequestSchema, SESSION_ARTIFACT_MAX_BYTES, sessionArtifactRequestSchema } from "@agent-studio/contracts";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -11,7 +11,7 @@ import { RuntimeRevokedError, StudioApiError, type StudioApi } from "./studio-cl
 
 export interface InternalApiDeps {
   grants: GrantStore;
-  studio: Pick<StudioApi, "createApproval" | "getApproval" | "consumeApproval">;
+  studio: Pick<StudioApi, "createApproval" | "getApproval" | "consumeApproval" | "storeSessionArtifact">;
   audit: Pick<AuditBuffer, "push">;
   /** Agent Studio の activeSessions で許可情報を取り直す */
   refreshActiveSessions: () => Promise<void>;
@@ -107,6 +107,18 @@ export function createInternalApp(deps: InternalApiDeps): Hono {
     if (!UUID_RE.test(id)) return c.json(errorBody("validation_error", "承認 ID の形式が正しくありません"), 400);
     try {
       return c.json(await deps.studio.consumeApproval(id));
+    } catch (err) {
+      return proxyError(c, err);
+    }
+  });
+
+  app.post("/internal/sessions/:id/artifacts", bodyLimit({ maxSize: Math.ceil(SESSION_ARTIFACT_MAX_BYTES / 3) * 4 + 64 * 1024 }), async (c) => {
+    const id = c.req.param("id");
+    if (!UUID_RE.test(id)) return c.json(errorBody("validation_error", "セッション ID の形式が正しくありません"), 400);
+    const parsed = sessionArtifactRequestSchema.safeParse(await readJson(c));
+    if (!parsed.success) return c.json(errorBody("validation_error", "成果物の形式が正しくありません"), 400);
+    try {
+      return c.json(await deps.studio.storeSessionArtifact(id, parsed.data));
     } catch (err) {
       return proxyError(c, err);
     }

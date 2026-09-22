@@ -43,4 +43,23 @@ describe("Browser Worker human relay API", () => {
     const exported = await (await fetch(`${base}/profile`)).json();
     expect(exported).toEqual({ cookies: [{ name: "session", value: "secret", domain: "example.com" }], origins: [] });
   });
+
+  it("Download本文はsession tokenが一致するときだけTool Gatewayへ返す", async () => {
+    const body = Buffer.from("id,total\n1,100\n");
+    const session = {
+      config: { sessionToken: "token-0123456789abcdef", mode: "public_ephemeral" },
+      artifactBody: vi.fn((id: string) => (id === "artifact-1" ? { body, sha256: "f".repeat(64) } : undefined)),
+    } as unknown as BrowserSession;
+    const server = createBrowserServer(session, "test");
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as AddressInfo).port;
+
+    const ok = await fetch(`http://127.0.0.1:${port}/artifacts/token-0123456789abcdef/artifact-1`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("x-artifact-sha256")).toBe("f".repeat(64));
+    expect(Buffer.from(await ok.arrayBuffer()).equals(body)).toBe(true);
+    expect((await fetch(`http://127.0.0.1:${port}/artifacts/wrong-token/artifact-1`)).status).toBe(404);
+    expect((await fetch(`http://127.0.0.1:${port}/artifacts/token-0123456789abcdef/missing`)).status).toBe(404);
+  });
 });

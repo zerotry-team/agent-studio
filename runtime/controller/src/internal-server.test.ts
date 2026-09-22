@@ -28,6 +28,12 @@ function setup() {
       throw new StudioApiError(404, "not_found", "承認が見つかりません");
     }),
     consumeApproval: vi.fn(async () => ({ approval_id: APPROVAL_ID, status: "consumed" as const })),
+    storeSessionArtifact: vi.fn(async () => ({
+      run_artifact_id: "60000000-0000-4000-8000-000000000001",
+      path: "browser-downloads/70000000-0000-4000-8000-000000000001/report.csv",
+      scan_status: "passed" as const,
+      retained_until: "2099-01-01T00:00:00.000Z",
+    })),
   };
   const pushed: ToolAuditEvent[] = [];
   const app = createInternalApp({
@@ -60,6 +66,35 @@ describe("内部 API", () => {
     setNow(11_000);
     await app.request(`/internal/sessions/by-token-hash/${"c".repeat(64)}`);
     expect(refreshActiveSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("Browser Downloadの本文をAgent Studioへ中継し、不正な形式は送らない", async () => {
+    const { app, studio } = setup();
+    const content = Buffer.from("id,total\n1,100\n");
+    const body = {
+      source: "browser_download",
+      source_artifact_id: "70000000-0000-4000-8000-000000000001",
+      filename: "report.csv",
+      mime_type: "text/csv",
+      sha256: "e".repeat(64),
+      size_bytes: content.byteLength,
+      content_base64: content.toString("base64"),
+    };
+    const stored = await app.request(`/internal/sessions/${grant.session_id}/artifacts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(stored.status).toBe(200);
+    expect(studio.storeSessionArtifact).toHaveBeenCalledWith(grant.session_id, body);
+
+    const traversal = await app.request(`/internal/sessions/${grant.session_id}/artifacts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...body, filename: "../secret.csv" }),
+    });
+    expect(traversal.status).toBe(400);
+    expect(studio.storeSessionArtifact).toHaveBeenCalledTimes(1);
   });
 
   it("token_hash の形式が違えば 400", async () => {

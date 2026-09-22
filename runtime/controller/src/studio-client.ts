@@ -7,12 +7,15 @@ import {
   runtimeBrowserProfileSchema,
   registerResponseSchema,
   runtimeJobSchema,
+  sessionArtifactResponseSchema,
   tokenResponseSchema,
   type ApprovalRequest,
   type ApprovalResponse,
   type HeartbeatRequest,
   type JobResultRequest,
   type RuntimeJob,
+  type SessionArtifactRequest,
+  type SessionArtifactResponse,
   type SessionEventRequest,
   type SessionGrant,
   type ToolAuditEvent,
@@ -296,6 +299,7 @@ export interface StudioApi {
   environmentKey(): Promise<string | null>;
   gitCredential(jobId: string): Promise<GitCredentialResponse>;
   browserProfile(profileId: string): Promise<RuntimeBrowserProfile>;
+  storeSessionArtifact(sessionId: string, body: SessionArtifactRequest): Promise<SessionArtifactResponse>;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -392,6 +396,14 @@ export class AgentStudioClient implements StudioApi {
       approvalResponseSchema,
       await this.call("POST", RUNTIME_API.consumeApproval(approvalId), { body: {} }),
       "approval consume",
+    );
+  }
+
+  async storeSessionArtifact(sessionId: string, body: SessionArtifactRequest): Promise<SessionArtifactResponse> {
+    return parseResponse(
+      sessionArtifactResponseSchema,
+      await this.call("POST", RUNTIME_API.sessionArtifacts(sessionId), { body, timeoutMs: 120_000 }),
+      "session artifact",
     );
   }
 
