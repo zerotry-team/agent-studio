@@ -46,33 +46,6 @@ const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 
 const BROWSER_TOOL_PREFIX = "browser_";
 
-/**
- * 同じRunでevent streamとwatchdogが同時にidleを検知しても、副作用を1回だけ実行する。
- * 完了後は次のidle処理を受け付けるため、承認後や追加入力の再開は妨げない。
- */
-export class SingleFlight<T> {
-  private current: Promise<T> | null = null;
-
-  run(task: () => Promise<T>): Promise<T> {
-    if (this.current) return this.current;
-    const operation = task().finally(() => {
-      if (this.current === operation) this.current = null;
-    });
-    this.current = operation;
-    return operation;
-  }
-}
-
-export function restoredTurnState(input: { sentInputCount: number; hasAssistantOutput: boolean; workEventCount: number }): {
-  turnStarted: boolean;
-  turnDidWork: boolean;
-} {
-  return {
-    turnStarted: input.sentInputCount > 0,
-    turnDidWork: input.hasAssistantOutput || input.workEventCount > 0,
-  };
-}
-
 function safeWorkflowToolOutput(output: string): string {
   try {
     return JSON.stringify(redactLogValue(JSON.parse(output))).slice(0, 20_000);
@@ -120,12 +93,16 @@ interface DriverState {
   lastTurnError: string | null;
   rootTurnIds: Set<string>;
   handledCalls: Set<string>;
+  /** environment.connected と watchdog が同時に onIdle を呼んでも入力を二重送信しない */
+  inputDispatching: boolean;
+  /** watchdog の多重起動で同じ Session を複数回作り直さない */
+  recoveringTurnStart: boolean;
+  /** Session削除でSSEが先に閉じても、復旧処理の完了を待ってからDriverを解放する */
+  turnRecovery: Promise<Outcome> | null;
   /** 今のターンで何か操作をしたか。何もせず終わったら利用者への質問とみなす */
   turnDidWork: boolean;
   /** 入力を送ったあとターンが始まったか。始まる前の idle で打ち切らないため */
   turnStarted: boolean;
-  /** 再起動後の取りこぼしをSession itemsから復元したか */
-  recentItemsHydrated: boolean;
   callCounts: Map<string, number>;
 }
 
@@ -139,7 +116,6 @@ interface DriverState {
  */
 export class RunDriver {
   private readonly log: Logger;
-  private readonly idleSingleFlight = new SingleFlight<Outcome>();
   private api!: AgentsApi;
 
   constructor(
@@ -184,19 +160,7 @@ export class RunDriver {
         where: { run_id: this.runId, ended_at: null },
         orderBy: { created_at: "desc" },
       });
-      const latestSentInput = await tx.run_inputs.findFirst({
-        where: { run_id: this.runId, status: "sent" },
-        orderBy: { sent_at: "desc" },
-      });
-      const sentInputCount = await tx.run_inputs.count({ where: { run_id: this.runId, status: "sent" } });
-      const evidenceWindow = latestSentInput?.sent_at ? { created_at: { gte: latestSentInput.sent_at } } : {};
-      const [workEventCount, assistantOutputCount] = await Promise.all([
-        tx.run_events.count({ where: { run_id: this.runId, type: "tool.call", ...evidenceWindow } }),
-        tx.run_events.count({
-          where: { run_id: this.runId, type: "message", data: { path: ["role"], equals: "assistant" }, ...evidenceWindow },
-        }),
-      ]);
-      return { run, session, sentInputCount, workEventCount, assistantOutputCount };
+      return { run, session };
     });
     const { run } = loaded;
     if (TERMINAL_RUN_STATUSES.includes(run.status as RunStatus)) return null;
@@ -204,11 +168,6 @@ export class RunDriver {
     const config = run.deployment.compiled_config as unknown as CompiledAgentConfig;
     this.api = await this.deps.agentsApi.forOrganization(this.organizationId);
 
-    const restored = restoredTurnState({
-      sentInputCount: loaded.sentInputCount,
-      hasAssistantOutput: loaded.assistantOutputCount > 0,
-      workEventCount: loaded.workEventCount,
-    });
     const base = {
       run: {
         id: run.id,
@@ -224,9 +183,11 @@ export class RunDriver {
       lastTurnError: null,
       rootTurnIds: new Set<string>(),
       handledCalls: new Set<string>(),
-      turnDidWork: restored.turnDidWork,
-      turnStarted: restored.turnStarted,
-      recentItemsHydrated: false,
+      inputDispatching: false,
+      recoveringTurnStart: false,
+      turnRecovery: null,
+      turnDidWork: false,
+      turnStarted: false,
       callCounts: new Map<string, number>(),
     };
 
@@ -459,6 +420,13 @@ export class RunDriver {
         this.shutdown.removeEventListener("abort", onShutdown);
         controller.abort();
       }
+      // Session削除はSSEを即座に閉じる。watchdogの復旧Promiseが完了する前に旧Sessionへ
+      // 再接続しないよう、ここで同じPromiseを待つ。
+      if (!decided && state.turnRecovery) {
+        const recovery = await state.turnRecovery;
+        state.turnRecovery = null;
+        if (recovery !== "continue") return;
+      }
       if (decided) return;
     }
     await this.failRun("OpenAI との接続が繰り返し切れました");
@@ -484,7 +452,6 @@ export class RunDriver {
       case "idle":
         state.idle = true;
         state.rootTurnActive = false;
-        await this.hydrateRecentItems(state);
         return this.onIdle(state);
       default:
         state.idle = false;
@@ -507,6 +474,7 @@ export class RunDriver {
 
       case "agent.session.turn.created":
         if (event.turn.subagent_id === null) {
+          await this.acknowledgeTurnStart(state, event.turn_id);
           state.rootTurnIds.add(event.turn_id);
           state.rootTurnActive = true;
           state.turnDidWork = false;
@@ -628,73 +596,66 @@ export class RunDriver {
   }
 
   /** セッションが空いた: 入力を送るか、承認待ちにするか、完了にする */
-  private onIdle(state: DriverState): Promise<Outcome> {
-    return this.idleSingleFlight.run(() => this.processIdle(state));
-  }
-
-  /**
-   * OpenAIのevent streamは再送されない。Worker再起動中に最終回答が到着していた場合は、
-   * Session itemsから結果を1回だけ復元してRunを永久待機させない。
-   */
-  private async hydrateRecentItems(state: DriverState): Promise<void> {
-    if (state.recentItemsHydrated || !state.turnStarted || state.turnDidWork) return;
-    state.recentItemsHydrated = true;
-    const items = await this.api.listRecentItems(state.openaiSessionId, 100);
-    const latestUser = items.find((item) => item.type === "message" && item.role === "user");
-    const latestTurnId = latestUser?.type === "message" ? latestUser.turn_id : null;
-    const final = items.find(
-      (item) => item.type === "message" && item.role === "assistant" && item.phase === "final_answer" && item.status === "completed"
-        && (!latestTurnId || item.turn_id === latestTurnId),
-    );
-    if (final?.type === "message") {
-      const text = outputText(final);
-      if (text.trim()) {
-        state.turnDidWork = true;
-        await this.deps.db.org(this.organizationId, async (tx) => {
-          const run = await tx.runs.findUniqueOrThrow({ where: { id: this.runId } });
-          if (run.output === text) return;
-          await tx.runs.update({ where: { id: this.runId }, data: { output: text } });
-          await appendRunEvent(tx, state.run, "message", "エージェントの回答（再接続後に復元）", { role: "assistant", text });
-        });
-      }
-    }
-    if (!state.turnDidWork) {
-      state.turnDidWork = items.some((item) =>
-        ["mcp_call", "command_execution", "web_search_call"].includes(item.type)
-          && (!latestTurnId || ("turn_id" in item && item.turn_id === latestTurnId)),
-      );
-    }
-    this.log.info({ phase: "session.restore", session_id: state.openaiSessionId, item_count: items.length,
-      turn_started: state.turnStarted, turn_did_work: state.turnDidWork,
-    }, "再起動後のターン状態を復元しました");
-  }
-
-  private async processIdle(state: DriverState): Promise<Outcome> {
+  private async onIdle(state: DriverState): Promise<Outcome> {
     // self_hosted は Session Worker が接続するまで入力を送らない
     if (state.environmentType === "self_hosted" && !state.connected) return "continue";
+    if (state.inputDispatching || state.recoveringTurnStart) return "continue";
 
-    const pending = await this.deps.db.org(this.organizationId, (tx) =>
-      tx.run_inputs.findMany({ where: { run_id: this.runId, status: "pending" }, orderBy: { created_at: "asc" } }),
-    );
-    if (pending.length > 0) {
-      const events: AgentSessionInputParam[] = [
-        {
-          type: "agent.session.input.message",
-          input: pending.map((p) => ({ role: "user" as const, content: [{ type: "input_text" as const, text: p.input }] })),
-        },
-      ];
-      // 同じ入力を二重に送らないよう、入力の ID から冪等キーを作る
-      const inputStarted = Date.now();
-      this.log.info({ phase: "input.send.start", session_id: state.openaiSessionId, input_count: pending.length }, "指示の送信を開始します");
-      await this.api.sendEvents(state.openaiSessionId, events, `run-input-${pending.map((p) => p.id).join(",")}`.slice(0, 250));
-      this.log.info({ phase: "input.send.done", session_id: state.openaiSessionId, elapsed_ms: Date.now() - inputStarted }, "指示の送信が完了しました");
-      await this.deps.db.org(this.organizationId, (tx) =>
-        tx.run_inputs.updateMany({ where: { id: { in: pending.map((p) => p.id) } }, data: { status: "sent", sent_at: new Date() } }),
-      );
-      state.idle = false;
-      state.turnStarted = false;
-      state.lastTurnError = null;
-      return "continue";
+    state.inputDispatching = true;
+    try {
+      // 先にDBで確保する。202待ちの間にwatchdogが同じpending行を拾わないための永続的な排他。
+      const pending = await this.deps.db.org(this.organizationId, async (tx) => {
+        const rows = await tx.run_inputs.findMany({ where: { run_id: this.runId, status: "pending" }, orderBy: { created_at: "asc" } });
+        if (rows.length === 0) return rows;
+        await tx.run_inputs.updateMany({
+          where: { id: { in: rows.map((row) => row.id) }, status: "pending" },
+          data: { status: "dispatching", sent_at: new Date() },
+        });
+        return rows;
+      });
+      if (pending.length > 0) {
+        const events: AgentSessionInputParam[] = [
+          {
+            type: "agent.session.input.message",
+            input: pending.map((p) => ({ role: "user" as const, content: [{ type: "input_text" as const, text: p.input }] })),
+          },
+        ];
+        const idempotencyKey = `run-input-${await sha256Hex(`${state.sessionRowId}:${pending.map((p) => p.id).join(",")}`)}`;
+        const inputStarted = Date.now();
+        this.log.info({ phase: "input.send.start", session_id: state.openaiSessionId, input_count: pending.length }, "指示の送信を開始します");
+        try {
+          await this.api.sendEvents(state.openaiSessionId, events, idempotencyKey);
+        } catch (error) {
+          const diagnostic = apiErrorDiagnostic(error);
+          this.log.warn({ ...diagnostic, phase: "input.send.acceptance_unknown", session_id: state.openaiSessionId }, "指示の受付結果を確認できませんでした");
+          await this.deps.db.org(this.organizationId, (tx) => appendRunEvent(tx, state.run, "environment.status",
+            "指示の受付結果を確認できません。重複実行を避けながら自動復旧します", { phase: "input_acceptance_unknown", ...diagnostic }));
+          // 4xx（408/409/429以外）は同じ内容を再送しても直らない。その他はdispatchingのまま照合・復旧する。
+          if (diagnostic.http_status && diagnostic.http_status >= 400 && diagnostic.http_status < 500
+            && ![408, 409, 429].includes(diagnostic.http_status)) {
+            await this.failRun(`OpenAI が指示を受け付けませんでした: ${diagnostic.message}`);
+            return "done";
+          }
+          return "continue";
+        }
+        this.log.info({ phase: "input.send.done", session_id: state.openaiSessionId, elapsed_ms: Date.now() - inputStarted }, "指示の送信が完了しました");
+        await this.deps.db.org(this.organizationId, async (tx) => {
+          await tx.run_inputs.updateMany({
+            where: { id: { in: pending.map((p) => p.id) }, status: "dispatching" },
+            data: { status: "sent", sent_at: new Date() },
+          });
+          await appendRunEvent(tx, state.run, "environment.status", "指示を受け付けました。エージェントの処理開始を確認しています", {
+            phase: "input_accepted",
+            input_count: pending.length,
+          });
+        });
+        state.idle = false;
+        state.turnStarted = false;
+        state.lastTurnError = null;
+        return "continue";
+      }
+    } finally {
+      state.inputDispatching = false;
     }
 
     if (state.lastTurnError) {
@@ -1016,10 +977,14 @@ export class RunDriver {
   // ---------------------------------------------------------------------------
   /** 5秒ごと: 中止・Runtime 側の失敗・Worker の起動タイムアウト・新しい入力を確認する */
   private async watchdog(state: DriverState): Promise<Outcome> {
-    const { run, session, pendingInputs } = await this.deps.db.org(this.organizationId, async (tx) => ({
+    const { run, session, pendingInputs, unacknowledgedInputs } = await this.deps.db.org(this.organizationId, async (tx) => ({
       run: await tx.runs.findUniqueOrThrow({ where: { id: this.runId } }),
       session: await tx.agent_sessions.findUniqueOrThrow({ where: { id: state.sessionRowId } }),
       pendingInputs: await tx.run_inputs.count({ where: { run_id: this.runId, status: "pending" } }),
+      unacknowledgedInputs: await tx.run_inputs.findMany({
+        where: { run_id: this.runId, status: { in: ["dispatching", "sent"] } },
+        orderBy: { created_at: "asc" },
+      }),
     }));
 
     if (run.status === "cancelled") {
@@ -1041,7 +1006,144 @@ export class RunDriver {
       }
     }
     if (pendingInputs > 0 && state.idle && !state.rootTurnActive) return this.onIdle(state);
+    if (unacknowledgedInputs.length > 0 && !state.turnStarted && !state.rootTurnActive) {
+      state.turnRecovery ??= this.recoverStalledTurnStart(state, unacknowledgedInputs);
+      const outcome = await state.turnRecovery;
+      if (outcome === "continue") state.turnRecovery = null;
+      return outcome;
+    }
     return "continue";
+  }
+
+  /** root Turn が始まった証拠を永続化する。Worker再起動後も送信済み入力を再送しない。 */
+  private async acknowledgeTurnStart(state: DriverState, turnId: string) {
+    await this.deps.db.org(this.organizationId, async (tx) => {
+      const updated = await tx.run_inputs.updateMany({
+        where: { run_id: this.runId, status: { in: ["dispatching", "sent"] } },
+        data: { status: "started" },
+      });
+      if (updated.count > 0) {
+        await appendRunEvent(tx, state.run, "environment.status", "エージェントが処理を開始しました", {
+          phase: "turn_started",
+          openai_turn_id: turnId,
+          input_count: updated.count,
+        });
+      }
+    });
+  }
+
+  /**
+   * HTTP 202後にTurnが作られない場合の自己復旧。
+   * まずOpenAIの正本を照合し、本当にTurnが無いときだけ旧Sessionを削除して作り直す。
+   */
+  private async recoverStalledTurnStart(
+    state: DriverState,
+    inputs: Array<{ id: string; sent_at: Date | null; created_at: Date }>,
+  ): Promise<Outcome> {
+    if (state.inputDispatching || state.recoveringTurnStart) return "continue";
+    const oldest = inputs.reduce((min, input) => Math.min(min, (input.sent_at ?? input.created_at).getTime()), Number.POSITIVE_INFINITY);
+    if (Date.now() - oldest < this.deps.env.AGENT_TURN_START_TIMEOUT_SECONDS * 1000) return "continue";
+
+    state.recoveringTurnStart = true;
+    try {
+      const [session, turns] = await Promise.all([
+        this.api.retrieveSession(state.openaiSessionId),
+        this.api.listRecentTurns(state.openaiSessionId, 20),
+      ]);
+      const candidate = turns.find((turn) => turn.subagent_id === null && turn.created_at * 1000 >= oldest - 5_000);
+      if (candidate) {
+        await this.acknowledgeTurnStart(state, candidate.id);
+        state.rootTurnIds.add(candidate.id);
+        state.turnStarted = true;
+        state.rootTurnActive = candidate.status === "in_progress";
+        state.idle = session.status === "idle";
+        if (candidate.status === "failed") {
+          await this.failRun(candidate.error?.message ?? "OpenAI の処理が失敗しました");
+          return "done";
+        }
+        if (candidate.status === "cancelled") {
+          await this.failRun("OpenAI の処理が中止されました");
+          return "done";
+        }
+        if (candidate.status === "completed" && session.status === "idle") {
+          const items = await this.api.listRecentItems(state.openaiSessionId, 100);
+          for (const item of [...items].reverse().filter((value) => (value as { turn_id?: string }).turn_id === candidate.id)) {
+            await this.onItemDone(state, {
+              type: "agent.session.turn.item.done",
+              event_id: `recovered-${item.id}`,
+              session_id: state.openaiSessionId,
+              turn_id: candidate.id,
+              output_index: 0,
+              item,
+            } as Extract<AgentSessionEvent, { type: "agent.session.turn.item.done" }>);
+          }
+          if (candidate.usage) await this.addUsage(candidate.usage.input_tokens, candidate.usage.output_tokens);
+          return this.onIdle(state);
+        }
+        if (session.status === "requires_action") return this.handleRequiredActions(state, session.required_actions);
+        return "continue";
+      }
+
+      // idle以外ならOpenAI側で開始処理中。Turnが一覧へ現れるまで待つ。
+      if (session.status !== "idle") return "continue";
+
+      const recoveries = await this.deps.db.org(this.organizationId, (tx) =>
+        tx.run_events.count({ where: { run_id: this.runId, type: "openai.event", summary: "turn_start_recovery" } }),
+      );
+      if (recoveries >= this.deps.env.AGENT_TURN_MAX_RECOVERIES) {
+        await this.failRun(`OpenAI が指示受付後に処理を開始しませんでした（自動復旧 ${recoveries} 回実施済み）`);
+        return "done";
+      }
+
+      await this.replaceStalledSession(state, inputs.map((input) => input.id), recoveries + 1);
+      // 新Sessionは別のDriverがSSEを開いて追跡する。
+      return "released";
+    } finally {
+      state.recoveringTurnStart = false;
+    }
+  }
+
+  private async replaceStalledSession(state: DriverState, inputIds: string[], attempt: number) {
+    this.log.warn({ phase: "turn_start.recover", session_id: state.openaiSessionId, attempt }, "Turnが始まらないためSessionを作り直します");
+    // 旧Sessionを先に論理削除し、遅延した入力が後から実行される余地を閉じてから再送する。
+    await this.api.sendEvents(state.openaiSessionId, [{ type: "agent.session.input.cancel" }]).catch(() => undefined);
+    await this.api.deleteSession(state.openaiSessionId);
+
+    await this.deps.db.org(this.organizationId, async (tx) => {
+      const session = await tx.agent_sessions.findUniqueOrThrow({ where: { id: state.sessionRowId }, include: { runtime: true } });
+      if (session.runtime && session.runtime.status !== "revoked") {
+        const pendingStop = await tx.runtime_jobs.count({
+          where: { session_id: session.id, type: "stop_session", status: { in: ["pending", "leased"] } },
+        });
+        if (pendingStop === 0) {
+          await tx.runtime_jobs.create({
+            data: {
+              organization_id: this.organizationId,
+              runtime_id: session.runtime.id,
+              session_id: session.id,
+              type: "stop_session",
+              payload: { type: "stop_session", session_id: session.id, reason: "OpenAIのTurn開始を確認できないためSessionを再作成します" },
+            },
+          });
+        }
+      }
+      await tx.agent_sessions.update({ where: { id: session.id }, data: { ended_at: new Date(), status: "ended" } });
+      await tx.run_inputs.updateMany({
+        where: { id: { in: inputIds }, status: { in: ["dispatching", "sent"] } },
+        data: { status: "pending", sent_at: null },
+      });
+      await appendRunEvent(tx, state.run, "openai.event", "turn_start_recovery", {
+        phase: "turn_start_recovery",
+        recovery_attempt: attempt,
+        previous_session_id: state.sessionRowId,
+      });
+      await appendRunEvent(tx, state.run, "environment.status", `応答が始まらないため作業環境を自動再作成しています（${attempt}/${this.deps.env.AGENT_TURN_MAX_RECOVERIES}）`, {
+        phase: "turn_start_recovery",
+        recovery_attempt: attempt,
+      });
+    });
+
+    await this.createSession(state.config, { agent_id: state.run.agent_id, stage: state.run.stage });
   }
 
   private async setStatus(state: DriverState, status: RunStatus) {
