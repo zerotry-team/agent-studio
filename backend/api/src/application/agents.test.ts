@@ -51,4 +51,9 @@ describe("reconcileVersionResolution", () => {
     expect(result.requirements[0]).toMatchObject({ state: "needs_connection", connector_id: "connector-1" });
     expect(result.ready).toBe(false);
   });
+
+  it("旧形式の解決結果からもVersionを作成できる", () => {
+    const result = reconcileVersionResolution({ selected_tools: [], ready: false }, []);
+    expect(result).toEqual({ requirements: [], selected_tools: [], missing_variables: [], ready: true });
+  });
 });

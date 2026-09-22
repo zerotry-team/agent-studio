@@ -6,6 +6,7 @@ import type {
   GenerateManifestResultDto,
   LinkAgentConnectionInput,
   SetAgentEnvironmentInput,
+  UpdateAgentSettingsInput,
   CreateAgentProjectResultDto,
   ManifestValidationDto,
   SetBrowserAccessInput,
@@ -40,6 +41,10 @@ export class AgentRepository extends ApiRepository {
 
   setEnvironment(id: string, input: SetAgentEnvironmentInput): Promise<AgentProjectDto> {
     return this.api.put<AgentProjectDto>(`/agents/${encodeURIComponent(id)}/environment`, input);
+  }
+
+  updateSettings(id: string, input: UpdateAgentSettingsInput): Promise<AgentProjectDto> {
+    return this.api.put<AgentProjectDto>(`/agents/${encodeURIComponent(id)}/settings`, input);
   }
 
   createPreview(id: string): Promise<import("@agent-studio/contracts").DeploymentDto> {

@@ -11,6 +11,7 @@ import { appendRunEvent } from "../application/run-events.js";
 import { parseExternalJobResponse } from "./external-jobs.js";
 import { BuilderOrchestrator } from "./builder-orchestrator.js";
 import { BuilderSessionDriver } from "./builder-session-driver.js";
+import { ConnectionHealthMonitor } from "./connection-health.js";
 
 const RUN_LEASE_SECONDS = 60;
 const RUNTIME_OFFLINE_AFTER_SECONDS = 180;
@@ -30,6 +31,7 @@ export class WorkerScheduler {
   private readonly evals: EvalEngine;
   private readonly audit: AuditExporter;
   private readonly builders: BuilderOrchestrator;
+  private readonly connectionHealth: ConnectionHealthMonitor;
 
   constructor(
     private readonly deps: Deps,
@@ -39,6 +41,7 @@ export class WorkerScheduler {
     this.evals = new EvalEngine(deps);
     this.audit = new AuditExporter(deps);
     this.builders = new BuilderOrchestrator(deps);
+    this.connectionHealth = new ConnectionHealthMonitor(deps);
   }
 
   async run(signal: AbortSignal): Promise<void> {
@@ -53,6 +56,7 @@ export class WorkerScheduler {
       this.every(2_000, signal, () => this.builders.tick()),
       this.every(1_000, signal, () => this.claimBuilderSessions(signal)),
       this.every(10 * 60_000, signal, () => this.audit.tick()),
+      this.every(5 * 60_000, signal, () => this.connectionHealth.tick()),
     ];
     await Promise.all(loops);
     // 停止時: 実行中の Run はリースを手放して終わる（別の Worker が引き継ぐ）

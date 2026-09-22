@@ -571,6 +571,17 @@ export const setAgentEnvironmentSchema = z
   .strict();
 export type SetAgentEnvironmentInput = z.infer<typeof setAgentEnvironmentSchema>;
 
+/** Project Settingsから変更できる、Secretを含まないAgent定義。保存時はImmutableな新Versionを作る。 */
+export const updateAgentSettingsSchema = z
+  .object({
+    base_version: z.number().int().min(1),
+    instructions: z.string().trim().min(1).max(32000),
+    policies: z.array(policySchema).max(64).default([]),
+    environment_profile: slugSchema.nullable(),
+  })
+  .strict();
+export type UpdateAgentSettingsInput = z.infer<typeof updateAgentSettingsSchema>;
+
 export interface AgentConnectionLinkDto {
   id: string;
   stage: Stage;

@@ -30,6 +30,7 @@ import {
   setConnectionSecretSchema,
   setConnectorOAuthAppSchema,
   setAgentEnvironmentSchema,
+  updateAgentSettingsSchema,
   setOpenAiCredentialsSchema,
   startEvalRunSchema,
   startWorkflowRunSchema,
@@ -299,6 +300,9 @@ export function createApiRoutes(deps: Deps, s: Services) {
     if (readyForPreview(project.agent) && !hasPreview) await s.environments.createPreview(actor, agentId);
     return c.json(await s.agents.getProject(actor, agentId));
   });
+  org.put("/agents/:id/settings", async (c) =>
+    c.json(await s.agents.updateSettings(c.get("member"), id(c.req.param("id")), await json(c, updateAgentSettingsSchema))),
+  );
   org.post("/agents/:id/preview", async (c) => c.json(await s.environments.createPreview(c.get("member"), id(c.req.param("id"))), 201));
   org.post("/agents/:id/invoke", async (c) => {
     const stage = z.enum(["staging", "production"]).default("staging").parse(c.req.query("stage"));

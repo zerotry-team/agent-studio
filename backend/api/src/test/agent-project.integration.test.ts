@@ -154,7 +154,13 @@ describe("Agent Project / Preview / Promote", () => {
       conditional_approvals: [],
     });
     try {
-      const created = await createThroughBuilder("競合の公開料金ページを比較してレポートにする");
+      const createdAgent = await createThroughBuilder("競合の公開料金ページを比較してレポートにする");
+      // Version作成と自動Previewは別transactionのため、Buildの可視化まで待つ。
+      const created = await h.waitFor(
+        () => h.request("GET", `/api/v1/agents/${createdAgent.body.agent.id}/project`, owner),
+        (response) => response.status === 200 && response.body.builds.length === 1,
+        45_000,
+      );
       expect(created.body.agent.capability_resolution.ready).toBe(true);
       expect(created.body.agent.versions[0].manifest.tools).toContain("web_search@1");
       expect(created.body.builds).toHaveLength(1);
@@ -204,6 +210,40 @@ describe("Agent Project / Preview / Promote", () => {
     expect(build.build_log.map((item: { message: string }) => item.message).join(" ")).toContain("能力を固定");
     const stored = await h.admin.agent_builds.findUniqueOrThrow({ where: { id: firstBuildId } });
     expect(JSON.stringify(stored.compiled_config)).not.toContain("secret-value");
+  });
+
+  it("Project SettingsはInstructions・Permission・Environmentを新Versionへ保存し、古い画面の上書きを拒否する", async () => {
+    const before = await h.request("GET", `/api/v1/agents/${projectId}/project`, owner);
+    expect(before.status).toBe(200);
+    const baseVersion = before.body.agent.versions[0].version as number;
+    const updated = await h.request("PUT", `/api/v1/agents/${projectId}/settings`, {
+      ...owner,
+      body: {
+        base_version: baseVersion,
+        instructions: "投稿候補を作成し、外部公開前には必ず担当者の確認を求めてください。",
+        policies: [{ type: "approval", tool: "publish_post", timeout_minutes: 1440, reason: "担当者確認" }],
+        environment_profile: "browser-runtime",
+      },
+    });
+    expect(updated.status, JSON.stringify(updated.body)).toBe(200);
+    expect(updated.body.agent.latest_version).toBe(baseVersion + 1);
+    expect(updated.body.agent.versions[0].manifest).toMatchObject({
+      instructions: "投稿候補を作成し、外部公開前には必ず担当者の確認を求めてください。",
+      environment: { profile: "browser-runtime" },
+      policies: [{ type: "approval", tool: "publish_post", timeout_minutes: 1440, reason: "担当者確認" }],
+    });
+
+    const stale = await h.request("PUT", `/api/v1/agents/${projectId}/settings`, {
+      ...owner,
+      body: {
+        base_version: baseVersion,
+        instructions: "古い画面からの更新",
+        policies: [],
+        environment_profile: null,
+      },
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error.message).toContain("再読み込み");
   });
 
   it("Previewと同じBuildをProductionへPromoteし、過去BuildへRollbackする", async () => {

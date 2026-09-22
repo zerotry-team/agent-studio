@@ -7,12 +7,15 @@ import type {
   CapabilityVariableDto,
   ConnectionDto,
   ConnectorDto,
+  CreatedDeploymentApiKeyDto,
+  CreatedDeploymentWebhookDto,
   DeploymentDto,
+  Policy,
   Stage,
   ToolDto,
 } from "@agent-studio/contracts";
 import { isBrowserAccessConfigured, isBrowserCapability, usesBrowserCapability } from "@agent-studio/contracts";
-import { CalendarClock, Check, CircleAlert, CloudUpload, ExternalLink, History, Link2, MessageSquare, Rocket, RotateCcw, Settings, Trash2 } from "lucide-react";
+import { CalendarClock, Check, CircleAlert, CloudUpload, ExternalLink, History, KeyRound, Link2, MessageSquare, Rocket, RotateCcw, Settings, Trash2, Webhook } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
@@ -22,10 +25,22 @@ import {
   linkAgentConnectionAction,
   setAgentEnvironmentAction,
   setBrowserAccessAction,
+  updateAgentSettingsAction,
 } from "@/actions/agents";
 import { listConnectionsAction } from "@/actions/connections";
 import { listConnectorsAction, setConnectorOAuthAppAction } from "@/actions/connectors";
-import { listDeploymentsAction, promoteDeploymentAction, rollbackDeploymentAction } from "@/actions/deployments";
+import {
+  createDeploymentApiKeyAction,
+  createDeploymentWebhookAction,
+  listDeploymentApiKeysAction,
+  listDeploymentsAction,
+  listDeploymentWebhooksAction,
+  promoteDeploymentAction,
+  revokeDeploymentApiKeyAction,
+  revokeDeploymentWebhookAction,
+  rollbackDeploymentAction,
+} from "@/actions/deployments";
+import { listRuntimeProfilesAction } from "@/actions/environments";
 import { createScheduleAction, deleteScheduleAction, listSchedulesAction, updateScheduleAction } from "@/actions/schedules";
 import { AgentRun } from "@/components/agents/agent-run";
 import { AgentBuildStatus } from "@/components/builder-projects/agent-build-status";
@@ -584,7 +599,7 @@ function Preview({ project }: { project: AgentProjectDto }) {
 }
 
 function Deployments({ project, onChanged }: { project: AgentProjectDto; onChanged: () => Promise<void> }) {
-  const { organization } = useSession();
+  const { organization, can } = useSession();
   const connectors = useActionQuery(() => listConnectorsAction(), [organization?.id]);
   const [promoteTarget, setPromoteTarget] = useState<DeploymentDto | null>(null);
   const promote = useActionMutation(promoteDeploymentAction, { successMessage: "同じBuildをProductionへ公開しました", onSuccess: onChanged });
@@ -612,6 +627,7 @@ function Deployments({ project, onChanged }: { project: AgentProjectDto; onChang
               </div>
             </div>
             {deployment.build_id ? (() => { const build = project.builds.find((item) => item.id === deployment.build_id); return build ? <details className="mt-3 border-t border-gray-100 pt-3"><summary className="cursor-pointer text-xs font-medium text-gray-600">Buildログを表示</summary><ol className="mt-2 space-y-1">{build.build_log.map((entry, index) => <li key={`${entry.message}-${index}`} className="text-xs text-gray-600"><span className="mr-2 font-medium uppercase text-gray-400">{entry.type}</span>{entry.message}</li>)}</ol></details> : null; })() : null}
+            {deployment.stage === "production" && deployment.status === "active" && can("deployment.production") ? <DeploymentCredentials deploymentId={deployment.id} /> : null}
           </div>
         ))}
         {project.deployments.length === 0 ? <p className="py-8 text-center text-sm text-gray-500">Deploymentはまだありません。</p> : null}
@@ -646,12 +662,63 @@ function Deployments({ project, onChanged }: { project: AgentProjectDto; onChang
   );
 }
 
+function DeploymentCredentials({ deploymentId }: { deploymentId: string }) {
+  const keys = useActionQuery(() => listDeploymentApiKeysAction(deploymentId), [deploymentId]);
+  const webhooks = useActionQuery(() => listDeploymentWebhooksAction(deploymentId), [deploymentId]);
+  const [kind, setKind] = useState<"api_key" | "webhook">("api_key");
+  const [name, setName] = useState("Production integration");
+  const [perMinute, setPerMinute] = useState(60);
+  const [perDay, setPerDay] = useState(1000);
+  const [issued, setIssued] = useState<CreatedDeploymentApiKeyDto | CreatedDeploymentWebhookDto | null>(null);
+  const createKey = useActionMutation(createDeploymentApiKeyAction, { onSuccess: async (value) => { setIssued(value); await keys.reload(); } });
+  const createWebhook = useActionMutation(createDeploymentWebhookAction, { onSuccess: async (value) => { setIssued(value); await webhooks.reload(); } });
+  const revokeKey = useActionMutation(revokeDeploymentApiKeyAction, { successMessage: "API Keyを無効化しました", onSuccess: keys.reload });
+  const revokeWebhook = useActionMutation(revokeDeploymentWebhookAction, { successMessage: "Webhookを無効化しました", onSuccess: webhooks.reload });
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setIssued(null);
+    const input = { name, rate_limit_per_minute: perMinute, max_runs_per_day: perDay };
+    if (kind === "api_key") await createKey.mutate(deploymentId, input);
+    else await createWebhook.mutate(deploymentId, input);
+  };
+  const secret = issued && "secret" in issued ? issued.secret : issued && "signing_secret" in issued ? issued.signing_secret : null;
+  return (
+    <details className="mt-4 border-t border-gray-100 pt-3">
+      <summary className="cursor-pointer text-sm font-medium text-gray-700">API・Webhookから呼び出す</summary>
+      <div className="mt-4 space-y-4">
+        <Alert tone="warning">Secretは作成直後のこの画面で一度だけ表示します。再表示できないため、安全なSecret Storeへ保存してください。</Alert>
+        {issued && secret ? (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 p-3">
+            <p className="text-sm font-semibold text-amber-950">新しい{("secret" in issued) ? "API Key" : "Webhook signing secret"}</p>
+            {"path" in issued ? <code className="mt-2 block break-all text-xs text-amber-900">POST {issued.path}</code> : null}
+            <code className="mt-2 block break-all rounded bg-white p-2 text-xs text-gray-900" data-testid="issued-deployment-secret">{secret}</code>
+            <Button className="mt-2" size="sm" variant="secondary" onClick={() => setIssued(null)}>保存しました</Button>
+          </div>
+        ) : null}
+        <form className="grid gap-3 rounded-lg bg-gray-50 p-3 md:grid-cols-4" onSubmit={submit}>
+          <Field label="方式"><Select value={kind} onChange={(event) => setKind(event.target.value as "api_key" | "webhook")}><option value="api_key">API Key</option><option value="webhook">Webhook</option></Select></Field>
+          <Field label="名前" required><Input value={name} onChange={(event) => setName(event.target.value)} /></Field>
+          <Field label="1分の上限" required><Input type="number" min={1} max={600} value={perMinute} onChange={(event) => setPerMinute(Number(event.target.value))} /></Field>
+          <Field label="24時間の上限" required><Input type="number" min={1} max={100000} value={perDay} onChange={(event) => setPerDay(Number(event.target.value))} /></Field>
+          <div className="md:col-span-4"><Button type="submit" size="sm" loading={createKey.pending || createWebhook.pending} disabled={!name.trim() || perMinute < 1 || perDay < 1} icon={kind === "api_key" ? <KeyRound className="h-4 w-4" /> : <Webhook className="h-4 w-4" />}>{kind === "api_key" ? "API Keyを発行" : "Webhookを作成"}</Button></div>
+        </form>
+        {keys.error || webhooks.error || createKey.error || createWebhook.error ? <Alert tone="danger">{keys.error?.message ?? webhooks.error?.message ?? createKey.error?.message ?? createWebhook.error?.message}</Alert> : null}
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">API Keys</p>{keys.data?.map((key) => <div key={key.id} className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-gray-200 p-3 text-sm"><div><p className="font-medium text-gray-900">{key.name}</p><p className="text-xs text-gray-500">{key.key_prefix}… · {key.rate_limit_per_minute}/分 · {key.max_runs_per_day}/日</p></div><div className="flex items-center gap-2"><Badge tone={key.status === "active" ? "success" : "neutral"}>{key.status}</Badge>{key.status === "active" ? <Button size="sm" variant="danger-outline" loading={revokeKey.pending} onClick={() => void revokeKey.mutate(key.id)}>無効化</Button> : null}</div></div>)}{keys.data?.length === 0 ? <p className="text-sm text-gray-500">API Keyはありません。</p> : null}</div>
+          <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Webhooks</p>{webhooks.data?.map((hook) => <div key={hook.id} className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-gray-200 p-3 text-sm"><div><p className="font-medium text-gray-900">{hook.name}</p><p className="text-xs text-gray-500">{hook.rate_limit_per_minute}/分 · {hook.max_runs_per_day}/日</p></div><div className="flex items-center gap-2"><Badge tone={hook.status === "active" ? "success" : "neutral"}>{hook.status}</Badge>{hook.status === "active" ? <Button size="sm" variant="danger-outline" loading={revokeWebhook.pending} onClick={() => void revokeWebhook.mutate(hook.id)}>無効化</Button> : null}</div></div>)}{webhooks.data?.length === 0 ? <p className="text-sm text-gray-500">Webhookはありません。</p> : null}</div>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 function ProjectSettings({ project, onChanged }: { project: AgentProjectDto; onChanged: () => Promise<void> }) {
   const { organization } = useSession();
   const connectors = useActionQuery(() => listConnectorsAction(), [organization?.id]);
   const connections = useActionQuery(() => listConnectionsAction(), [organization?.id]);
   return (
     <div className="space-y-6">
+      <AgentDefinitionSettings project={project} onChanged={onChanged} />
       <ConnectionSettings project={project} connectors={connectors.data ?? []} connections={connections.data ?? []} onChanged={onChanged} />
       <VariableSettings project={project} onChanged={onChanged} />
       <ScheduleSettings agentId={project.agent.id} />
@@ -660,6 +727,65 @@ function ProjectSettings({ project, onChanged }: { project: AgentProjectDto; onC
         <CardBody><details><summary className="cursor-pointer text-sm font-medium text-gray-700">Manifestを表示</summary><pre className="mt-3 overflow-auto rounded-lg bg-gray-950 p-4 text-xs text-gray-100">{project.agent.versions?.[0]?.manifest_yaml}</pre></details></CardBody>
       </Card>
     </div>
+  );
+}
+
+type PermissionMode = "allow" | "approval" | "deny";
+
+function AgentDefinitionSettings({ project, onChanged }: { project: AgentProjectDto; onChanged: () => Promise<void> }) {
+  const { organization, can } = useSession();
+  const profiles = useActionQuery(() => listRuntimeProfilesAction(), [organization?.id]);
+  const latest = project.agent.versions?.[0];
+  const [instructions, setInstructions] = useState(latest?.manifest.instructions ?? "");
+  const [profile, setProfile] = useState(latest?.manifest.environment.profile ?? "");
+  const tools = latest?.manifest.tools.map((ref) => ref.split("@")[0]!) ?? [];
+  const initialMode = (tool: string): PermissionMode => {
+    const direct = latest?.manifest.policies.find((policy) => policy.tool === tool && !("when" in policy && policy.when));
+    return direct?.type === "deny" ? "deny" : direct?.type === "approval" ? "approval" : "allow";
+  };
+  const [permissions, setPermissions] = useState<Record<string, PermissionMode>>(() => Object.fromEntries(tools.map((tool) => [tool, initialMode(tool)])));
+  useEffect(() => {
+    setInstructions(latest?.manifest.instructions ?? "");
+    setProfile(latest?.manifest.environment.profile ?? "");
+    setPermissions(Object.fromEntries((latest?.manifest.tools ?? []).map((ref) => { const tool = ref.split("@")[0]!; return [tool, initialMode(tool)]; })));
+    // Versionが更新されたときだけ、サーバーの正本で入力を再初期化する。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [latest?.version]);
+  const save = useActionMutation(updateAgentSettingsAction, { successMessage: "Agent設定を新しいVersionとして保存しました", onSuccess: onChanged });
+  if (!latest) return null;
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const managedTools = new Set(tools);
+    const preserved = latest.manifest.policies.filter((policy) => {
+      if (!managedTools.has(policy.tool)) return true;
+      if (policy.type !== "approval" && policy.type !== "deny") return true;
+      return "when" in policy && Boolean(policy.when);
+    });
+    const managed: Policy[] = [];
+    for (const tool of tools) {
+      if (permissions[tool] === "deny") managed.push({ type: "deny", tool, reason: "Project Settingsでこの操作を禁止しています" });
+      if (permissions[tool] === "approval") managed.push({ type: "approval", tool, timeout_minutes: 1440, reason: "Project Settingsで実行前の承認を必須にしています" });
+    }
+    void save.mutate(project.agent.id, {
+      base_version: latest.version,
+      instructions,
+      policies: [...preserved, ...managed],
+      environment_profile: profile || null,
+    });
+  };
+  return (
+    <Card>
+      <CardHeader title="Instructions・Permissions・Environment" description={`現在のVersion ${latest.version}を元に、Immutableな新Versionを作成します。公開中のBuildは自動変更されません。`} />
+      <CardBody>
+        <form className="space-y-5" onSubmit={submit}>
+          <Field label="Agentへの指示" required hint="Secretや顧客データは書かず、守るべき業務ルールを記載します。"><Textarea className="min-h-36" value={instructions} onChange={(event) => setInstructions(event.target.value)} /></Field>
+          <Field label="既定の実行環境" hint="Build時に使うRuntime Profile。未指定なら組織の既定選択を利用します。"><Select value={profile} onChange={(event) => setProfile(event.target.value)}><option value="">自動選択</option>{profiles.data?.map((item) => <option key={item.id} value={item.key}>{item.name}（{item.type}）</option>)}</Select></Field>
+          <div><p className="text-sm font-medium text-gray-900">操作ごとのPermission</p><p className="mt-1 text-xs text-gray-500">禁止と承認必須を安全側で設定します。条件付き・時間帯・回数制限は既存Policyを保持します。</p><div className="mt-3 space-y-2">{tools.map((tool) => <div key={tool} className="grid gap-2 rounded-lg border border-gray-200 p-3 sm:grid-cols-[1fr_220px] sm:items-center"><code className="text-sm text-gray-800">{tool}</code><Select aria-label={`${tool}のPermission`} value={permissions[tool] ?? "allow"} onChange={(event) => setPermissions((current) => ({ ...current, [tool]: event.target.value as PermissionMode }))}><option value="allow">許可</option><option value="approval">毎回承認</option><option value="deny">禁止</option></Select></div>)}{tools.length === 0 ? <p className="text-sm text-gray-500">このAgentにTool操作はありません。</p> : null}</div></div>
+          {profiles.error || save.error ? <Alert tone="danger">{profiles.error?.message ?? save.error?.message}</Alert> : null}
+          <Button type="submit" disabled={!can("agent.edit") || !instructions.trim()} loading={save.pending}>新しいVersionとして保存</Button>
+        </form>
+      </CardBody>
+    </Card>
   );
 }
 

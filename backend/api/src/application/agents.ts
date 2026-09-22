@@ -19,6 +19,7 @@ import {
   type LinkAgentConnectionInput,
   type ManifestValidationDto,
   type SetAgentEnvironmentInput,
+  type UpdateAgentSettingsInput,
   type Policy,
   type ToolVersionSpec,
 } from "@agent-studio/contracts";
@@ -115,14 +116,15 @@ export async function resolveTools(
  * 既存要件の説明・Variable・Connection情報は保ち、追加Toolだけを独立要件として補う。
  */
 export function reconcileVersionResolution(
-  current: CapabilityResolutionDto,
+  current: Partial<CapabilityResolutionDto> | null | undefined,
   tools: ResolvedTool[],
 ): CapabilityResolutionDto {
   const selectedTools = [...new Set(tools.map((tool) => tool.name))];
   const selected = new Set(selectedTools);
-  const requirements = current.requirements.flatMap((requirement) => {
-    const toolNames = requirement.tool_names.filter((name) => selected.has(name));
-    if (requirement.tool_names.length > 0 && toolNames.length === 0) return [];
+  const requirements = (current?.requirements ?? []).flatMap((requirement) => {
+    const currentToolNames = requirement.tool_names ?? [];
+    const toolNames = currentToolNames.filter((name) => selected.has(name));
+    if (currentToolNames.length > 0 && toolNames.length === 0) return [];
     return [{ ...requirement, tool_names: toolNames }];
   });
   const covered = new Set(requirements.flatMap((requirement) => requirement.tool_names));
@@ -139,11 +141,12 @@ export function reconcileVersionResolution(
       variables: [],
     });
   }
+  const missingVariables = current?.missing_variables ?? [];
   return {
     requirements,
     selected_tools: selectedTools,
-    missing_variables: current.missing_variables,
-    ready: requirements.every((requirement) => requirement.state === "resolved") && current.missing_variables.length === 0,
+    missing_variables: missingVariables,
+    ready: requirements.every((requirement) => requirement.state === "resolved") && missingVariables.length === 0,
   };
 }
 
@@ -487,6 +490,70 @@ export class AgentService {
           detail: { stage: input.stage, variable_names: Object.keys(input.variables) },
         }),
       );
+    });
+    return this.getProject(actor, agentId);
+  }
+
+  /**
+   * Project Settingsの保存は既存Versionを書き換えず、新しいdraft Versionを作る。
+   * base_versionで同時編集を検知し、古い画面から新しい設定を上書きしない。
+   */
+  async updateSettings(actor: MemberActor, agentId: string, input: UpdateAgentSettingsInput): Promise<AgentProjectDto> {
+    requireRole(actor, "builder");
+    await this.deps.db.run(scopeOf(actor), async (tx) => {
+      const agent = await tx.agents.findFirst({ where: { id: agentId, organization_id: actor.organizationId } });
+      if (!agent) throw notFound("エージェント");
+      if (agent.latest_version !== input.base_version) {
+        throw conflict("Agent設定が別の操作で更新されました。画面を再読み込みしてからやり直してください");
+      }
+      const current = await tx.agent_versions.findFirst({
+        where: { agent_id: agentId, organization_id: actor.organizationId, version: input.base_version },
+      });
+      if (!current) throw notFound("Agent Version");
+      const parsed = parseManifest(current.manifest);
+      if (!parsed.ok) throw validationError("現在のAgent定義を読み込めません", { errors: parsed.errors });
+      const manifest: AgentManifest = {
+        ...parsed.manifest,
+        instructions: input.instructions,
+        policies: input.policies,
+        environment: input.environment_profile ? { profile: input.environment_profile } : {},
+      };
+      const { errors } = await this.checkReferences(tx, actor.organizationId, manifest);
+      if (errors.length > 0) throw validationError(errors[0]!, { errors });
+      const resolved = await resolveTools(tx, actor.organizationId, manifest.tools);
+      const capabilityResolution = reconcileVersionResolution(
+        agent.capability_resolution as unknown as CapabilityResolutionDto,
+        resolved.tools,
+      );
+      const version = agent.latest_version + 1;
+      await tx.agent_versions.create({
+        data: {
+          organization_id: actor.organizationId,
+          agent_id: agentId,
+          version,
+          manifest: manifest as unknown as Prisma.InputJsonValue,
+          manifest_yaml: stringifyManifest(manifest),
+          created_by: actor.userId,
+        },
+      });
+      await tx.agents.update({
+        where: { id: agentId },
+        data: {
+          latest_version: version,
+          capability_resolution: capabilityResolution as unknown as Prisma.InputJsonValue,
+        },
+      });
+      await recordAudit(tx, auditBy(actor, {
+        action: "agent.settings.update",
+        targetType: "agent",
+        targetId: agentId,
+        detail: {
+          base_version: input.base_version,
+          version,
+          environment_profile: input.environment_profile,
+          policy_count: input.policies.length,
+        },
+      }));
     });
     return this.getProject(actor, agentId);
   }
