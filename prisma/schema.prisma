@@ -423,7 +423,7 @@ model runtimes {
   /// 1つの AWS プリンシパルは、全組織を通じて1つの Runtime にしか対応しない
   @@unique([aws_account_id, expected_role_name])
   @@unique([organization_id, id])
-  @@index([provisioning_status, provisioning_lease_until, created_at])
+  @@index([provisioning_status, provisioning_lease_until, created_at], map: "runtimes_provisioning_status_provisioning_lease_until_created_a")
 }
 
 model runtime_bootstrap_tokens {
