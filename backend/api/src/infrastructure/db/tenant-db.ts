@@ -144,6 +144,11 @@ export class SystemDb {
     return Number(rows[0]?.n ?? 0);
   }
 
+  claimConnectionHealthChecks(owner: string, staleSeconds: number, limit: number) {
+    return this.prisma.$queryRaw<Array<{ connection_id: string; organization_id: string }>>`
+      SELECT * FROM system_claim_connection_health_checks(${owner}, ${staleSeconds}::integer, ${limit}::integer)`;
+  }
+
   async heartbeatWorker(workerId: string, activeRuns: number, activeSessions: number): Promise<void> {
     await this.prisma.worker_heartbeats.upsert({
       where: { worker_id: workerId },

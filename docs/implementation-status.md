@@ -19,8 +19,8 @@ AWS は過去の基盤commitで production の Control Plane と Sample A 社 Ru
 | WS-06 企業Runtime/AWS | tested_local_real | private repo/PR/package/heartbeat/Tool登録の縦切りとRuntime Terraformは既存実装。新規組織の実AWS apply、実DB、upgrade/orphan/署名不一致の一括Cloud E2Eは未実施 |
 | WS-07 Adapter分離 | tested_fake | `shared_provider_adapter` / `organization_private_adapter`を追加し、既存の企業Repository強制を維持。共通Adapterの複数組織公開E2Eは未実施 |
 | WS-08 Factoring | tested_fake | F-01〜F-08、可/否/保留、fail closed、承認、Provider Job/permalink契約はfixtureで成功。実Provider投稿はHuman Gate |
-| WS-09 Production運用 | tested_fake | Worker/readiness、Runtime/deployment/drift health、Deployment API key、HMAC webhook、replay protection、rate/day cap、schedule、rollback、組織単位のfail-closed自動承認Policyと緊急停止を実装。実障害Cloud検証は未完 |
-| WS-10 Agent UX | tested_local_real | 自然言語入口、Human Action、stage/log/elapsed/ETA/retry、Production health gateはローカル画面で既存確認。今回差分の全画面回帰は未実施 |
+| WS-09 Production運用 | tested_local_real | Worker/readiness、Runtime/deployment/drift health、Deployment API key、HMAC webhook、replay protection、rate/day cap、schedule、rollback、組織単位のfail-closed自動承認Policyと緊急停止に加え、Provider定期Health checkとProduction Health伝播を実装。実HTTPS Providerの401を`expired`、Productionを`degraded`とし、外部Triggerが409でfail closedすることをローカル実プロセスで確認。実障害Cloud検証は未完 |
+| WS-10 Agent UX | tested_local_real | 自然言語入口、Human Action、stage/log/elapsed/ETA/retry、Production health gateに加え、Project SettingsのInstructions・ToolごとのPermissions・Environment選択、Deployment API Key/Webhook・rate/day cap管理画面を実装。実ブラウザでImmutable Version作成、Secret一回表示、再読込後の非表示、無効化を確認 |
 | WS-11 Cloud deploy | implemented | deploy設定欠落をhard fail、`/health/ready`、稼働task image SHA照合、migration/API/Web SHA記録を追加。対象commitのstaging/production実deployは未実施 |
 
 ### E2E-01〜17の現在地
@@ -170,11 +170,14 @@ AWS は過去の基盤commitで production の Control Plane と Sample A 社 Ru
 - Agent作成後はBrowser内部Actionを個別表示せず、必要なConnectionと許可ドメインだけを確認する。Browser接続範囲が未設定の間はPreviewを作成しないことをAPI結合テストと実ブラウザで確認した。
 - 新しいBrowser Worker + Egress ProxyをDocker上で接続し、Proxy経由で`https://example.com`を開き、画像応答とSnapshot内容を確認した。加えて、Human LoginのProfile保存・別Session復元、およびBrowser Download→Run専用Artifact→Uploadを実Chromiumで確認した。UploadはGatewayで実行直前承認を強制する。AWS上の実OpenAI E2E、実Provider Human Login、Browser Artifactのdurable S3/DB promotionは未確認・未実装。
 
-残件:
+今回完了したコード残件:
 
-- Providerへの定期Health check（手動の実接続確認は実装済み）。
-- Project SettingsのInstructions、Permissions、Environment選択画面。
-- Deployment単位のAPI Key、Webhook trigger、rate/day capはAPI実装済み。管理UIは未実装。
+- Provider定期Health check、期限切れ分類、Production Healthへの伝播、unhealthy時の外部Trigger fail-closed。Worker pool単位でclaimし、結合テスト間の越境を防ぐ。
+- Project SettingsのInstructions、ToolごとのPermissions、Environment選択。保存は既存Versionを変更せず新しいdraft Versionを作り、古い画面からの上書きを409で拒否する。
+- Deployment単位のAPI Key、Webhook trigger、rate/day cap管理UI。Secretは作成直後のみ表示し、再読込後はprefixだけを表示する。
+- 旧形式の`capability_resolution`を持つ既存AgentでVersion作成が500になる互換性不具合を実機APIで検出し、欠落配列を安全に正規化するよう修正した。
+
+ローカルではPostgreSQL 16のマイグレーション差分なし、結合テスト63件、実API/Worker/Web、実ブラウザ操作、実HTTPS 401 Providerまで確認済み。実AWS deploy、実OAuth/Human Login Provider、外部公開、実SNS投稿は引き続きHuman GateまたはCloud検証境界である。
 
 ## 決めたこと（要件定義書 §16 の推奨をすべて採用）
 

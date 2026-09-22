@@ -773,10 +773,10 @@ Social Routerの`POST /v1/posts`は202受付であり、投稿成功ではない
 - Connectionの期限自動検知、明示的なrevoke、読み取り操作による接続テスト、認証情報ローテーションUIを実装済み。Social Router Previewの実接続確認も成功。
 - Agent Project Settingsから曜日・日本時間・環境・指示を設定するSchedule triggerと、Workerの排他的なRun生成を実装済み。
 - Social Routerの非同期Job IDをRunへ構造化保存し、`get_job`だけを自動追跡する機能を実装済み。結果不明時も自動再投稿しない。実SNSとの最終相関は明示確認後の実投稿で検証する。
-- Production HealthはConnection状態、Runtime状態、直近失敗率、`completed_with_errors`を反映する。定期Provider Health checkは未実装（画面からの実接続確認は実装済み）。
-- Project SettingsのInstructions、Permissions、Environment選択は個別画面として未実装。Connections、Variables、Advanced Manifestは実装済み。
+- Production HealthはConnection状態、Runtime状態、直近失敗率、`completed_with_errors`を反映する。定期Provider Health checkも実装し、401/403を期限切れ、通信失敗/5xxをエラーとしてProduction Healthへ伝播する。
+- Project SettingsのInstructions、Permissions、Environment選択はImmutable Versionを作る個別画面として実装済み。Connections、Variables、Advanced Manifestも従来どおり利用できる。
 - Tool実行が失敗してAgentが回答を返したRunは`completed_with_errors` Outcomeとして警告表示し、Health集計にも反映する。
-- Agent APIはCognito認証下で利用できるが、Deployment単位のAPI Key、Webhook trigger、利用制限の管理UIは未実装。
+- Agent APIはCognito認証下で利用でき、Deployment単位のAPI Key、Webhook trigger、利用制限の管理UIも実装済み。
 
 ---
 

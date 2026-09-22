@@ -245,9 +245,9 @@ yarn build
 
 1. 対象アカウントと最終本文の明示確認後、修正版`publish_post`を1回だけ実行する。
 2. Social Router Jobが`succeeded`になったことと、実SNS側の投稿を両方確認する。
-3. Providerへの定期Health checkを実装する。現在は手動の実接続確認と期限監視のみ。
-4. Project SettingsのInstructions編集、CapabilityごとのPermissions UI、Environment選択を追加する。
-5. Deployment単位API Key、Webhook Trigger、Rate Limit管理UIを追加する。
+3. 【完了】Provider定期Health check、Connection状態とProduction Healthへの伝播、外部Triggerのfail-closed。
+4. 【完了】Project SettingsのInstructions編集、CapabilityごとのPermissions UI、Environment選択。
+5. 【完了】Deployment単位API Key、Webhook Trigger、Rate Limit管理UI。
 6. ScheduleのTimezoneを`Asia/Tokyo`以外へ拡張する。
 
 ## 9. 引き継ぎ時の開始点

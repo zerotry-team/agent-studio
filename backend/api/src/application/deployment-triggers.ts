@@ -114,6 +114,11 @@ export class DeploymentTriggerService {
     return this.deps.db.org(credential.organization_id, async (tx) => {
       const deployment = await tx.deployments.findFirst({ where: { id: credential.deployment_id, organization_id: credential.organization_id, stage: "production", status: "active", health_status: "ready" } });
       if (!deployment) throw conflict("Production Deploymentがhealthyではありません");
+      const unhealthyConnection = await tx.agent_connection_links.findFirst({
+        where: { organization_id: credential.organization_id, agent_id: deployment.agent_id, stage: "production", connection: { status: { not: "connected" } } },
+        include: { connector: true, connection: true },
+      });
+      if (unhealthyConnection) throw conflict(`${unhealthyConnection.connector.name} Connectionは${unhealthyConnection.connection.status}です`);
       const minute = new Date(Date.now() - 60_000);
       const day = new Date(Date.now() - 24 * 60 * 60_000);
       // interactive transactionは同じpg clientを使うため、queryを並列発行しない。

@@ -14,9 +14,10 @@ import {
   LinkAgentConnectionService,
   SetBrowserAccessService,
   SetAgentEnvironmentService,
+  UpdateAgentSettingsService,
   ValidateManifestService,
 } from "@/lib/services/agents";
-import type { CreateAgentProjectInput, LinkAgentConnectionInput, SetAgentEnvironmentInput , SetBrowserAccessInput } from "@agent-studio/contracts";
+import type { CreateAgentProjectInput, LinkAgentConnectionInput, SetAgentEnvironmentInput, SetBrowserAccessInput, UpdateAgentSettingsInput } from "@agent-studio/contracts";
 
 export async function listAgentsAction() {
   return runAction(() => new ListAgentsService().invoke(), "エージェントの一覧を取得できませんでした");
@@ -40,6 +41,10 @@ export async function linkAgentConnectionAction(id: string, input: LinkAgentConn
 
 export async function setAgentEnvironmentAction(id: string, input: SetAgentEnvironmentInput) {
   return runAction(() => new SetAgentEnvironmentService().invoke(id, input), "Variablesを設定できませんでした");
+}
+
+export async function updateAgentSettingsAction(id: string, input: UpdateAgentSettingsInput) {
+  return runAction(() => new UpdateAgentSettingsService().invoke(id, input), "Agent設定を保存できませんでした");
 }
 
 export async function createPreviewAction(id: string) {
