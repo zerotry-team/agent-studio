@@ -28,6 +28,8 @@ export function createHarness(overrides: Partial<Deps> = {}, envOverrides: NodeJ
     OPENAI_DEFAULT_MODEL: "test-model",
     LOG_LEVEL: process.env.TEST_LOG_LEVEL ?? "silent",
     WORKER_ID: `test-${randomUUID()}`,
+    AGENT_TURN_START_TIMEOUT_SECONDS: "1",
+    AGENT_TURN_MAX_RECOVERIES: "1",
     ARTIFACTS_BUCKET: "test-artifacts",
     AUDIT_EXPORT_BUCKET: "test-audit",
     ...envOverrides,

@@ -10,6 +10,16 @@ import type { SessionCreateParamsNonStreaming } from "openai/resources/beta/agen
 export type { AgentSession, AgentSessionEvent, AgentSessionInputParam, AgentSessionItem };
 export type SessionCreateParams = SessionCreateParamsNonStreaming;
 
+export interface AgentSessionTurnSummary {
+  id: string;
+  status: string;
+  subagent_id: string | null;
+  error: { code?: string | null; message?: string | null } | null;
+  usage: { input_tokens: number; output_tokens: number } | null;
+  created_at: number;
+  completed_at: number | null;
+}
+
 /**
  * Agent Studio が使う OpenAI Agents API の操作（docs/reference/openai-agents-sdk.md）。
  * 本物（OpenAI）と、ローカル・CI 用の擬似実装を差し替えられるようにする。
@@ -25,6 +35,8 @@ export interface AgentsApi {
   retrieveEnvironmentStatus(environmentId: string): Promise<string>;
   /** 新しい順 */
   listRecentItems(sessionId: string, limit: number): Promise<AgentSessionItem[]>;
+  /** 新しい順。SSE を取りこぼしたときの状態照合に使う */
+  listRecentTurns(sessionId: string, limit: number): Promise<AgentSessionTurnSummary[]>;
   /** セッションの成果物（/workspace/outputs に置かれたファイル） */
   listArtifacts(sessionId: string): Promise<{ id: string; path: string; size_bytes: number }[]>;
   downloadArtifact(sessionId: string, artifactId: string): Promise<Buffer>;
@@ -92,6 +104,19 @@ export class OpenAiAgentsApi implements AgentsApi {
   async listRecentItems(sessionId: string, limit: number): Promise<AgentSessionItem[]> {
     const page = await this.client.beta.agents.sessions.items.list(sessionId, { order: "desc", limit });
     return page.data;
+  }
+
+  async listRecentTurns(sessionId: string, limit: number): Promise<AgentSessionTurnSummary[]> {
+    const page = await this.client.beta.agents.sessions.turns.list(sessionId, { order: "desc", limit });
+    return page.data.map((turn) => ({
+      id: turn.id,
+      status: turn.status,
+      subagent_id: turn.subagent_id,
+      error: turn.error,
+      usage: turn.usage ? { input_tokens: turn.usage.input_tokens, output_tokens: turn.usage.output_tokens } : null,
+      created_at: turn.created_at,
+      completed_at: turn.completed_at,
+    }));
   }
 
   async storeVaultCredential(input: {

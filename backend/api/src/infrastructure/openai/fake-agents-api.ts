@@ -4,6 +4,7 @@ import type {
   AgentSessionEvent,
   AgentSessionInputParam,
   AgentSessionItem,
+  AgentSessionTurnSummary,
   AgentsApi,
   SessionCreateParams,
 } from "./agents-api.js";
@@ -22,6 +23,7 @@ interface FakeSession {
   requiredActions: AgentSession["required_actions"];
   subscribers: Set<EventQueue>;
   items: AgentSessionItem[];
+  turns: AgentSessionTurnSummary[];
   functionTools: Set<string>;
   /** Studio内server_label -> MCPサーバー側の操作名 */
   mcpTools: Map<string, string>;
@@ -75,6 +77,8 @@ const CALL_PATTERN = /\[\[call:([a-z][a-z0-9_]*)\s*(\{.*?\})?\]\]/s;
 
 export class FakeAgentsApi implements AgentsApi {
   private readonly sessions = new Map<string, FakeSession>();
+  /** 結合テスト用: 同じ入力は最初のSessionだけ202相当で受理し、Turnを作らない */
+  private readonly droppedInputs = new Set<string>();
 
   constructor(private readonly environmentConnectDelayMs = 300) {}
 
@@ -110,6 +114,7 @@ export class FakeAgentsApi implements AgentsApi {
       requiredActions: [],
       subscribers: new Set(),
       items: [],
+      turns: [],
       functionTools,
       mcpTools,
       turnSeq: 0,
@@ -214,6 +219,10 @@ export class FakeAgentsApi implements AgentsApi {
     return [...this.get(sessionId).items].reverse().slice(0, limit);
   }
 
+  async listRecentTurns(sessionId: string, limit: number): Promise<AgentSessionTurnSummary[]> {
+    return [...this.get(sessionId).turns].reverse().slice(0, limit);
+  }
+
   async retrieveEnvironmentStatus(environmentId: string): Promise<string> {
     const session = [...this.sessions.values()].find((s) => (s.environment as { id?: string }).id === environmentId);
     return session?.connected ? "connected" : "pending";
@@ -226,11 +235,18 @@ export class FakeAgentsApi implements AgentsApi {
   // ---------------------------------------------------------------------------
 
   private startTurn(session: FakeSession, text: string) {
+    if (text.includes("[[drop-turn-always]]")) return;
+    if (text.includes("[[drop-turn-once]]") && !this.droppedInputs.has(text)) {
+      this.droppedInputs.add(text);
+      return;
+    }
     const turnId = `turn_${++session.turnSeq}`;
     session.status = "in_progress";
+    const startedTurn = this.turn(session, turnId, "in_progress");
+    session.turns.push(startedTurn);
     const events: unknown[] = [
       { type: "agent.session.in_progress", session: this.snapshot(session) },
-      { type: "agent.session.turn.created", session_id: session.id, turn_id: turnId, turn: this.turn(session, turnId, "in_progress") },
+      { type: "agent.session.turn.created", session_id: session.id, turn_id: turnId, turn: startedTurn },
     ];
 
     const builderContract = /<builder-result\s+change-set="([0-9a-f-]{36})"\s+adapter-path="([^"]+)"\s*\/>/i.exec(text);
@@ -256,8 +272,9 @@ export class FakeAgentsApi implements AgentsApi {
 
     if (text.includes("[[fail]]")) {
       session.status = "idle";
+      Object.assign(startedTurn, { status: "failed", error: { code: "server_error", message: "擬似的な失敗" }, completed_at: Math.floor(Date.now() / 1000) });
       events.push(
-        { type: "agent.session.turn.failed", session_id: session.id, turn_id: turnId, turn: { ...this.turn(session, turnId, "failed"), error: { code: "server_error", message: "擬似的な失敗" } }, usage: null },
+        { type: "agent.session.turn.failed", session_id: session.id, turn_id: turnId, turn: startedTurn, usage: null },
         { type: "agent.session.idle", session: this.snapshot(session) },
       );
       this.emitLater(session, events);
@@ -331,9 +348,11 @@ export class FakeAgentsApi implements AgentsApi {
     };
     setTimeout(() => {
       session.status = "idle";
+      const turn = session.turns.find((candidate) => candidate.id === turnId);
+      if (turn) Object.assign(turn, { status: "completed", completed_at: Math.floor(Date.now() / 1000), usage });
       for (const e of [
         { type: "agent.session.turn.item.done", session_id: session.id, turn_id: turnId, output_index: 0, item },
-        { type: "agent.session.turn.completed", session_id: session.id, turn_id: turnId, turn: { ...this.turn(session, turnId, "completed"), usage }, usage },
+        { type: "agent.session.turn.completed", session_id: session.id, turn_id: turnId, turn: turn ?? { ...this.turn(session, turnId, "completed"), usage }, usage },
         { type: "agent.session.idle", session: this.snapshot(session) },
       ]) {
         this.emit(session, e);
@@ -341,7 +360,7 @@ export class FakeAgentsApi implements AgentsApi {
     }, 50);
   }
 
-  private turn(session: FakeSession, turnId: string, status: string) {
+  private turn(session: FakeSession, turnId: string, status: string): AgentSessionTurnSummary & { object: string; session_id: string; agent_id: string } {
     const now = Math.floor(Date.now() / 1000);
     return {
       id: turnId,
@@ -353,7 +372,6 @@ export class FakeAgentsApi implements AgentsApi {
       error: null,
       usage: null,
       created_at: now,
-      started_at: now,
       completed_at: status === "in_progress" ? null : now,
     };
   }

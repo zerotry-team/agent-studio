@@ -73,6 +73,10 @@ const envSchema = z
     SESSION_MAX_LIFETIME_MINUTES: z.coerce.number().int().default(120),
     SESSION_IDLE_TIMEOUT_MINUTES: z.coerce.number().int().default(15),
     WORKER_CONNECT_TIMEOUT_MINUTES: z.coerce.number().int().default(10),
+    /** OpenAI が入力を受理してから root Turn を作るまで待つ時間 */
+    AGENT_TURN_START_TIMEOUT_SECONDS: z.coerce.number().int().min(1).default(45),
+    /** Turn が始まらない場合に Session を安全に作り直す最大回数 */
+    AGENT_TURN_MAX_RECOVERIES: z.coerce.number().int().min(0).max(5).default(2),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV !== "production") return;
