@@ -23,6 +23,11 @@ describe("builderActionDestination", () => {
     expect(builderActionDestination({ type: "enter_secret", resume_condition: { type: "connector_connected" } })).toBe("integrations");
   });
 
+  it("その場で認証できるActionは連携サービス画面へ案内しない", () => {
+    expect(builderActionDestination({ type: "enter_secret", resume_condition: { type: "connection_status" }, connection_id: "c1" })).toBeNull();
+    expect(builderActionDestination({ type: "oauth_consent", resume_condition: { type: "connection_status" }, oauth_start_url: "/integrations/oauth/start?connector=x" })).toBeNull();
+  });
+
   it("業務回答には組織設定への案内を出さない", () => {
     expect(builderActionDestination({ type: "business_rule_confirmation", resume_condition: { type: "builder_answers" } })).toBeNull();
   });

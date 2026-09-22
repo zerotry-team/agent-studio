@@ -42,6 +42,8 @@ locals {
       AUTH_MODE                = "cognito"
       COGNITO_USER_POOL_ID     = aws_cognito_user_pool.this.id
       COGNITO_CLIENT_ID        = aws_cognito_user_pool_client.web.id
+      COGNITO_CLI_CLIENT_ID    = aws_cognito_user_pool_client.cli.id
+      COGNITO_DOMAIN           = local.cognito_domain_url
       RUNTIME_SERVER_ID        = local.runtime_server_id
       SECRETS_PREFIX           = local.org_secrets_prefix
       SECRETS_KMS_KEY_ID       = aws_kms_key.this.arn

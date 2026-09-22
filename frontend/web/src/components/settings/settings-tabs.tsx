@@ -10,14 +10,20 @@ import { OpenAiTab } from "./openai-tab";
 import { OrganizationTab } from "./organization-tab";
 import { PoliciesTab } from "./policies-tab";
 
-type SettingsTab = "organization" | "infrastructure" | "openai" | "members" | "policies";
+type SettingsTab = "organization" | "advanced" | "openai" | "members" | "policies";
 
-const TAB_IDS: readonly SettingsTab[] = ["organization", "infrastructure", "openai", "members", "policies"];
+const TAB_IDS: readonly SettingsTab[] = ["organization", "advanced", "openai", "members", "policies"];
+/** 旧URL（?tab=infrastructure）は詳細設定へ */
+const TAB_ALIASES: Record<string, SettingsTab> = { infrastructure: "advanced" };
 const DEFAULT_TAB: SettingsTab = "organization";
 const ID_PREFIX = "settings";
 
 function isSettingsTab(value: string | null): value is SettingsTab {
   return value !== null && (TAB_IDS as readonly string[]).includes(value);
+}
+
+function normalizeTab(value: string | null): string | null {
+  return value && TAB_ALIASES[value] ? TAB_ALIASES[value]! : value;
 }
 
 /** 設定のタブ。表示中のタブは ?tab= と同期する（再読み込み・共有しても同じタブが開く） */
@@ -29,7 +35,7 @@ export function SettingsTabs() {
   const canViewOpenAi = can("openai.view");
   const canViewInfrastructure = can("connection.manage") || can("environment.manage");
 
-  const urlTab = searchParams.get("tab");
+  const urlTab = normalizeTab(searchParams.get("tab"));
   const [tab, setTab] = useState<SettingsTab>(isSettingsTab(urlTab) ? urlTab : DEFAULT_TAB);
   // サイドバーのリンクなどで URL の ?tab= が外から変わったときは、表示するタブも合わせる
   const [seenUrlTab, setSeenUrlTab] = useState(urlTab);
@@ -38,7 +44,7 @@ export function SettingsTabs() {
     setTab(isSettingsTab(urlTab) ? urlTab : DEFAULT_TAB);
   }
   // 権限が無いタブ（OpenAI）が指定された場合は、組織のタブを表示する
-  const active: SettingsTab = (tab === "openai" && !canViewOpenAi) || (tab === "infrastructure" && !canViewInfrastructure) ? DEFAULT_TAB : tab;
+  const active: SettingsTab = (tab === "openai" && !canViewOpenAi) || (tab === "advanced" && !canViewInfrastructure) ? DEFAULT_TAB : tab;
 
   const changeTab = (next: SettingsTab) => {
     setTab(next);
@@ -58,7 +64,7 @@ export function SettingsTabs() {
         onChange={changeTab}
         tabs={[
           { id: "organization", label: "組織" },
-          { id: "infrastructure", label: "実行・開発基盤", hidden: !canViewInfrastructure },
+          { id: "advanced", label: "詳細設定", hidden: !canViewInfrastructure },
           { id: "openai", label: "AIモデル", hidden: !canViewOpenAi },
           { id: "members", label: "メンバー" },
           { id: "policies", label: "ポリシー" },
@@ -68,7 +74,7 @@ export function SettingsTabs() {
         <OrganizationTab />
       </TabPanel>
       {canViewInfrastructure ? (
-        <TabPanel id="infrastructure" value={active} idPrefix={ID_PREFIX}>
+        <TabPanel id="advanced" value={active} idPrefix={ID_PREFIX}>
           <InfrastructureTab />
         </TabPanel>
       ) : null}

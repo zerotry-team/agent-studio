@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from "node:crypto";
 import type { Prisma } from "@prisma/client";
-import type { BuilderProjectDto, CompleteBuilderHumanActionInput, ConnectionDto, CreateBuilderProjectInput, CreateRuntimeInput, MemberRole } from "@agent-studio/contracts";
+import { createRuntimeSchema, type BuilderProjectDto, type CompleteBuilderHumanActionInput, type ConnectionDto, type CreateBuilderProjectInput, type CreateRuntimeInput, type MemberRole } from "@agent-studio/contracts";
 import { conflict, notFound, validationError } from "../domain/errors.js";
 import { inferCodeWorkspaceInterface } from "../domain/builder-interface.js";
 import { isOrganizationIntegrationRepository } from "../domain/git-repository-policy.js";
@@ -149,8 +149,44 @@ export class BuilderProjectService {
         ? action.resume_condition as Record<string, unknown>
         : {};
       const actionTopic = typeof automaticCondition.topic === "string" ? automaticCondition.topic : "";
-      if (automaticCondition.type === "browser_runtime_ready") throw conflict("Browser RuntimeのHeartbeatとTool Catalog検証後に自動再開します");
-      if (automaticCondition.type === "code_workspace_runtime_ready") throw conflict("Code Workspace対応RuntimeのHeartbeat検証後に自動再開します");
+      // Self-hosted 環境が必要な Action は、AWS アカウント ID とリージョンだけを受け取り、
+      // 名前・ロール名・実行環境キーを自動生成して Terraform Plan と Runtime 登録枠を用意する。
+      const awsAccountId = input.answers?.aws_account_id?.trim();
+      const awsRegion = input.answers?.aws_region?.trim();
+      if (action.type === "aws_admin_action" && ["browser_runtime_ready", "code_workspace_runtime_ready"].includes(String(automaticCondition.type)) && awsAccountId && awsRegion) {
+        const organization = await tx.organizations.findUniqueOrThrow({ where: { id: actor.organizationId }, select: { slug: true, name: true } });
+        const runtimeInput = createRuntimeSchema.safeParse({
+          name: `${organization.name} 専用Runtime`.slice(0, 100),
+          stage: "production",
+          provisioning_type: "customer_owned",
+          aws_account_id: awsAccountId,
+          aws_region: awsRegion,
+          expected_role_name: `as-${organization.slug.slice(0, 40)}-prod-runtime`,
+        });
+        if (!runtimeInput.success) {
+          const issue = runtimeInput.error.issues[0];
+          throw validationError(issue?.path[0] === "aws_account_id" ? "AWSアカウントIDは12桁の数字で入力してください" : issue?.path[0] === "aws_region" ? "リージョンの形式が正しくありません" : issue?.message ?? "入力内容を確認してください");
+        }
+        const runtime = await this.environments.createRuntimeIn(tx, actor, runtimeInput.data);
+        await this.environments.ensureSelfHostedProfileIn(tx, actor, runtime.id);
+        await this.recordSelfHostedPlan(tx, actor, action.project_id, runtime, { aws_account_id: awsAccountId, aws_region: awsRegion, stage: "production" });
+        await tx.human_actions.update({
+          where: { id: action.id },
+          data: {
+            response: { aws_account_id: awsAccountId, aws_region: awsRegion, runtime_id: runtime.id },
+            instructions: [
+              "構成案（Terraform Plan）を確定しました",
+              "設定 > 詳細設定 の実行環境から、一度限りの登録用トークンを発行してAWSへ適用します",
+              "環境の準備が確認できると、作成を自動で再開します",
+            ],
+          },
+        });
+        await recordAudit(tx, auditBy(actor, { action: "builder.self_hosted.plan", targetType: "builder_project", targetId: action.project_id, detail: { runtime_id: runtime.id, aws_account_id: awsAccountId, region: awsRegion, plan_only: true, source_action: action.id } }));
+        const project = await tx.builder_projects.findUniqueOrThrow({ where: { id: action.project_id }, include: includeProject });
+        return toBuilderProjectDto(project);
+      }
+      if (automaticCondition.type === "browser_runtime_ready") throw conflict("貴社専用環境の準備が確認できると自動で再開します（AWSアカウントIDとリージョンを入力すると構成案を確定できます）");
+      if (automaticCondition.type === "code_workspace_runtime_ready") throw conflict("貴社専用環境の準備が確認できると自動で再開します（AWSアカウントIDとリージョンを入力すると構成案を確定できます）");
       if (automaticCondition.type === "git_branch_published") throw conflict("Git Connectionでbranch pushとPR作成を検証した後に自動再開します");
       if (action.type === "repository_merge") {
         if (automaticCondition.type !== "git_pr_merged"
@@ -863,35 +899,7 @@ export class BuilderProjectService {
     if (!project) throw notFound("作成プロジェクト");
     const runtime = await this.environments.createRuntime(actor, input);
     await this.deps.db.run(scopeOf(actor), async (tx) => {
-      await tx.builder_change_sets.create({ data: {
-        organization_id: actor.organizationId,
-        project_id: id,
-        kind: "terraform_plan",
-        status: "planned",
-        summary: `${input.aws_account_id}/${input.aws_region}へSelf-hosted Runtimeを構成`,
-        risk: "write",
-        artifacts: [
-          { type: "runtime", id: runtime.id, name: runtime.name },
-          { type: "terraform_module", id: "infra/modules/tenant-runtime", name: "tenant-runtime" },
-          { type: "terraform_root", id: `infra/company/<customer>/${input.stage}`, name: `${input.stage} root` },
-        ],
-        source_hash: requestHash(JSON.stringify({ account: input.aws_account_id, region: input.aws_region, role: input.expected_role_name, stage: input.stage })),
-      } });
-      await tx.builder_validation_runs.create({ data: {
-        organization_id: actor.organizationId,
-        project_id: id,
-        suite: "security",
-        environment: "builder",
-        status: "passed",
-        evidence: {
-          runtime_id: runtime.id,
-          plan_only: true,
-          customer_owned: input.provisioning_type === "customer_owned",
-          secret_values_persisted: false,
-          controls: ["private_subnet", "kms_secrets", "least_privilege_role", "bootstrap_token_one_time"],
-        },
-        finished_at: new Date(),
-      } });
+      await this.recordSelfHostedPlan(tx, actor, id, runtime, input);
       await tx.human_actions.create({ data: {
         organization_id: actor.organizationId,
         project_id: id,
@@ -911,6 +919,48 @@ export class BuilderProjectService {
       await recordAudit(tx, auditBy(actor, { action: "builder.self_hosted.plan", targetType: "builder_project", targetId: id, detail: { runtime_id: runtime.id, aws_account_id: input.aws_account_id, region: input.aws_region, plan_only: true } }));
     });
     return this.get(actor, id);
+  }
+
+  /** Self-hosted Runtime の Terraform Plan 証跡。apply は管理者操作として分離する。 */
+  private async recordSelfHostedPlan(
+    tx: Prisma.TransactionClient,
+    actor: MemberActor,
+    projectId: string,
+    runtime: { id: string; name: string; expected_role_name: string },
+    input: { aws_account_id: string; aws_region: string; stage: string; provisioning_type?: string },
+  ): Promise<void> {
+    const sourceHash = requestHash(JSON.stringify({ account: input.aws_account_id, region: input.aws_region, role: runtime.expected_role_name, stage: input.stage }));
+    const existing = await tx.builder_change_sets.findFirst({ where: { project_id: projectId, kind: "terraform_plan", source_hash: sourceHash }, select: { id: true } });
+    if (existing) return;
+    await tx.builder_change_sets.create({ data: {
+      organization_id: actor.organizationId,
+      project_id: projectId,
+      kind: "terraform_plan",
+      status: "planned",
+      summary: `${input.aws_account_id}/${input.aws_region}へSelf-hosted Runtimeを構成`,
+      risk: "write",
+      artifacts: [
+        { type: "runtime", id: runtime.id, name: runtime.name },
+        { type: "terraform_module", id: "infra/modules/tenant-runtime", name: "tenant-runtime" },
+        { type: "terraform_root", id: `infra/company/<customer>/${input.stage}`, name: `${input.stage} root` },
+      ],
+      source_hash: sourceHash,
+    } });
+    await tx.builder_validation_runs.create({ data: {
+      organization_id: actor.organizationId,
+      project_id: projectId,
+      suite: "security",
+      environment: "builder",
+      status: "passed",
+      evidence: {
+        runtime_id: runtime.id,
+        plan_only: true,
+        customer_owned: (input.provisioning_type ?? "customer_owned") === "customer_owned",
+        secret_values_persisted: false,
+        controls: ["private_subnet", "kms_secrets", "least_privilege_role", "bootstrap_token_one_time"],
+      },
+      finished_at: new Date(),
+    } });
   }
 
   private async enqueue(tx: Prisma.TransactionClient, organizationId: string, projectId: string, request: string, attempt: number) {

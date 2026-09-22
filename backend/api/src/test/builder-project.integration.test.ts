@@ -278,7 +278,24 @@ describe("Builder Project", () => {
       "past_inquiry_source", "bank_document_source", "compliance_source", "internal_denied_list", "over_limit_route", "public_x_post",
     ]));
     expect(questions).toHaveLength(6);
-    expect(waiting.body.human_actions.filter((action: { status: string }) => action.status === "pending")).toHaveLength(6);
+    // X投稿に必要なSocial RouterはBuilderがカタログから自動登録し、APIキーだけをその場で求める（連携サービス画面へは誘導しない）
+    const pendingActions = waiting.body.human_actions.filter((action: { status: string }) => action.status === "pending");
+    expect(pendingActions).toHaveLength(7);
+    const secretAction = pendingActions.find((action: { type: string }) => action.type === "enter_secret");
+    expect(secretAction).toMatchObject({
+      title: "Social RouterのAPIキーを設定してください",
+      connection_id: expect.any(String),
+      connector_id: expect.any(String),
+      fields: [expect.objectContaining({ name: "secret", secret: true })],
+    });
+    expect(JSON.stringify(secretAction.instructions)).not.toContain("連携サービス画面");
+    expect(waiting.body.change_sets.some((change: { kind: string }) => change.kind === "catalog_connector")).toBe(true);
+    // 通常の質問には技術項目（OpenAPI/MCP URL、Runtime Tool名）を必須にせず、詳細設定として畳む
+    for (const question of questions) {
+      for (const field of question.fields as Array<{ name: string; advanced?: boolean; required?: boolean }>) {
+        if (["contract_url", "runtime_tool"].includes(field.name)) expect(field).toMatchObject({ advanced: true, required: false });
+      }
+    }
 
     const sample: Record<string, string> = {
       document_source: "顧客AWS S3のprivate bucketをRuntime IAM Roleで読む",
@@ -292,9 +309,23 @@ describe("Builder Project", () => {
       account_id: "x-test-account",
       account_purpose: "検証専用の非公開アカウント",
       public_payload: "匿名審査ID、結果、理由コードのみ",
-      integration: "Social Router Connector",
     };
-    const allPending = waiting.body.human_actions.filter((action: { status: string }) => action.status === "pending");
+    const allPending = waiting.body.human_actions.filter((action: { status: string; type: string }) => action.status === "pending" && action.type !== "enter_secret");
+    // Secretは回答欄ではなく、Builderが用意したConnection枠へ保存して接続テストする
+    const secretRejected = await h.request("POST", `/api/v1/builder-human-actions/${secretAction.id}/complete`, { email: adminEmail, org: org.id, body: { answers: { secret: "x" } } });
+    expect(secretRejected.status).toBe(400);
+    const saved = await h.request("PUT", `/api/v1/connections/${secretAction.connection_id}/secret`, { email: adminEmail, org: org.id, body: { value: "social-router-test-key" } });
+    expect(saved.status, JSON.stringify(saved.body)).toBe(204);
+    const probe = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ accounts: [] }), { status: 200, headers: { "content-type": "application/json" } }));
+    try {
+      const validated = await h.request("POST", `/api/v1/connections/${secretAction.connection_id}/validate`, { email: adminEmail, org: org.id });
+      expect(validated.status, JSON.stringify(validated.body)).toBe(200);
+      expect(validated.body.status).toBe("connected");
+    } finally {
+      probe.mockRestore();
+    }
+    const afterSecret = await h.request("GET", `/api/v1/builder-projects/${created.body.id}`, { email, org: org.id });
+    expect(afterSecret.body.human_actions.find((action: { id: string }) => action.id === secretAction.id).status).toBe("completed");
     for (const action of allPending) {
       const answers = Object.fromEntries(action.fields
         .filter((field: { name: string; required?: boolean }) => field.required !== false || sample[field.name] !== undefined)

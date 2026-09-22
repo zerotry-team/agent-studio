@@ -9,6 +9,7 @@ import {
   type CapabilityRequirementDto,
   type CapabilityGapDto,
   type CapabilityResolutionDto,
+  type EnvironmentPlanDto,
   type GenerateManifestResultDto,
   type ToolRisk,
   type WorkflowDefinition,
@@ -20,6 +21,10 @@ import { BuilderProjectService } from "../application/builder-projects.js";
 import type { MemberActor } from "../application/context.js";
 import type { Deps } from "../application/deps.js";
 import { annotateCapabilityFulfillment } from "../domain/capability-fulfillment.js";
+import { planEnvironment } from "../domain/environment-plan.js";
+import { matchProviders, type ProviderCatalogEntry } from "../domain/provider-catalog.js";
+import { createConnectionHumanAction } from "../application/builder-human-actions.js";
+import { ToolService } from "../application/tools.js";
 import { inferCodeWorkspaceInterface } from "../domain/builder-interface.js";
 import { isOrganizationIntegrationRepository } from "../domain/git-repository-policy.js";
 import { OPENAI_BUILTIN_TOOL_NAMES } from "../domain/manifest-compiler.js";
@@ -45,6 +50,8 @@ type IntakeQuestion = {
     placeholder?: string;
     description?: string;
     options?: Array<{ value: string; label: string }>;
+    /** 技術的な任意項目。画面では「詳細設定」に畳み、通常は入力させない */
+    advanced?: boolean;
   }>;
 };
 
@@ -197,6 +204,42 @@ type ScenarioToolInfo = {
   ready: boolean;
 };
 
+/** Self-hosted Runtime を用意するために人にしか分からない2項目だけを聞く（名前・ロール名・キーは自動生成）。 */
+export function selfHostedRuntimeFields() {
+  return [
+    { name: "aws_account_id", label: "AWSアカウントID", secret: false, required: true, placeholder: "123456789012", description: "12桁の数字です。AWSコンソール右上のアカウント情報で確認できます。" },
+    {
+      name: "aws_region",
+      label: "リージョン",
+      secret: false,
+      required: true,
+      options: [
+        { value: "ap-northeast-1", label: "東京（ap-northeast-1）" },
+        { value: "ap-northeast-3", label: "大阪（ap-northeast-3）" },
+        { value: "us-east-1", label: "米国東部（us-east-1）" },
+        { value: "us-west-2", label: "米国西部（us-west-2）" },
+        { value: "eu-west-1", label: "アイルランド（eu-west-1）" },
+      ],
+    },
+  ];
+}
+
+/** 連携サービスのエラー本文（JSON など）を、人が読める短い文にする。 */
+export function summarizeToolError(error: string): string {
+  const status = /HTTP (\d{3})/.exec(error)?.[1];
+  const body = error.slice(error.indexOf("{"));
+  let message: string | null = null;
+  try {
+    const parsed = JSON.parse(body) as { message?: unknown; error?: { message?: unknown } | string; error_description?: unknown };
+    const candidate = parsed.message ?? (typeof parsed.error === "object" && parsed.error ? parsed.error.message : parsed.error) ?? parsed.error_description;
+    if (typeof candidate === "string" && candidate.trim()) message = candidate.trim();
+  } catch {
+    message = null;
+  }
+  const text = message ?? error.replace(/\s+/g, " ").trim();
+  return `${status ? `HTTP ${status}: ` : ""}${text}`.slice(0, 160);
+}
+
 const DISCOVERY_KEYWORDS: Record<string, string[]> = {
   past_inquiry_source: ["history", "inquiry", "customer", "application", "問い合わせ", "履歴", "顧客", "申込"],
   bank_document_source: ["bank", "statement", "transaction", "account", "document", "口座", "通帳", "入出金", "銀行"],
@@ -211,6 +254,14 @@ const relevantOperationNames = <T extends { name: string; display_name: string; 
   name: (operation: T) => string,
 ) => {
   const keywords = DISCOVERY_KEYWORDS[topic] ?? [];
+  // 業務トピックの語彙が無い一般的な連携は、まず読み取り操作だけを安全側に選ぶ
+  if (keywords.length === 0) {
+    const readOnly = operations.filter((operation) => {
+      const candidate = operation as { method?: string; read_only?: boolean | null; risk?: string };
+      return candidate.method === "GET" || candidate.read_only === true || candidate.risk === "read";
+    });
+    return (readOnly.length ? readOnly : operations).map(name);
+  }
   return operations.filter((operation) => {
     const text = `${operation.name} ${operation.display_name} ${operation.description} ${operation.path ?? ""}`.toLowerCase();
     return keywords.some((keyword) => text.includes(keyword));
@@ -562,8 +613,8 @@ export function intakeQuestionsFor(request: string): IntakeQuestion[] {
     fields: [
       { name: "system", label: "履歴を提供する社内API", secret: false, required: true, placeholder: "例: 契約管理API / CRM参照API", description: "DB名や接続文字列は入力しません。会社が用意したAPIだけを指定してください。" },
       { name: "lookup_key", label: "顧客を特定する照合項目", secret: false, required: true, placeholder: "例: 法人番号、顧客ID、電話番号" },
-      { name: "runtime_tool", label: "既存Runtime Tool名", secret: false, required: false, placeholder: "例: get_application", description: "Heartbeatで報告済みのToolを再利用する場合だけ入力してください。" },
-      { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, placeholder: "例: https://api.example.com/openapi.json または https://mcp.example.com/mcp", description: "分かる場合だけ入力してください。公開HTTPSの仕様は自動検査してConnectorを生成します。" },
+      { name: "runtime_tool", label: "既存Runtime Tool名", secret: false, required: false, advanced: true, placeholder: "例: get_application", description: "Heartbeatで報告済みのToolを再利用する場合だけ入力してください。" },
+      { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, advanced: true, placeholder: "例: https://api.example.com/openapi.json または https://mcp.example.com/mcp", description: "分かる場合だけ入力してください。公開HTTPSの仕様は自動検査してConnectorを生成します。" },
     ],
   });
   if (/(口座|通帳).*(画像|pdf)|ファイルサーバー/i.test(request)) questions.push({
@@ -572,8 +623,8 @@ export function intakeQuestionsFor(request: string): IntakeQuestion[] {
     reason: "生画像をモデルやControl Planeへ送らず、顧客Runtime内で処理する接続先を決めるためです",
     fields: [
       { name: "document_source", label: "保存先と取得方法", secret: false, required: true, placeholder: "例: 顧客AWS S3のbucket/prefix、社内ファイルサーバーAPI", description: "認証情報そのものは入力せず、システム名・URL・保存場所だけを入力してください。" },
-      { name: "runtime_tool", label: "既存Runtime Tool名", secret: false, required: false, placeholder: "例: analyze_bank_statement", description: "Heartbeatで報告済みのToolを再利用する場合だけ入力してください。" },
-      { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, placeholder: "例: https://files.example.com/openapi.json", description: "ファイル取得APIの公開仕様がある場合だけ入力してください。" },
+      { name: "runtime_tool", label: "既存Runtime Tool名", secret: false, required: false, advanced: true, placeholder: "例: analyze_bank_statement", description: "Heartbeatで報告済みのToolを再利用する場合だけ入力してください。" },
+      { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, advanced: true, placeholder: "例: https://files.example.com/openapi.json", description: "ファイル取得APIの公開仕様がある場合だけ入力してください。" },
     ],
   });
   if (/(反社|反射).*(一覧|サイト|照合)|コンプライアンス/i.test(request)) questions.push({
@@ -592,11 +643,10 @@ export function intakeQuestionsFor(request: string): IntakeQuestion[] {
         options: [
           { value: "public_web", label: "ログイン不要の公開サイト" },
           { value: "human_login", label: "人によるログインが必要" },
-          { value: "runtime_tool", label: "許可済みRuntime Tool（Mockを含む）" },
         ],
       },
-      { name: "runtime_tool", label: "Runtime Tool名", secret: false, required: false, placeholder: "例: check_compliance", description: "許可済みRuntime Toolを使う場合だけ入力してください。Heartbeatで報告済みのToolに限ります。" },
-      { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, placeholder: "例: https://compliance.example.com/openapi.json", description: "検索APIの仕様がある場合だけ入力してください。通常の検索画面URLとは分けて入力します。" },
+      { name: "runtime_tool", label: "Runtime Tool名", secret: false, required: false, advanced: true, placeholder: "例: check_compliance", description: "許可済みRuntime Toolを使う場合だけ入力してください。Heartbeatで報告済みのToolに限ります。" },
+      { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, advanced: true, placeholder: "例: https://compliance.example.com/openapi.json", description: "検索APIの仕様がある場合だけ入力してください。通常の検索画面URLとは分けて入力します。" },
     ],
   });
   if (/(自社|社内).*(落とした|否決|審査).*(一覧|リスト|データ)/i.test(request)) questions.push({
@@ -606,8 +656,8 @@ export function intakeQuestionsFor(request: string): IntakeQuestion[] {
     fields: [
       { name: "system", label: "否決一覧を提供する社内API", secret: false, required: true, placeholder: "例: 審査台帳API / Kintone連携API", description: "DBへの直接接続は使いません。会社が用意したAPIだけを指定してください。" },
       { name: "match_fields", label: "照合項目", secret: false, required: true, placeholder: "例: 法人番号、代表者名、電話番号" },
-      { name: "runtime_tool", label: "既存Runtime Tool名", secret: false, required: false, placeholder: "例: get_application", description: "Heartbeatで報告済みのToolを再利用する場合だけ入力してください。" },
-      { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, placeholder: "例: https://screening.example.com/openapi.json", description: "公開HTTPSの仕様がある場合だけ入力してください。" },
+      { name: "runtime_tool", label: "既存Runtime Tool名", secret: false, required: false, advanced: true, placeholder: "例: get_application", description: "Heartbeatで報告済みのToolを再利用する場合だけ入力してください。" },
+      { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, advanced: true, placeholder: "例: https://screening.example.com/openapi.json", description: "公開HTTPSの仕様がある場合だけ入力してください。" },
     ],
   });
   if (/100\s*万円以上|1,?000,?000円以上|冗長のパス/i.test(request)) questions.push({
@@ -624,8 +674,7 @@ export function intakeQuestionsFor(request: string): IntakeQuestion[] {
       { name: "account_id", label: "投稿先アカウントID", secret: false, required: true, placeholder: "例: Social Routerのaccount_id" },
       { name: "account_purpose", label: "アカウントの用途", secret: false, required: true, placeholder: "例: 審査結果通知専用の非公開検証アカウント" },
       { name: "public_payload", label: "公開を許可する項目", secret: false, required: true, placeholder: "例: 匿名化した審査ID、結果、一般化した理由コードのみ" },
-      { name: "integration", label: "X連携方法", secret: false, required: true, placeholder: "例: 登録済みSocial Router Connector / X APIのOpenAPIまたはMCP" },
-      { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, placeholder: "例: https://social.example.com/openapi.json", description: "登録済みToolがない場合に、投稿APIの公開仕様があれば入力してください。" },
+      { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, advanced: true, placeholder: "例: https://social.example.com/openapi.json", description: "Social Router以外の投稿APIを使う場合だけ入力してください。" },
     ],
   });
   return questions;
@@ -722,6 +771,7 @@ export class BuilderOrchestrator {
   private readonly builderProjects: BuilderProjectService;
   private readonly environments: EnvironmentService;
   private readonly runs: RunService;
+  private readonly tools: ToolService;
 
   constructor(private readonly deps: Deps) {
     this.agents = new AgentService(deps);
@@ -729,6 +779,34 @@ export class BuilderOrchestrator {
     this.builderProjects = new BuilderProjectService(deps);
     this.environments = new EnvironmentService(deps);
     this.runs = new RunService(deps);
+    this.tools = new ToolService(deps);
+  }
+
+  /**
+   * 依頼文や未解決の要件に一致する有名サービスを Provider Catalog から自動登録する。
+   * 利用者に識別子・URL・操作一覧を入力させない。GitHub は既存の GitHub App 経路に任せる。
+   * 戻り値は今回新たに用意したエントリ（再解決が必要かの判断に使う）。
+   */
+  private async ensureCatalogProviders(
+    actor: MemberActor,
+    projectId: string,
+    texts: string[],
+    already: Set<string>,
+  ): Promise<ProviderCatalogEntry[]> {
+    const text = texts.join("\n");
+    // GitHub は GitHub App 経路、ブラウザ操作など Self-hosted Runtime が要るものは対応 Runtime の有無で別途扱うため、ここでは登録しない
+    const entries = matchProviders(text).filter((entry) => entry.auth.kind !== "github_app" && !entry.requires_self_hosted && !already.has(entry.key));
+    const ensured: ProviderCatalogEntry[] = [];
+    for (const entry of entries) {
+      try {
+        await this.builderConnectors.ensureCatalogConnector(actor, projectId, entry, texts);
+        already.add(entry.key);
+        ensured.push(entry);
+      } catch (error) {
+        this.deps.logger.warn({ provider: entry.key, error: error instanceof Error ? error.message : String(error) }, "カタログからの連携サービス登録に失敗しました");
+      }
+    }
+    return ensured;
   }
 
   async tick(): Promise<void> {
@@ -852,7 +930,10 @@ export class BuilderOrchestrator {
       if (existing.has(candidate.url)) continue;
       try {
         const parsed = new URL(candidate.url);
-        const connectorName = candidate.title.replace(/(を教えてください|してください)$/, "").slice(0, 100);
+        const connectorName = candidate.title
+          .replace(/へ自動で接続する方法が見つかりませんでした$/, "")
+          .replace(/(を教えてください|してください)$/, "")
+          .slice(0, 100);
         if (/\/mcp\/?$/i.test(parsed.pathname)) {
           const proposal = await this.builderConnectors.inspectMcp(actor, projectId, {
             server_url: candidate.url,
@@ -1348,6 +1429,7 @@ export class BuilderOrchestrator {
         graph: { nodes, edges: nodes.slice(1).map((node, index) => ({ from: nodes[index]!.id, to: node.id })) } as unknown as Prisma.InputJsonValue,
         risks: latest.risks as Prisma.InputJsonValue,
         execution_locations: latest.execution_locations as Prisma.InputJsonValue,
+        environment_plan: latest.environment_plan ?? undefined,
       } });
       await tx.capability_gaps.deleteMany({ where: { project_id: projectId, status: "open" } });
       const gaps = requirements.filter((requirement) => requirement.state !== "resolved");
@@ -1388,6 +1470,7 @@ export class BuilderOrchestrator {
             type: "github_repository_connected",
             ...(provisioningSource ? { repository_connection_id: provisioningSource.id } : {}),
           },
+          presentation: provisioningSource ? {} : { cli_command: "agent-studio github connect --org <GitHubの組織名>" } as unknown as Prisma.InputJsonValue,
         } });
         codeActionCount = 1;
       } else {
@@ -1435,17 +1518,17 @@ export class BuilderOrchestrator {
             organization_id: organizationId,
             project_id: projectId,
             type: "aws_admin_action",
-            title: "組織の実行基盤にSelf-host Runtimeを設定してください",
-            reason: "Repositoryのclone、コード生成、テストはControl Planeでは実行せず、顧客Runtimeの使い捨てコンテナで行います",
+            title: "社内システムへ安全に接続するため、貴社AWSに専用の実行環境を作ります",
+            reason: "社内システム用のToolはAgent Studio側では実行せず、貴社専用の隔離環境で生成・テスト・実行します。構成案は作成済みです。AWS管理者の承認が必要です",
             assignee_role: "admin",
-            fields: [],
+            fields: selfHostedRuntimeFields(),
             instructions: [
-              "設定の「実行・開発基盤」でSelf-host Runtimeを登録します",
-              "Self-hosted RuntimeでBuilder Workspace Executorを有効にします",
-              "Runtimeは使い捨てコンテナで専用branchを生成し、SecretをControl Planeへ返しません",
-              "Heartbeatで能力を検証するとBuilderが自動再開します",
+              "AWSアカウントIDとリージョンを入力すると、構成案（Terraform Plan）を確定します",
+              "AWS管理者が構成を適用すると、環境が自動で登録されます",
+              "環境の準備が確認できると、作成を自動で再開します",
             ],
             resume_condition: { type: "code_workspace_runtime_ready", capability: "builder_workspace" },
+            presentation: { prepared_plan: latest.environment_plan ?? undefined, cli_command: `agent-studio runtime add --aws-account <12桁のアカウントID> --region ap-northeast-1 --project ${projectId}` } as unknown as Prisma.InputJsonValue,
           } });
           workspaceActionCount = 1;
         } else if (runtime) {
@@ -1635,11 +1718,22 @@ export class BuilderOrchestrator {
       const answered = answeredRaw.filter((item) => item.response !== null);
       const discoveryFailures = await this.discoverAnsweredContracts(actor, context.project_id, answered);
       await this.ensureSharedPlatformTools(organizationId, context.project.request);
+      const ensuredProviders = new Set<string>();
+      // 「使うサービスを教えてください」への回答（サービス名）もカタログ検索に使う
+      const answeredServiceNames = answered.flatMap((item) => {
+        const response = answerRecord(item);
+        return typeof response.service_name === "string" && response.service_name.trim() ? [response.service_name.trim()] : [];
+      });
+      await this.ensureCatalogProviders(actor, context.project_id, [context.project.request, ...answeredServiceNames], ensuredProviders);
       if (discoveryFailures.length === 0 && await this.prepareCodeWorkspaceStage(runId, organizationId, context.project_id, context.project.request, answered)) return;
       const clarification = answered.length
         ? `\n\n# 利用者が確認した業務条件\n${answered.map((item) => `- ${item.title}: ${JSON.stringify(item.response)}`).join("\n")}`
         : "";
       const effectiveRequest = `${context.project.request}${clarification}`;
+      let prepared: Awaited<ReturnType<typeof this.exactBuilderDraft>>;
+      // 1回目の解決で「対応するToolがない」と判定された要件に有名サービス名が含まれていれば、
+      // カタログから登録してもう一度だけ解決し直す（LLM再生成は最大2回）。
+      for (let pass = 0; ; pass += 1) {
       const generated = await this.existingBrowserFlowDraft(
         organizationId,
         context.project_id,
@@ -1671,9 +1765,18 @@ export class BuilderOrchestrator {
       });
       generated.resolution.requirements = ensureAnsweredSourceRequirements(answered, generated.resolution.requirements);
       generated.resolution.ready = generated.resolution.requirements.every((requirement) => requirement.state === "resolved");
-      const prepared = await this.exactBuilderDraft(organizationId, context.project_id, generated);
+      prepared = await this.exactBuilderDraft(organizationId, context.project_id, generated);
       prepared.draft.resolution = annotateCapabilityFulfillment(context.project.request, prepared.draft.resolution);
       prepared.draft.resolution.ready = prepared.draft.resolution.requirements.every((requirement) => requirement.state === "resolved");
+      if (pass > 0) break;
+      // 接続待ち（needs_connection）は Connector が既にあるので対象外。対応する Tool がない要件だけを探す
+      const unresolvedTexts = prepared.draft.resolution.requirements
+        .filter((requirement) => requirement.state === "missing" || requirement.state === "ambiguous" || requirement.fulfillment?.mode === "shared_provider_adapter")
+        .map((requirement) => `${requirement.requirement}\n${requirement.reason}`);
+      if (!unresolvedTexts.length) break;
+      const added = await this.ensureCatalogProviders(actor, context.project_id, unresolvedTexts, ensuredProviders);
+      if (!added.length) break;
+      }
 
       const plan = await this.deps.db.org(organizationId, async (tx) => {
         const current = await tx.builder_runs.findUnique({ where: { id: runId } });
@@ -1689,9 +1792,19 @@ export class BuilderOrchestrator {
         });
 
         const toolNames = prepared.draft.resolution.selected_tools;
-        const tools = toolNames.length ? await tx.tools.findMany({ where: { organization_id: organizationId, name: { in: toolNames } } }) : [];
+        const tools = toolNames.length ? await tx.tools.findMany({ where: { organization_id: organizationId, name: { in: toolNames } }, include: { connector: true } }) : [];
         const risks = prepared.exact ? prepared.risks : [...new Set(tools.map((tool) => tool.risk as ToolRisk))];
         const locations = [...new Set(tools.map((tool) => tool.execution_location))];
+        const registeredPackages = await tx.builder_adapter_packages.count({ where: { project_id: context.project_id, status: "registered" } });
+        const plannedBrowserFlows = await tx.builder_change_sets.count({ where: { project_id: context.project_id, kind: "browser_flow", status: { in: ["planned", "applied"] } } });
+        const environmentPlan = planEnvironment({
+          request: context.project.request,
+          resolution: prepared.draft.resolution,
+          tools: tools.map((tool) => ({ name: tool.name, execution_location: tool.execution_location, connector_base_url: tool.connector?.base_url ?? null })),
+          // Browser Flow は対応 Runtime があるときだけ Build に固定される。実際に選ばれた場合だけ Self-hosted 扱いにする
+          browserFlow: plannedBrowserFlows > 0 && prepared.draft.resolution.selected_tools.some((name) => isBrowserCapability(name)),
+          adapterPackages: registeredPackages > 0,
+        });
         const version = (await tx.capability_plans.aggregate({ where: { project_id: context.project_id }, _max: { version: true } }))._max.version ?? 0;
         const plannedCodeTopics = new Set((await tx.builder_change_sets.findMany({
           where: { project_id: context.project_id, kind: "code_workspace", status: "planned" },
@@ -1732,6 +1845,7 @@ export class BuilderOrchestrator {
           graph: { nodes, edges: nodes.slice(1).map((node, index) => ({ from: nodes[index]!.id, to: node.id })) } as unknown as Prisma.InputJsonValue,
           risks,
           execution_locations: locations,
+          environment_plan: environmentPlan as unknown as Prisma.InputJsonValue,
         } });
 
         await tx.capability_gaps.deleteMany({ where: { project_id: context.project_id, status: "open" } });
@@ -1777,22 +1891,29 @@ export class BuilderOrchestrator {
           ...codeWorkspace.map((question) => ({ ...question, topic: question.sourceTopic })),
         ];
         const human = humanCapabilityRequirements(gaps, coverageQuestions);
+        const connectionActionConnectors = new Set<string>();
         for (const requirement of human) {
           const needsConnection = requirement.state === "needs_connection";
+          const connector = needsConnection && requirement.connector_id
+            ? await tx.connectors.findFirst({ where: { id: requirement.connector_id, organization_id: organizationId } })
+            : null;
+          if (connector) {
+            // 同じ連携サービスは1回だけ認証を求める
+            if (connectionActionConnectors.has(connector.id)) continue;
+            connectionActionConnectors.add(connector.id);
+            await createConnectionHumanAction(tx, { organizationId, projectId: context.project_id, env: this.deps.env, tools: this.tools }, connector);
+            continue;
+          }
           await tx.human_actions.create({ data: {
             organization_id: organizationId,
             project_id: context.project_id,
-            type: needsConnection ? "enter_secret" : "business_rule_confirmation",
-            title: needsConnection ? `${requirement.connector_name ?? "連携サービス"}を接続` : "利用する連携方法を確認",
+            type: "business_rule_confirmation",
+            title: "利用する連携方法を確認",
             reason: requirement.requirement,
-            assignee_role: needsConnection ? "admin" : "builder",
+            assignee_role: "builder",
             fields: [],
-            instructions: needsConnection
-              ? ["連携サービス画面でPreview用の接続を作成します", "認証情報は専用入力欄へ入力し、チャットには貼り付けません", "接続テストが成功した後、この操作を完了します"]
-              : ["候補と根拠を確認し、利用する連携方法を確定します"],
-            resume_condition: needsConnection
-              ? { type: "connector_connected", connector_id: requirement.connector_id }
-              : { type: "capability_selected", requirement: requirement.requirement },
+            instructions: ["候補と根拠を確認し、利用する連携方法を確定します"],
+            resume_condition: { type: "capability_selected", requirement: requirement.requirement },
           } });
         }
         for (const question of intake) await tx.human_actions.create({ data: {
@@ -1827,6 +1948,7 @@ export class BuilderOrchestrator {
               type: "github_repository_connected",
               ...(provisioningSource ? { repository_connection_id: provisioningSource.id } : {}),
             },
+            presentation: provisioningSource ? {} : { cli_command: "agent-studio github connect --org <GitHubの組織名>" } as unknown as Prisma.InputJsonValue,
           } });
           codeWorkspaceActionCount = 1;
         } else {
@@ -1865,6 +1987,7 @@ export class BuilderOrchestrator {
             label: "修正したOpenAPIまたはMCPのURL",
             secret: false,
             required: true,
+            advanced: true,
             placeholder: "https://.../openapi.json または https://.../mcp",
             description: "対象業務に対応する操作を含む、公開HTTPSの機械可読な仕様を指定してください。",
           }],
@@ -1876,33 +1999,99 @@ export class BuilderOrchestrator {
           organization_id: organizationId,
           project_id: context.project_id,
           type: "aws_admin_action",
-          title: "Browser Runtimeを準備してください",
-          reason: "Previewには、SnapshotとScreenshotの両方を証跡化できる隔離Browser Runtimeが必要です",
+          title: "ブラウザ操作のため、貴社AWSに専用の実行環境を作ります",
+          reason: "Webサイトの操作と証跡（画面の記録）は、貴社専用の隔離環境で行います。構成案は作成済みです。AWS管理者の承認が必要です",
           assignee_role: "admin",
-          fields: [],
+          fields: selfHostedRuntimeFields(),
           instructions: [
-            "Browser Session Workerを含むSelf-hosted Runtimeを登録または更新します",
-            `RuntimeのTool Catalogに ${[...REQUIRED_BROWSER_FLOW_TOOL_NAMES].join("、")} が含まれることを確認します`,
-            "HeartbeatでTool CatalogとGatewayが確認されるとBuilderが自動再開します",
+            "AWSアカウントIDとリージョンを入力すると、構成案（Terraform Plan）を確定します",
+            "AWS管理者が構成を適用すると、環境が自動で登録されます",
+            "環境の準備が確認できると、作成を自動で再開します",
           ],
           resume_condition: { type: "browser_runtime_ready", required_tools: [...REQUIRED_BROWSER_FLOW_TOOL_NAMES] },
+          presentation: { prepared_plan: environmentPlan, cli_command: `agent-studio runtime add --aws-account <12桁のアカウントID> --region ap-northeast-1 --project ${context.project_id}` } as unknown as Prisma.InputJsonValue,
         } });
         // Agent Studio内だけへArtifactを作る標準画像生成は、外部作用を伴わないためPreviewで許可する。
         const previewToolNames = tools.filter((tool) => tool.risk === "read" || tool.name === "generate_image").map((tool) => tool.name);
-        const actionCount = human.length + intake.length + codeWorkspaceActionCount + discoveryFailures.length + (needsBrowserRuntime ? 1 : 0);
-        const materializeAgent = prepared.draft.resolution.ready && actionCount === 0 && gaps.length === 0;
+        let actionCount = human.length + intake.length + codeWorkspaceActionCount + discoveryFailures.length + (needsBrowserRuntime ? 1 : 0);
+        const materializeAgentCandidate = prepared.draft.resolution.ready && actionCount === 0 && gaps.length === 0;
+        // 不足能力があるのに人へ聞くことが何もない状態（planning の行き止まり）を作らない。
+        // 対応するサービスが見つからなかった能力は、どのサービスかを1問だけ確認する。
+        const unresolvedAfterContract: string[] = [];
+        if (!materializeAgentCandidate && actionCount === 0 && gaps.length > 0) {
+          const answeredTopics = new Set(answered.flatMap((item) => {
+            const topic = answerTopic(item);
+            return topic ? [topic] : [];
+          }));
+          // LLM は再解析のたびに要件文を言い換えるため、回答済みかは要件文のハッシュだけでなくサービス名でも照合する
+          const lookupAnswers = answered.flatMap((item) => {
+            const topic = answerTopic(item);
+            const name = String(answerRecord(item).service_name ?? "").trim();
+            return topic?.startsWith("service_lookup:") && name ? [{ topic, name }] : [];
+          });
+          const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9\u3040-\u9fff]+/g, "-").slice(0, 40) || "service";
+          for (const requirement of gaps) {
+            const hash = createHash("sha256").update(requirement.requirement).digest("hex").slice(0, 12);
+            const text = `${requirement.requirement}\n${requirement.reason}\n${context.project.request}`.toLowerCase();
+            const lookup = lookupAnswers.find((answer) => answer.topic === `service_lookup:${hash}`)
+              ?? lookupAnswers.find((answer) => text.includes(answer.name.toLowerCase()));
+            const serviceAnswered = Boolean(lookup);
+            const serviceName = lookup?.name ?? "";
+            const contractTopic = `service_contract:${serviceName ? slug(serviceName) : hash}`;
+            if (answeredTopics.has(contractTopic)) {
+              // URL を答えてもらっても業務に合う操作が見つからなかった。黙って止まらず、自動では続けられないことを明示する
+              unresolvedAfterContract.push(`${serviceName || "指定されたサービス"}（${requirement.requirement}）`);
+              continue;
+            }
+            await tx.human_actions.create({ data: {
+              organization_id: organizationId,
+              project_id: context.project_id,
+              type: "business_rule_confirmation",
+              title: serviceAnswered ? `${serviceName || "このサービス"}へ自動で接続する方法が見つかりませんでした` : "使うサービスを教えてください",
+              reason: serviceAnswered
+                ? `「${requirement.requirement}」に使う ${serviceName || "サービス"} はカタログにありません。公開されているAPI仕様（OpenAPI）またはMCPのURLがあれば、Builderが検査して自動で接続します。無い場合は管理者が「設定 > 詳細設定」で手動登録するか、社内システムとして専用Toolを作成します`
+                : `「${requirement.requirement}」に対応する連携サービスが見つかりませんでした。サービス名が分かれば、Builderが接続方法を探して自動で設定します`,
+              assignee_role: "builder",
+              fields: serviceAnswered
+                ? [{ name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: true, placeholder: "https://.../openapi.json または https://.../mcp", description: "公開HTTPSの仕様だけを指定してください。Secretや署名付きURLは入力しないでください。" }]
+                : [
+                  { name: "service_name", label: "使いたいサービスやシステムの名前", secret: false, required: true, placeholder: "例: Slack、freee、社内の顧客管理システム" },
+                  { name: "contract_url", label: "OpenAPIまたはMCPのURL", secret: false, required: false, advanced: true, placeholder: "https://.../openapi.json または https://.../mcp", description: "分かる場合だけ入力してください。公開HTTPSの仕様は自動検査してConnectorを生成します。" },
+                ],
+              instructions: serviceAnswered
+                ? ["URLを入力すると自動で検査し、必要な操作だけを登録して再開します"]
+                : ["サービス名だけで構いません。技術的な情報は不要です"],
+              resume_condition: { type: "builder_answers", topic: serviceAnswered ? contractTopic : `service_lookup:${hash}` },
+            } });
+            actionCount += 1;
+          }
+        }
+        const materializeAgent = materializeAgentCandidate;
         const modelOnly = prepared.draft.resolution.requirements.every((requirement) => requirement.fulfillment?.mode === "model");
         const shouldPreview = materializeAgent && (modelOnly || (prepared.exact && previewToolNames.length > 0));
         // 外部接続を必要としないモデル完結Agentは、そのまま自動Previewまで進める。
         // Toolを使う汎用Agentは、誤ったTool呼び出しを避けるためexactな定型だけを自動Previewする。
-        const nextStatus = actionCount ? "waiting_human_action" : materializeAgent ? "implementing" : "planning";
+        const blockedReason = !actionCount && !materializeAgent && unresolvedAfterContract.length
+          ? `${unresolvedAfterContract.join("、")} へ自動で接続する方法が見つかりませんでした`
+          : null;
+        const nextStatus = actionCount ? "waiting_human_action" : materializeAgent ? "implementing" : blockedReason ? "blocked" : "planning";
         await tx.builder_steps.updateMany({
           where: { run_id: runId, kind: "prepare_human_actions" },
           data: { status: "completed", output: { action_count: actionCount }, finished_at: now },
         });
         await tx.builder_runs.update({
           where: { id: runId },
-          data: { status: actionCount ? "waiting_human_action" : "completed", finished_at: now, lease_until: null },
+          data: {
+            status: actionCount ? "waiting_human_action" : "completed",
+            finished_at: now,
+            lease_until: null,
+            ...(blockedReason ? {
+              error_class: "capability_missing",
+              error: blockedReason,
+              retryable: false,
+              next_action: "管理者が「設定 > 詳細設定」でこのサービスを手動登録するか、社内システムとして専用Toolの作成を依頼してください。登録後に「再実行」で続きから進みます",
+            } : {}),
+          },
         });
         await tx.builder_projects.update({ where: { id: context.project_id }, data: { status: nextStatus } });
         await tx.audit_logs.createMany({ data: [{
@@ -1928,7 +2117,11 @@ export class BuilderOrchestrator {
       await this.deps.db.org(organizationId, async (tx) => {
         const run = await tx.builder_runs.findUnique({ where: { id: runId } });
         // lease切れ後に別Workerが成功させた場合や、同じcatchが再入した場合は古い結果で戻さない。
-        if (!run || run.status !== "running" || run.lease_owner !== this.deps.env.WORKER_ID) return;
+        // 計画確定後（run は completed）の Preview 開始で失敗した場合も、release が無ければ失敗として記録する
+        const previewStarted = run?.status === "completed"
+          ? Boolean(await tx.builder_releases.findUnique({ where: { builder_run_id: runId }, select: { id: true } }))
+          : true;
+        if (!run || run.lease_owner !== this.deps.env.WORKER_ID || (run.status !== "running" && (run.status !== "completed" || previewStarted))) return;
         const sameFailures = await tx.builder_runs.count({
           where: { project_id: run.project_id, error_fingerprint: failure.fingerprint },
         });
@@ -2057,6 +2250,27 @@ export class BuilderOrchestrator {
     const existing = await this.deps.db.org(actor.organizationId, (tx) => tx.builder_releases.findUnique({ where: { builder_run_id: builderRunId } }));
     if (existing) return;
     const project = await this.deps.db.org(actor.organizationId, (tx) => tx.builder_projects.findUniqueOrThrow({ where: { id: projectId } }));
+    // 利用者に実行環境を選ばせない。Builder が決めた構成に合う環境を用意し、Manifest に固定する。
+    const environmentPlan = await this.deps.db.org(actor.organizationId, async (tx) => {
+      const latest = await tx.capability_plans.findFirst({ where: { project_id: projectId }, orderBy: { version: "desc" }, select: { environment_plan: true } });
+      return (latest?.environment_plan ?? null) as EnvironmentPlanDto | null;
+    });
+    if (environmentPlan) {
+      const parsed = parseManifest(draft.manifest_yaml);
+      // LLM の初回案が Runtime Tool を候補にしていると Manifest の環境が self_hosted に固定されたままになる。
+      // 能力解決の結果（environment plan）が OpenAI 環境なら Builder の判断で上書きし、
+      // Self-hosted が必要な場合だけ、既に固定された環境（Browser Flow など）を尊重する。
+      const override = environmentPlan.kind === "openai_hosted" || !parsed.ok || !parsed.manifest.environment.profile;
+      if (parsed.ok && override) {
+        try {
+          const profile = await this.environments.ensureBuilderProfile(actor, environmentPlan);
+          draft = { ...draft, manifest_yaml: stringifyManifest({ ...parsed.manifest, environment: { ...parsed.manifest.environment, profile: profile.key } }) };
+        } catch (error) {
+          // 環境を用意できない場合は従来どおり既定の環境で Preview を試み、失敗理由は Preview 側の証跡に残す
+          this.deps.logger.warn({ project_id: projectId, error: error instanceof Error ? error.message : String(error) }, "Builder が実行環境を自動で用意できませんでした");
+        }
+      }
+    }
     const agent = await this.agents.createProjectFromDraft(actor, request, draft, project.agent_id ?? undefined);
     if (!project.agent_id) {
       await this.deps.db.org(actor.organizationId, (tx) => tx.builder_projects.update({
@@ -2243,11 +2457,26 @@ export class BuilderOrchestrator {
         const usedExpectedTool = requiredTools.size === 0 || successfulToolNames.some((name) => requiredTools.has(name));
         const succeeded = run.status === "completed" && run.outcome === "succeeded" && usedExpectedTool && !hasRunError;
         const now = new Date();
-        const error = succeeded ? null : run.error ?? (hasRunError
-          ? "Preview Runの実行中にエラーが記録されました"
-          : run.status === "completed" && !usedExpectedTool
-          ? "Preview Runで生成した読み取りToolが実行されませんでした"
-          : `Preview Runが${run.status}/${run.outcome}で終了しました`);
+        // 失敗した Tool 呼び出しを人が分かる形にする。認証エラー（401/403）は鍵の再設定だけで直せるので、その場で再設定を求める
+        const failedToolCalls = events.filter((event) => event.type === "tool.call").flatMap((event) => {
+          const data = event.data as { name?: unknown; status?: unknown; error?: unknown };
+          return data.status === "failed" && typeof data.name === "string"
+            ? [{ name: data.name, error: typeof data.error === "string" ? data.error : "" }]
+            : [];
+        });
+        const authFailures = failedToolCalls.filter((call) => /HTTP 40[13]\b|unauthorized|invalid.*token|token is invalid|認証/i.test(call.error));
+        const failureSummary = failedToolCalls.length
+          ? `${failedToolCalls.map((call) => `${call.name}: ${call.error ? summarizeToolError(call.error) : "失敗"}`).join(" / ")}`
+          : null;
+        const error = succeeded ? null : run.error ?? (authFailures.length
+          ? `連携サービスの認証に失敗しました（${authFailures.map((call) => call.name).join("、")}）。認証情報を設定し直すと自動で再開します`
+          : failureSummary
+            ? `Preview Runで操作が失敗しました: ${failureSummary}`
+            : hasRunError
+              ? "Preview Runの実行中にエラーが記録されました"
+              : run.status === "completed" && !usedExpectedTool
+                ? "Preview Runで生成した読み取りToolが実行されませんでした"
+                : `Preview Runが${run.status}/${run.outcome}で終了しました`);
         const releaseStatus = succeeded && projectTarget(await tx.builder_projects.findUniqueOrThrow({ where: { id: release.project_id } })) === "production"
           ? "production_pending_approval"
           : succeeded ? "preview_succeeded" : "preview_failed";
@@ -2314,11 +2543,30 @@ export class BuilderOrchestrator {
             };
           }
         }
+        // 認証エラーなら、失敗で止めずに該当サービスの認証情報を再設定するカードを出して待つ
+        let reauthRequested = false;
+        if (!succeeded && authFailures.length) {
+          const failedTools = await tx.tools.findMany({
+            where: { organization_id: item.organization_id, name: { in: [...new Set(authFailures.map((call) => call.name))] }, connector_id: { not: null } },
+            include: { connector: true },
+          });
+          const connectors = new Map(failedTools.flatMap((tool) => tool.connector && tool.connector.auth_type !== "none" ? [[tool.connector.id, tool.connector] as const] : []));
+          for (const connector of connectors.values()) {
+            const pending = await tx.human_actions.findFirst({ where: { project_id: project.id, status: "pending", type: { in: ["enter_secret", "oauth_consent"] }, resume_condition: { path: ["connector_id"], equals: connector.id } }, select: { id: true } });
+            if (pending) { reauthRequested = true; continue; }
+            const action = await createConnectionHumanAction(tx, { organizationId: item.organization_id, projectId: project.id, env: this.deps.env, tools: this.tools }, connector);
+            await tx.human_actions.update({
+              where: { id: action.id },
+              data: { reason: `${connector.name}が認証エラー（${summarizeToolError(authFailures.find((call) => failedTools.some((tool) => tool.name === call.name && tool.connector_id === connector.id))?.error ?? "HTTP 401")}）を返しました。正しい認証情報を設定し直すと、Previewを自動でやり直します` },
+            });
+            reauthRequested = true;
+          }
+        }
         await tx.builder_projects.update({
           where: { id: project.id },
           data: succeeded
             ? project.target === "preview" ? { status: "completed", completed_at: now } : { status: "production_pending_approval" }
-            : { status: "failed" },
+            : reauthRequested ? { status: "waiting_human_action" } : { status: "failed" },
         });
         await tx.audit_logs.createMany({ data: [{
           organization_id: item.organization_id,

@@ -87,6 +87,7 @@ Dockerfile はすべてリポジトリのルートをビルドコンテキスト
 | `DB_ADMIN_SECRET` | RDS 管理のマスターシークレット（JSON `{username,password}`）。**migrate タスクだけ** | シークレット |
 | `AUTH_MODE` | `cognito` | 環境変数 |
 | `COGNITO_USER_POOL_ID` / `COGNITO_CLIENT_ID` | Cognito | 環境変数 |
+| `COGNITO_DOMAIN` / `COGNITO_CLI_CLIENT_ID` | CLI（`agent-studio login`）のブラウザログイン用。Hosted UI のドメインと、secret を持たない公開 app client（callback は `http://127.0.0.1:48127/callback`）。API は両方の client ID を aud として受け付ける | 環境変数 |
 | `RUNTIME_TOKEN_SECRET` | `as-<env>/runtime-token-secret` | シークレット |
 | `RUNTIME_SERVER_ID` | `agent-studio-<env>` | 環境変数 |
 | `SECRETS_MODE` | `aws`（ローカルは `file`: `SECRETS_FILE` の JSON に保存。`memory` はテスト専用でプロセス内にしか残らない） | 環境変数 |
@@ -100,6 +101,7 @@ Dockerfile はすべてリポジトリのルートをビルドコンテキスト
 | `ORCAROUTER_API_KEY` | `as-<env>/orcarouter-api-key` | 任意の共有シークレット。組織ごとの管理画面設定を優先 |
 | `MANIFEST_GENERATOR_MODEL` | OpenAI Responses API のモデル ID | 環境変数 |
 | `LOG_LEVEL` | `info` | 環境変数 |
+| `OAUTH_CLIENT_ID_<KEY>` / `OAUTH_CLIENT_SECRET_<KEY>` | Provider Catalog の key ごとの OAuth クライアント（例: `OAUTH_CLIENT_ID_SLACK`、`-` は `_`）。任意。組織が画面から登録した OAuth アプリがあればそちらを優先する。`QIITA_OAUTH_CLIENT_ID/SECRET` は後方互換の別名 | Secrets Manager |
 
 ### 4.4 Web の環境変数
 

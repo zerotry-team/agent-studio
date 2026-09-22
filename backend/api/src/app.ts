@@ -28,6 +28,13 @@ export function createApp(deps: Deps, services: Services) {
     return c.json({ ok: ready, env: deps.env.APP_ENV, checks }, ready ? 200 : 503);
   });
 
+  // CLI がログイン方法を知るための公開情報（秘密は含まない）
+  app.get("/api/v1/auth/config", (c) => c.json({
+    mode: deps.env.AUTH_MODE,
+    cognito: deps.env.AUTH_MODE === "cognito" && deps.env.COGNITO_DOMAIN && deps.env.COGNITO_CLI_CLIENT_ID
+      ? { domain: deps.env.COGNITO_DOMAIN.replace(/\/+$/, ""), cli_client_id: deps.env.COGNITO_CLI_CLIENT_ID }
+      : null,
+  }));
   app.route("/api/v1", createApiRoutes(deps, services));
   app.route("/runtime/v1", createRuntimeRoutes(services.runtimeApi));
   app.route("/triggers/v1", createDeploymentTriggerRoutes(services.deploymentTriggers));

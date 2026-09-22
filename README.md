@@ -268,6 +268,28 @@ yarn dev:web       # http://localhost:3201
 
 ローカルで Runtime（Controller・Tool Gateway・社内 API モック）を動かす方法は [runtime/README.md](runtime/README.md)。
 
+## CLI（画面操作なしで設定する）
+
+連携サービスの接続、OAuth アプリの登録、貴社 AWS 用 Runtime、GitHub App の接続は、画面の代わりに `agent-studio` コマンドで行える。Builder が人の操作を待っているときは、作成状況カードと `agent-studio doctor` に実行すべきコマンドがそのまま出る。
+
+```bash
+yarn workspace @agent-studio/cli build
+alias agent-studio="node $PWD/packages/cli/bin/agent-studio.js"
+
+agent-studio login --dev owner@sample-a.example       # ローカル。本番は `agent-studio login` でブラウザが開く
+agent-studio services                                 # 接続できるサービスと状態
+echo "$NOTION_TOKEN" | agent-studio connect notion --secret-stdin   # API キー方式（値は引数に出さない）
+agent-studio connect slack                            # OAuth 方式（ブラウザで許可するだけ）
+agent-studio oauth-app set slack --client-id xxx --client-secret-env SLACK_CLIENT_SECRET   # オーナー、初回のみ
+agent-studio runtime add --aws-account 123456789012 --region ap-northeast-1                 # 登録用トークンと aws コマンドを出力
+agent-studio github connect --org my-company          # GitHub App を作成→インストール→接続（ブラウザで 2 回押すだけ）
+agent-studio doctor                                   # 待ち中の操作と、解決するコマンド
+```
+
+- 秘密の値は `--secret-stdin`（標準入力）か `--secret-env VAR`（環境変数）でだけ渡す。シェル履歴に残らない。
+- OAuth アプリの Redirect URI には、Web の `https://<公開ドメイン>/integrations/oauth/callback` と CLI の `http://127.0.0.1:48127/callback` の両方を登録する。
+- 本番のブラウザログインには Cognito の CLI 用 app client（`COGNITO_DOMAIN` / `COGNITO_CLI_CLIENT_ID`、Terraform が作る）が必要。無い環境では `agent-studio login --token <IDトークン>` でも使える。
+
 ## テスト
 
 ```bash

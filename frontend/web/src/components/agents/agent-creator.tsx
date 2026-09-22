@@ -123,8 +123,8 @@ export function AgentCreator() {
           {create.error ? <Alert tone="danger">{create.error.message}</Alert> : null}
         </CardBody>
         <CardFooter className="justify-between">
-          <Link href="/tools" className="text-xs font-medium text-gray-400 hover:text-gray-600 hover:underline">
-            Advanced設定
+          <Link href="/settings?tab=advanced" className="text-xs font-medium text-gray-400 hover:text-gray-600 hover:underline">
+            詳細設定（管理者向け）
           </Link>
           <Button type="submit" loading={create.pending || navigating} icon={<ArrowRight className="h-4 w-4" aria-hidden="true" />}>
             作成を開始

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toManifestDraft } from "../application/agents.js";
 import { workflowDefinitionSchema } from "@agent-studio/contracts";
-import { buildBuilderPreviewInput, buildFactoringWorkflow, codeWorkspaceQuestionsFor, ensureAnsweredSourceRequirements, ensureRequiredScenarioTools, explicitOrganizationToolDraft, humanCapabilityRequirements, intakeQuestionsFor, organizationCodeWorkspaceQuestionsFor, registeredAdapterToolNames } from "./builder-orchestrator.js";
+import { buildBuilderPreviewInput, summarizeToolError, buildFactoringWorkflow, codeWorkspaceQuestionsFor, ensureAnsweredSourceRequirements, ensureRequiredScenarioTools, explicitOrganizationToolDraft, humanCapabilityRequirements, intakeQuestionsFor, organizationCodeWorkspaceQuestionsFor, registeredAdapterToolNames } from "./builder-orchestrator.js";
 import { judge, renderArgumentsTemplate, renderTemplate } from "./engines.js";
 import { isPrivateAddress } from "./studio-functions.js";
 
@@ -262,9 +262,13 @@ describe("Builder conversational intake", () => {
     expect(questions.find((question) => question.topic === "compliance_source")?.fields.find((field) => field.name === "access_method")?.options).toEqual([
       { value: "public_web", label: "ログイン不要の公開サイト" },
       { value: "human_login", label: "人によるログインが必要" },
-      { value: "runtime_tool", label: "許可済みRuntime Tool（Mockを含む）" },
     ]);
     expect(questions.flatMap((question) => question.fields).every((field) => field.secret === false)).toBe(true);
+    // 技術的な項目（OpenAPI/MCP URL、Runtime Tool名）は通常の入力欄に出さず「詳細設定」へ畳む
+    const technical = questions.flatMap((question) => question.fields).filter((field) => ["contract_url", "runtime_tool"].includes(field.name));
+    expect(technical.length).toBeGreaterThan(0);
+    expect(technical.every((field) => field.advanced === true && field.required === false)).toBe(true);
+    expect(questions.flatMap((question) => question.fields).some((field) => field.name === "integration")).toBe(false);
   });
 
   it("許可済みMock反社照合と検証用Xアカウントを質問として取りこぼさない", () => {
@@ -434,5 +438,12 @@ describe("toManifestDraft（日本語 → Manifest）", () => {
       new Set(),
     );
     expect(draft.manifest_yaml).toContain("key: new-agent");
+  });
+});
+
+describe("summarizeToolError", () => {
+  it("HTTPステータスと本文のmessageだけを残す", () => {
+    expect(summarizeToolError('連携サービスがエラーを返しました（HTTP 401）: {"object":"error","status":401,"code":"unauthorized","message":"API token is invalid."}')).toBe("HTTP 401: API token is invalid.");
+    expect(summarizeToolError("接続に失敗しました")).toBe("接続に失敗しました");
   });
 });

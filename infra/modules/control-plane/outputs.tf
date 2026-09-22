@@ -109,3 +109,8 @@ output "orcarouter_api_key_secret_name" {
   description = "運用者が共有 Orca Router API キーを設定するシークレット"
   value       = aws_secretsmanager_secret.this["orcarouter-api-key"].name
 }
+
+output "cognito_cli_client_id" {
+  description = "CLI（agent-studio login）用の公開 app client"
+  value       = aws_cognito_user_pool_client.cli.id
+}

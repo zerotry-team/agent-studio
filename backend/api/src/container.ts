@@ -9,6 +9,7 @@ import { InsightService, WorkflowService } from "./application/workflows.js";
 import { ScheduleService } from "./application/schedules.js";
 import { BuilderProjectService } from "./application/builder-projects.js";
 import { BuilderConnectorService } from "./application/builder-connectors.js";
+import { ConnectorOAuthService } from "./application/connector-oauth.js";
 import { runtimeTokenSecret, type Env } from "./env.js";
 import { createIdentityVerifier } from "./infrastructure/auth/identity-verifier.js";
 import { RuntimeTokenIssuer } from "./infrastructure/auth/runtime-token.js";
@@ -40,6 +41,7 @@ export interface Services {
   schedules: ScheduleService;
   builderProjects: BuilderProjectService;
   builderConnectors: BuilderConnectorService;
+  connectorOAuth: ConnectorOAuthService;
   gitWebhooks: GitWebhookService;
   deploymentTriggers: DeploymentTriggerService;
   browserProfiles: BrowserProfileService;
@@ -87,6 +89,7 @@ export function buildServices(deps: Deps): Services {
     schedules: new ScheduleService(deps),
     builderProjects: new BuilderProjectService(deps),
     builderConnectors: new BuilderConnectorService(deps),
+    connectorOAuth: new ConnectorOAuthService(deps),
     gitWebhooks: new GitWebhookService(deps),
     deploymentTriggers: new DeploymentTriggerService(deps),
     browserProfiles: new BrowserProfileService(deps),

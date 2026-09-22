@@ -1,13 +1,14 @@
 "use client";
 
 import type { ConnectionDto, RuntimeDto } from "@agent-studio/contracts";
-import { GitBranch, Server, Settings2 } from "lucide-react";
+import { GitBranch, Plug, Server, Settings2, Wrench } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { listConnectionsAction } from "@/actions/connections";
 import { listRuntimesAction } from "@/actions/runtimes";
 import { CreateGitHubAppConnectionDialog } from "@/components/connections/create-github-app-connection-dialog";
+import { CreateConnectorDialog } from "@/components/connectors/create-connector-dialog";
 import { RuntimeStatusBadge, StageBadge } from "@/components/common/status-badges";
 import { TimeAgo } from "@/components/common/time-ago";
 import { Alert } from "@/components/ui/alert";
@@ -29,14 +30,15 @@ export function InfrastructureTab() {
   const connections = useActionQuery(() => listConnectionsAction(), [organization?.id]);
   const runtimes = useActionQuery(() => listRuntimesAction(), [organization?.id], { refetchInterval: 30_000 });
   const [githubDialog, setGitHubDialog] = useState(() => searchParams.get("connect") === "github");
+  const [connectorDialog, setConnectorDialog] = useState(false);
   const githubApps = (connections.data ?? []).filter(isGitHubApp);
   const readyRuntimes = (runtimes.data ?? []).filter(isRuntimeReady);
 
   return (
     <div className="space-y-6">
-      <Alert tone="info" title="Agentより先に、組織の基盤として設定します">
-        Self-host Runtimeは社内データとToolの実行場所、GitHub Appは不足Adapterを専用branch・PRで配布する経路です。
-        Agent Builderはここで準備済みの基盤を参照し、Agentごとに秘密情報を聞きません。
+      <Alert tone="info" title="通常はBuilder Agentが自動で設定します">
+        実行環境・連携サービス・接続先はAgent作成時にBuilderが用意し、必要な認証や承認だけをお願いします。
+        ここは管理者が構成を確認・変更したり、カタログにないサービスを手動で登録したりするための画面です。
       </Alert>
 
       <div className="grid gap-6 xl:grid-cols-2">
@@ -87,12 +89,31 @@ export function InfrastructureTab() {
               {can("connection.manage") ? (
                 <Button onClick={() => setGitHubDialog(true)} icon={<GitBranch className="h-4 w-4" aria-hidden="true" />}>GitHub Appを接続</Button>
               ) : null}
-              <ButtonLink href="/connections" variant="secondary" icon={<Settings2 className="h-4 w-4" aria-hidden="true" />}>接続先の詳細</ButtonLink>
             </div>
           </CardBody>
         </Card>
         <BrowserProfilesCard />
       </div>
+
+      <Card className="overflow-hidden">
+        <CardHeader
+          title={<span className="flex items-center gap-2"><Plug className="h-5 w-5 text-accent-600" aria-hidden="true" />連携サービス・ツールの手動管理</span>}
+          description="カタログにない社内APIやMCPサーバーを登録したり、個別の操作や接続先を確認したりします。通常のAgent作成では不要です。"
+        />
+        <CardBody className="flex flex-wrap gap-2">
+          {can("tool.edit") ? <Button variant="secondary" onClick={() => setConnectorDialog(true)} icon={<Plug className="h-4 w-4" aria-hidden="true" />}>連携サービスを手動で登録</Button> : null}
+          <ButtonLink href="/tools" variant="secondary" icon={<Wrench className="h-4 w-4" aria-hidden="true" />}>ツールと操作の一覧</ButtonLink>
+          <ButtonLink href="/connections" variant="secondary" icon={<Settings2 className="h-4 w-4" aria-hidden="true" />}>接続先の詳細</ButtonLink>
+          <ButtonLink href="/environments" variant="secondary" icon={<Server className="h-4 w-4" aria-hidden="true" />}>実行環境の一覧</ButtonLink>
+        </CardBody>
+      </Card>
+
+      {connectorDialog ? (
+        <CreateConnectorDialog
+          onClose={() => setConnectorDialog(false)}
+          onCreated={() => setConnectorDialog(false)}
+        />
+      ) : null}
 
       {githubDialog ? (
         <CreateGitHubAppConnectionDialog

@@ -46,8 +46,8 @@ export default function ConnectionsPage() {
 
   const createButton = canManage ? (
     <div className="flex flex-wrap gap-2">
-      <ButtonLink href="/settings?tab=infrastructure" variant="secondary" icon={<Settings2 className="h-4 w-4" aria-hidden="true" />}>
-        実行・開発基盤
+      <ButtonLink href="/settings?tab=advanced" variant="secondary" icon={<Settings2 className="h-4 w-4" aria-hidden="true" />}>
+        詳細設定
       </ButtonLink>
       <Button icon={<Plus className="h-4 w-4" aria-hidden="true" />} onClick={() => setDialog({ kind: "create" })}>
         接続先を登録

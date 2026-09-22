@@ -108,6 +108,8 @@ const POLICIES: Record<BuilderFailureClass, Omit<BuilderFailurePolicy, "failureC
 };
 
 const MATCHERS: Array<[BuilderFailureClass, RegExp]> = [
+  // LLM 生成のタイムアウトは依頼内容の問題ではなく、再試行で回復する
+  ["build_failed", /時間内に完了しませんでした|request was aborted|timed? ?out/i],
   ["requirements_invalid", /要件|依頼内容|invalid.*(?:request|requirement)|validation/i],
   ["connection_missing", /connection|接続|oauth|secret|credential/i],
   ["permission_missing", /permission|forbidden|unauthorized|access denied|権限|401|403/i],

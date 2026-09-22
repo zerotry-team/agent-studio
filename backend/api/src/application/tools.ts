@@ -1,15 +1,14 @@
-import type { Prisma } from "@prisma/client";
+import type { Prisma, connections } from "@prisma/client";
+import type { z } from "zod";
 import { randomUUID } from "node:crypto";
 import {
   createToolInputSchema,
   createGitHubAppConnectionSchema,
   createConnectorSchema,
-  setConnectorOAuthAppSchema,
   updateConnectorSchema,
   discoverMcpToolsSchema,
   toolVersionSpecSchema,
   type ConnectorDto,
-  type ConnectorOAuthAppDto,
   type ConnectorOperationInput,
   type DiscoverMcpToolsInput,
   type UpdateConnectorInput,
@@ -20,12 +19,20 @@ import {
   type CreateConnectorInput,
   type CreateToolInput,
   type CreateToolVersionInput,
+  type ProviderCatalogEntryDto,
   type SetConnectionSecretInput,
-  type SetConnectorOAuthAppInput,
   type ToolDto,
   type ToolVersionDto,
 } from "@agent-studio/contracts";
 import { conflict, notFound, preconditionFailed, validationError } from "../domain/errors.js";
+import {
+  PROVIDER_CATALOG,
+  connectorAuthTypeFor,
+  selectOperations,
+  toCatalogEntryDto,
+  toConnectorOperation,
+  type ProviderCatalogEntry,
+} from "../domain/provider-catalog.js";
 import { recordAudit } from "../infrastructure/audit.js";
 import { assertPublicUrl } from "../infrastructure/http/public-url.js";
 import { secretNames } from "../infrastructure/secrets/secret-store.js";
@@ -45,11 +52,6 @@ function canonicalJson(value: unknown): string {
     return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
-}
-
-function usableEnvSecret(value: string | undefined): string | null {
-  const trimmed = value?.trim();
-  return trimmed && trimmed !== "unset" ? trimmed : null;
 }
 
 /** 連携サービスの1操作から、ツールの spec を組み立てる（登録と編集で同じ形にする） */
@@ -139,64 +141,6 @@ export class ToolService {
     });
   }
 
-  /** OAuth applicationの準備状況。Client Secretは存在の有無だけを返す。 */
-  async getConnectorOAuthApp(actor: MemberActor, id: string): Promise<ConnectorOAuthAppDto> {
-    const connector = await this.deps.db.run(scopeOf(actor), (tx) =>
-      tx.connectors.findFirst({ where: { id, organization_id: actor.organizationId } }),
-    );
-    if (!connector) throw notFound("連携サービス");
-    if (connector.key !== "qiita") throw validationError("この連携サービスはOAuth application設定に対応していません");
-    const envClientId = usableEnvSecret(this.deps.env.QIITA_OAUTH_CLIENT_ID);
-    const envClientSecret = usableEnvSecret(this.deps.env.QIITA_OAUTH_CLIENT_SECRET);
-    const clientId = connector.oauth_client_id ?? envClientId;
-    const hasClientSecret = Boolean(connector.oauth_client_secret_locator || envClientSecret);
-    return {
-      connector_id: connector.id,
-      provider: connector.key,
-      configured: Boolean(clientId && hasClientSecret),
-      client_id: clientId ?? null,
-      has_client_secret: hasClientSecret,
-    };
-  }
-
-  /** OAuth applicationを運営者が一度だけ登録する。Secret本体はSecret Store以外へ保存しない。 */
-  async setConnectorOAuthApp(actor: MemberActor, id: string, raw: SetConnectorOAuthAppInput): Promise<ConnectorOAuthAppDto> {
-    requireRole(actor, "owner");
-    const input = setConnectorOAuthAppSchema.parse(raw);
-    const connector = await this.deps.db.run(scopeOf(actor), (tx) =>
-      tx.connectors.findFirst({ where: { id, organization_id: actor.organizationId } }),
-    );
-    if (!connector) throw notFound("連携サービス");
-    if (connector.key !== "qiita") throw validationError("この連携サービスはOAuth application設定に対応していません");
-    const locator = await this.deps.secrets.put(
-      secretNames.connectorOAuthApp(this.deps.env.SECRETS_PREFIX, actor.organizationId, connector.id),
-      input.client_secret,
-      { "agentstudio:organization_id": actor.organizationId, "agentstudio:connector_id": connector.id },
-    );
-    await this.deps.db.run(scopeOf(actor), async (tx) => {
-      await tx.connectors.update({
-        where: { id: connector.id },
-        data: { oauth_client_id: input.client_id, oauth_client_secret_locator: locator },
-      });
-      await recordAudit(
-        tx,
-        auditBy(actor, {
-          action: "connector.oauth_app.update",
-          targetType: "connector",
-          targetId: connector.id,
-          detail: { provider: connector.key, client_id_updated: true, client_secret_updated: true },
-        }),
-      );
-    });
-    return {
-      connector_id: connector.id,
-      provider: connector.key,
-      configured: true,
-      client_id: input.client_id,
-      has_client_secret: true,
-    };
-  }
-
   /** 登録前に MCP サーバーへ接続し、申告されている操作の一覧を返す（入力補助）。 */
   async discoverMcpTools(actor: MemberActor, raw: DiscoverMcpToolsInput): Promise<DiscoverMcpToolsResultDto> {
     requireRole(actor, "builder");
@@ -208,21 +152,27 @@ export class ToolService {
   async createConnector(actor: MemberActor, raw: CreateConnectorInput): Promise<ConnectorDto> {
     requireRole(actor, "builder");
     const input = createConnectorSchema.parse(raw);
-    if (!(["http_openapi", "internal_http_api", "runtime", "mcp"] as const).includes(input.adapter as "http_openapi" | "internal_http_api" | "runtime" | "mcp")) {
-      throw validationError("HTTP連携、MCP連携、Browser連携の一括登録に対応しています");
-    }
-    const runtime = input.adapter === "runtime";
-    const mcp = input.adapter === "mcp";
-    const baseUrl = input.base_url?.replace(/\/$/, "") ?? null;
     return this.deps.db.run(scopeOf(actor), async (tx) => {
       const duplicate = await tx.connectors.findUnique({
         where: { organization_id_key: { organization_id: actor.organizationId, key: input.key } },
       });
       if (duplicate) throw conflict(`連携サービス ${input.key} はすでにあります`);
+      return this.createConnectorIn(tx, actor, input);
+    });
+  }
+
+  /** Connector と操作を作る本体（重複検査は呼び出し側）。Builder のカタログ登録と手動登録で共有する。 */
+  private async createConnectorIn(tx: Prisma.TransactionClient, actor: MemberActor, input: z.output<typeof createConnectorSchema>): Promise<ConnectorDto> {
+    if (!(["http_openapi", "internal_http_api", "runtime", "mcp"] as const).includes(input.adapter as "http_openapi" | "internal_http_api" | "runtime" | "mcp")) {
+      throw validationError("HTTP連携、MCP連携、Browser連携の一括登録に対応しています");
+    }
+    const baseUrl = input.base_url?.replace(/\/$/, "") ?? null;
+    {
       const connector = await tx.connectors.create({
         data: {
           organization_id: actor.organizationId,
           key: input.key,
+          provider_key: input.provider_key ?? null,
           name: input.name,
           description: input.description,
           adapter: input.adapter,
@@ -250,10 +200,129 @@ export class ToolService {
           action: "connector.create",
           targetType: "connector",
           targetId: connector.id,
-          detail: { key: connector.key, capabilities: input.operations.map((operation) => operation.name) },
+          detail: { key: connector.key, provider_key: input.provider_key ?? null, capabilities: input.operations.map((operation) => operation.name) },
         }),
       );
       return toConnectorDto(connector);
+    }
+  }
+
+  /**
+   * Provider Catalog のエントリから Connector を用意する。既にあれば再利用し、足りない操作だけ追加する。
+   * 利用者に識別子・URL・操作一覧を入力させないための入口。Secret は扱わない。
+   */
+  async ensureCatalogConnector(
+    actor: MemberActor,
+    entry: ProviderCatalogEntry,
+    requirementTexts: string[],
+  ): Promise<{ connector: ConnectorDto; created: boolean; added_operations: string[] }> {
+    requireRole(actor, "builder");
+    if (entry.auth.kind === "github_app") throw validationError("GitHubは設定の詳細設定からGitHub Appで接続します");
+    const selected = selectOperations(entry, requirementTexts);
+    const operations = selected.map(toConnectorOperation);
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const existing = await tx.connectors.findFirst({
+        where: { organization_id: actor.organizationId, OR: [{ provider_key: entry.key }, { key: entry.key }] },
+        include: { tools: { include: { versions: true }, orderBy: { name: "asc" } } },
+        orderBy: { created_at: "asc" },
+      });
+      if (!existing) {
+        const connector = await this.createConnectorIn(tx, actor, createConnectorSchema.parse({
+          key: entry.key,
+          provider_key: entry.key,
+          name: entry.name,
+          description: entry.description,
+          adapter: entry.adapter,
+          ...(entry.base_url ? { base_url: entry.base_url } : {}),
+          auth_type: connectorAuthTypeFor(entry),
+          ...(entry.default_headers ? { default_headers: entry.default_headers } : {}),
+          operations,
+        }));
+        return { connector, created: true, added_operations: operations.map((operation) => operation.name) };
+      }
+      const known = new Set(existing.tools.map((tool) => tool.name));
+      const missing = operations.filter((operation) => !known.has(operation.name));
+      const baseUrl = existing.base_url ?? entry.base_url?.replace(/\/$/, "") ?? null;
+      for (const operation of missing) {
+        const built = buildConnectorToolSpec(existing.adapter, baseUrl, entry.default_headers, operation);
+        await tx.tools.create({
+          data: {
+            organization_id: actor.organizationId,
+            connector_id: existing.id,
+            name: operation.name,
+            display_name: operation.display_name,
+            execution_location: built.executionLocation,
+            risk: operation.risk,
+            latest_version: 1,
+            versions: { create: { version: 1, created_by: actor.userId, spec: built.spec } },
+          },
+        });
+      }
+      if (!existing.provider_key || missing.length) {
+        await tx.connectors.update({ where: { id: existing.id }, data: { provider_key: existing.provider_key ?? entry.key } });
+        await recordAudit(tx, auditBy(actor, {
+          action: "connector.catalog.reuse",
+          targetType: "connector",
+          targetId: existing.id,
+          detail: { provider_key: entry.key, added_operations: missing.map((operation) => operation.name) },
+        }));
+      }
+      const refreshed = await tx.connectors.findUniqueOrThrow({
+        where: { id: existing.id },
+        include: { tools: { include: { versions: true }, orderBy: { name: "asc" } } },
+      });
+      return { connector: toConnectorDto(refreshed), created: false, added_operations: missing.map((operation) => operation.name) };
+    });
+  }
+
+  /** この組織で使えるカタログと、登録済み Connector の対応。 */
+  async listCatalog(actor: MemberActor): Promise<ProviderCatalogEntryDto[]> {
+    const connectors = await this.deps.db.run(scopeOf(actor), (tx) =>
+      tx.connectors.findMany({ where: { organization_id: actor.organizationId }, select: { id: true, key: true, provider_key: true } }),
+    );
+    return PROVIDER_CATALOG.map((entry) => toCatalogEntryDto(entry, connectors.find((connector) => (connector.provider_key ?? connector.key) === entry.key)?.id ?? null));
+  }
+
+  /**
+   * Builder が認証情報だけを利用者に求めるための Connection 枠を事前に作る（secret なし・status error）。
+   * startPreview は connected しか拾わないので、誤って Build へ結び付くことはない。
+   */
+  async ensureManagedConnection(
+    tx: Prisma.TransactionClient,
+    organizationId: string,
+    connector: { id: string; name: string; adapter: string },
+    options: { headerName?: string | null; projectId?: string | null } = {},
+  ): Promise<connections> {
+    // 既存の枠を再利用するのは、Builder が用意したもの、または認証情報が未設定のものだけ。
+    // 利用中（Production 用など）の Connection を上書き対象にしない
+    const existing = await tx.connections.findFirst({
+      where: {
+        organization_id: organizationId,
+        connector_id: connector.id,
+        revoked_at: null,
+        scope: { in: ["studio", "openai_vault"] },
+        OR: [{ metadata: { path: ["managed_by"], equals: "builder" } }, { secret_locator: null }],
+      },
+      orderBy: { created_at: "asc" },
+    });
+    if (existing) return existing;
+    const scope = connector.adapter === "mcp" ? "openai_vault" : "studio";
+    const baseName = `${connector.name}（Preview用）`;
+    let name = baseName;
+    for (let attempt = 2; await tx.connections.findUnique({ where: { organization_id_name: { organization_id: organizationId, name } } }); attempt += 1) {
+      name = `${baseName} ${attempt}`;
+    }
+    return tx.connections.create({
+      data: {
+        organization_id: organizationId,
+        connector_id: connector.id,
+        name,
+        description: "Builderが自動で用意した接続枠。認証情報を設定すると利用できます",
+        scope,
+        header_name: scope === "studio" ? (options.headerName ?? "Authorization") : null,
+        status: "error",
+        metadata: { managed_by: "builder", ...(options.projectId ? { project_id: options.projectId } : {}) },
+      },
     });
   }
 
@@ -660,86 +729,6 @@ export class ToolService {
     });
   }
 
-  /** Qiita OAuth codeをtokenへ交換し、そのままAgent Studio Connectionとして保存する。 */
-  async exchangeQiitaOAuth(actor: MemberActor, connectorId: string, code: string): Promise<ConnectionDto> {
-    requireRole(actor, "admin");
-    const connector = await this.deps.db.run(scopeOf(actor), (tx) =>
-      tx.connectors.findFirst({ where: { id: connectorId, organization_id: actor.organizationId, key: "qiita" } }),
-    );
-    if (!connector) throw notFound("Qiita連携");
-    const clientId = connector.oauth_client_id ?? usableEnvSecret(this.deps.env.QIITA_OAUTH_CLIENT_ID);
-    const storedClientSecret = connector.oauth_client_secret_locator
-      ? await this.deps.secrets.get(connector.oauth_client_secret_locator)
-      : null;
-    const clientSecret = storedClientSecret ?? usableEnvSecret(this.deps.env.QIITA_OAUTH_CLIENT_SECRET);
-    if (!clientId || !clientSecret) {
-      throw preconditionFailed("Qiita OAuthがまだAgent Studioに設定されていません");
-    }
-
-    const exchanged = await fetch("https://qiita.com/api/v2/access_tokens", {
-      method: "POST",
-      headers: { accept: "application/json", "content-type": "application/json", "user-agent": "agent-studio-qiita-oauth" },
-      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code }),
-      redirect: "error",
-      signal: AbortSignal.timeout(15_000),
-    });
-    const tokenBody = (await exchanged.json().catch(() => null)) as { token?: unknown; scopes?: unknown } | null;
-    if (!exchanged.ok || typeof tokenBody?.token !== "string") {
-      throw preconditionFailed(`Qiitaの認証を完了できませんでした（HTTP ${exchanged.status}）`);
-    }
-    const scopes = Array.isArray(tokenBody.scopes) ? tokenBody.scopes.filter((scope): scope is string => typeof scope === "string") : [];
-    if (!scopes.includes("write_qiita")) throw preconditionFailed("Qiitaの記事公開に必要なwrite_qiita権限が許可されていません");
-
-    const me = await fetch("https://qiita.com/api/v2/authenticated_user", {
-      headers: { accept: "application/json", authorization: `Bearer ${tokenBody.token}`, "user-agent": "agent-studio-qiita-oauth" },
-      redirect: "error",
-      signal: AbortSignal.timeout(15_000),
-    });
-    const user = (await me.json().catch(() => null)) as { id?: unknown } | null;
-    if (!me.ok || typeof user?.id !== "string" || !user.id.trim()) {
-      throw preconditionFailed("Qiitaアカウントを確認できませんでした");
-    }
-    const qiitaUserId = user.id.trim();
-    const description = `qiita-user:${qiitaUserId}`;
-    const connection = await this.deps.db.run(scopeOf(actor), async (tx) => {
-      const existing = await tx.connections.findFirst({
-        where: { organization_id: actor.organizationId, connector_id: connector.id, description },
-      });
-      if (existing) return existing;
-      return tx.connections.create({
-        data: {
-          organization_id: actor.organizationId,
-          connector_id: connector.id,
-          name: `Qiita (${qiitaUserId})`,
-          description,
-          scope: "studio",
-          header_name: "Authorization",
-        },
-      });
-    });
-    const locator = await this.deps.secrets.put(
-      secretNames.connection(this.deps.env.SECRETS_PREFIX, actor.organizationId, connection.id),
-      tokenBody.token,
-      { "agentstudio:organization_id": actor.organizationId },
-    );
-    return this.deps.db.run(scopeOf(actor), async (tx) => {
-      const updated = await tx.connections.update({
-        where: { id: connection.id },
-        data: { secret_locator: locator, status: "connected", last_validated_at: new Date(), expires_at: null, revoked_at: null },
-      });
-      await recordAudit(
-        tx,
-        auditBy(actor, {
-          action: "connection.oauth.connected",
-          targetType: "connection",
-          targetId: connection.id,
-          detail: { connector_id: connector.id, provider: "qiita", qiita_user_id: qiitaUserId, scopes },
-        }),
-      );
-      return toConnectionDto(updated);
-    });
-  }
-
   /** 読み取り専用の代表操作を1回呼び、Connectionが実際に利用できるか確認する。 */
   async validateConnection(actor: MemberActor, id: string): Promise<ConnectionDto> {
     requireRole(actor, "admin");
@@ -766,7 +755,8 @@ export class ToolService {
       const fn = spec?.studio_function;
       return fn?.handler === "http_api" && fn.method === "GET" && Boolean(fn.base_url && fn.path) && !fn.path!.includes("{");
     });
-    if (!check) throw preconditionFailed("この連携サービスには自動確認に使える読み取り操作がありません");
+    // 自動確認に使える読み取り操作が無い連携は、設定完了として扱う（実際の疎通は Preview の Smoke で確認する）
+    if (!check) return this.updateConnectionStatus(actor, conn.id, "connected", "connection.validate", { mode: "configuration", reason: "no_probe_operation" });
     const spec = check.versions[0]!.spec as unknown as { studio_function: { base_url: string; path: string } };
     const url = await assertPublicUrl(`${spec.studio_function.base_url}${spec.studio_function.path}`);
     const headers: Record<string, string> = { accept: "application/json", "user-agent": "agent-studio-connection-check" };

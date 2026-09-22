@@ -82,7 +82,9 @@ export function buildProgressPhases(project: BuilderProjectDto): BuildPhase[] {
     && action.type !== "adapter_delivery"
     && action.type !== "repository_merge");
   const release = primaryBuilderRelease(project);
-  const hasGeneratedAgent = Boolean(release || project.change_sets.some((change) => ["applied", "pr_open", "merged"].includes(change.status)));
+  // 連携サービスの自動登録（catalog / declarative connector）や環境の用意は「Agent の生成」ではないので完了扱いにしない
+  const PREPARATION_CHANGE_KINDS = new Set(["catalog_connector", "declarative_connector", "environment", "terraform_plan"]);
+  const hasGeneratedAgent = Boolean(release || project.change_sets.some((change) => !PREPARATION_CHANGE_KINDS.has(change.kind) && ["applied", "pr_open", "merged"].includes(change.status)));
   const generationValidation = project.validation_runs.find((validation) => String(validation.suite) === "builder_session" && validation.status === "passed");
   const implementationFailed = project.status === "failed" && !run?.steps.some((step) => step.status === "failed") && !release;
   const implementationRunning = ["implementing", "validating"].includes(project.status) && !release;
@@ -104,7 +106,10 @@ export function buildProgressPhases(project: BuilderProjectDto): BuildPhase[] {
     finishedAt: hasGeneratedAgent ? generationValidation?.finished_at ?? release?.created_at ?? project.updated_at : null,
   };
 
-  const validations = project.validation_runs.filter((validation) => validation.suite !== "preview" && validation.suite !== "drift");
+  // 再試行で成功した後に、前の試行の失敗証跡で「停止」と見せない。現在の試行より前の証跡は現在の状態に混ぜない
+  const currentRunStart = run && run.status !== "failed" ? run.started_at ?? run.created_at : null;
+  const validations = project.validation_runs.filter((validation) =>
+    validation.suite !== "preview" && validation.suite !== "drift" && (!currentRunStart || validation.created_at >= currentRunStart));
   // APIは新しい順。再試行前の失敗を現在の状態へ混ぜず、suiteごとの最新結果だけで判定する。
   const latestBySuite = new Map<string, BuilderProjectDto["validation_runs"][number]>();
   for (const validation of validations) if (!latestBySuite.has(validation.suite)) latestBySuite.set(validation.suite, validation);

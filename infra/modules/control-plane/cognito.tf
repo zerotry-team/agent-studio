@@ -93,6 +93,36 @@ resource "aws_cognito_user_pool_client" "web" {
   }
 }
 
+# CLI（agent-studio login）用の公開クライアント。secret を持たず PKCE で使う。
+# 戻り先はローカルの固定ポート（packages/cli の CALLBACK_PORT と合わせる）。
+resource "aws_cognito_user_pool_client" "cli" {
+  name         = "${local.name}-cli"
+  user_pool_id = aws_cognito_user_pool.this.id
+
+  generate_secret                      = false
+  allowed_oauth_flows_user_pool_client = true
+  allowed_oauth_flows                  = ["code"]
+  allowed_oauth_scopes                 = ["openid", "email", "profile"]
+  supported_identity_providers         = ["COGNITO"]
+
+  callback_urls = ["http://127.0.0.1:48127/callback"]
+  logout_urls   = ["http://127.0.0.1:48127/"]
+
+  explicit_auth_flows           = ["ALLOW_REFRESH_TOKEN_AUTH"]
+  prevent_user_existence_errors = "ENABLED"
+  enable_token_revocation       = true
+
+  id_token_validity      = 1
+  access_token_validity  = 1
+  refresh_token_validity = 30
+
+  token_validity_units {
+    id_token      = "hours"
+    access_token  = "hours"
+    refresh_token = "days"
+  }
+}
+
 # Hosted UI のドメインの接頭辞は全リージョンで一意にする必要がある。
 # 16 進の乱数にするのは、接頭辞に使えない語（aws / amazon / cognito）が偶然含まれないようにするため。
 resource "random_id" "cognito_domain_suffix" {

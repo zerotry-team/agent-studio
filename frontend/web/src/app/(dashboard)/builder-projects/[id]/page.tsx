@@ -89,8 +89,8 @@ function HumanActionCard({ action, projectRequest, pending, onComplete }: { acti
       </Field>)}</div> : null}
       <ol className="space-y-2 text-sm text-gray-700">{presentation.instructions.map((instruction, index) => <li key={`${index}-${instruction}`} className="flex gap-3"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-gray-100 text-xs font-medium">{index + 1}</span>{instruction}</li>)}</ol>
       <div className="flex flex-wrap justify-end gap-2">
-        {destination === "infrastructure" ? <ButtonLink href="/settings?tab=infrastructure">実行・開発基盤を設定</ButtonLink> : null}
-        {destination === "github" ? <ButtonLink href="/settings?tab=infrastructure&connect=github">GitHub Repositoryを接続</ButtonLink> : null}
+        {destination === "infrastructure" ? <ButtonLink href="/settings?tab=advanced">詳細設定を開く</ButtonLink> : null}
+        {destination === "github" ? <ButtonLink href="/settings?tab=advanced&connect=github">GitHub Repositoryを接続</ButtonLink> : null}
         {destination === "integrations" ? <ButtonLink href="/integrations">連携サービスを設定</ButtonLink> : null}
         {isHumanLogin ? <span className="text-xs text-amber-700">Browser Profileのログイン検証後に自動再開します</span> : null}
         {isBrowserRuntime ? <span className="text-xs text-amber-700">RuntimeのHeartbeatとTool Catalog検証後に自動再開します</span> : null}

@@ -1,0 +1,32 @@
+{
+  "name": "@agent-studio/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Studio CLI: 連携サービスの接続・OAuth・Runtime・GitHub App を画面操作なしで設定する",
+  "type": "module",
+  "bin": {
+    "agent-studio": "./bin/agent-studio.js"
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "tsc --noEmit",
+    "start": "tsx src/index.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@agent-studio/contracts": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.20.0",
+    "typescript": "5.9.3",
+    "vitest": "^3.2.7"
+  }
+}
