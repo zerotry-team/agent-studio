@@ -86,11 +86,16 @@ model organizations {
 
 /// 組織ごとの OpenAI Project とキーの保管場所（SEC-11）。キーの値は持たない
 model organization_openai_settings {
-  organization_id    String   @id @db.Uuid
-  openai_project_id  String?
-  app_key_secret_arn String?
-  env_key_secret_arn String?
-  updated_at         DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+  organization_id              String   @id @db.Uuid
+  openai_project_id            String?
+  app_key_secret_arn           String?
+  env_key_secret_arn           String?
+  orcarouter_key_secret_arn    String?
+  orcarouter_text_enabled      Boolean  @default(false)
+  orcarouter_image_enabled     Boolean  @default(false)
+  orcarouter_text_model        String   @default("google/gemini-2.5-pro")
+  orcarouter_image_model       String   @default("openai/gpt-image-1")
+  updated_at                   DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
   organization organizations @relation(fields: [organization_id], references: [id], onDelete: Cascade)
 }

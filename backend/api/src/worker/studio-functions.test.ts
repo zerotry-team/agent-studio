@@ -1,5 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { buildIdempotencyKey, buildZennArticle, prepareHttpArguments, validateAnonymousXPost, zennArticleSlug } from "./studio-functions.js";
+import {
+  buildIdempotencyKey,
+  buildImageGenerationRequest,
+  buildZennArticle,
+  prepareHttpArguments,
+  validateAnonymousXPost,
+  zennArticleSlug,
+} from "./studio-functions.js";
+
+describe("画像生成provider互換", () => {
+  it("Orca Routerでは上流が拒否するresponse_formatとOpenAI固有optionを送らない", () => {
+    expect(buildImageGenerationRequest("orcarouter", "openai/gpt-image-1", "test prompt")).toEqual({
+      model: "openai/gpt-image-1",
+      prompt: "test prompt",
+      size: "1024x1024",
+    });
+  });
+
+  it("チェックOFFのOpenAI requestは従来optionを維持する", () => {
+    expect(buildImageGenerationRequest("openai", "gpt-image-1", "test prompt")).toEqual({
+      model: "gpt-image-1",
+      prompt: "test prompt",
+      size: "1024x1024",
+      quality: "medium",
+      output_format: "png",
+    });
+  });
+});
 
 describe("HTTP Connectorの冪等性", () => {
   it("logical_post_idをIdempotency-Key用に分離し、接続先bodyへ送らない", () => {

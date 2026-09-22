@@ -59,7 +59,7 @@ export function SettingsTabs() {
         tabs={[
           { id: "organization", label: "組織" },
           { id: "infrastructure", label: "実行・開発基盤", hidden: !canViewInfrastructure },
-          { id: "openai", label: "OpenAI", hidden: !canViewOpenAi },
+          { id: "openai", label: "AIモデル", hidden: !canViewOpenAi },
           { id: "members", label: "メンバー" },
           { id: "policies", label: "ポリシー" },
         ]}

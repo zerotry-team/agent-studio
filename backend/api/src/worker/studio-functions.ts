@@ -5,6 +5,7 @@ import type { CompiledFunctionTool } from "../domain/manifest-compiler.js";
 import { inspectArtifact } from "../domain/artifact-security.js";
 import type { TenantDb } from "../infrastructure/db/tenant-db.js";
 import { assertPublicUrl, isPrivateAddress } from "../infrastructure/http/public-url.js";
+import { resolveModelRoute } from "../infrastructure/llm/model-routing.js";
 import type { SecretStore } from "../infrastructure/secrets/secret-store.js";
 import { artifactPrefix, type ObjectStore } from "../infrastructure/storage/object-store.js";
 
@@ -101,6 +102,20 @@ export function buildIdempotencyKey(runId: string, toolName: string, logicalId: 
   return createHash("sha256").update(`${runId}:${toolName}:${logicalId}`).digest("hex");
 }
 
+export function buildImageGenerationRequest(
+  provider: "openai" | "orcarouter",
+  model: string,
+  prompt: string,
+): Record<string, unknown> {
+  const common = { model, prompt, size: "1024x1024" };
+  // Orca Router's OpenAI image adapter rejects an explicit b64_json response_format
+  // for gpt-image-1, while its documented default request returns b64_json in practice.
+  // Keep the existing OpenAI request byte-for-byte compatible when routing is disabled.
+  return provider === "openai"
+    ? { ...common, quality: "medium", output_format: "png" }
+    : common;
+}
+
 const PUBLIC_FACTORING_POST = /^匿名審査ID=ANON-[A-Z0-9]{8,32}; 結果=(approve_candidate|hold); 理由=[A-Z_]+(?:,[A-Z_]+)*; 検証用投稿$/;
 
 /** Social Routerへ渡す前の最終データ境界。可候補/保留の固定形式以外は承認済みでも拒否する。 */
@@ -122,7 +137,7 @@ export class StudioFunctionExecutor {
   constructor(
     private readonly db: TenantDb,
     private readonly secrets: SecretStore,
-    private readonly env?: Pick<Env, "NODE_ENV" | "OPENAI_API_KEY" | "ARTIFACTS_BUCKET">,
+    private readonly env?: Pick<Env, "NODE_ENV" | "OPENAI_API_KEY" | "ORCAROUTER_API_KEY" | "ORCAROUTER_BASE_URL" | "ARTIFACTS_BUCKET">,
     private readonly objects?: ObjectStore,
   ) {}
 
@@ -159,24 +174,24 @@ export class StudioFunctionExecutor {
     organizationId: string,
     model: string,
     promptValue: unknown,
-  ): Promise<{ bytes: Buffer; revisedPrompt?: string; usage?: unknown }> {
+  ): Promise<{ bytes: Buffer; provider: "openai" | "orcarouter"; model: string; revisedPrompt?: string; usage?: unknown }> {
     const prompt = requiredText(promptValue, "画像の説明", 8_000);
     const settings = await this.db.org(organizationId, (tx) =>
       tx.organization_openai_settings.findUnique({ where: { organization_id: organizationId } }),
     );
-    let openAiKey = settings?.app_key_secret_arn ? await this.secrets.get(settings.app_key_secret_arn) : null;
-    if (!openAiKey && this.env?.NODE_ENV !== "production") openAiKey = this.env?.OPENAI_API_KEY ?? null;
-    if (!openAiKey) throw new Error("OpenAIの接続が未設定です。設定から接続してください");
+    if (!this.env) throw new Error("画像生成の環境設定がありません");
+    const route = await resolveModelRoute({ capability: "image", settings, env: this.env, secrets: this.secrets, openAiModel: model });
     const headers: Record<string, string> = {
-      authorization: `Bearer ${openAiKey}`,
+      authorization: `Bearer ${route.apiKey}`,
       "content-type": "application/json",
       "user-agent": "agent-studio-image-tool",
     };
-    if (settings?.openai_project_id) headers["openai-project"] = settings.openai_project_id;
-    const response = await fetch("https://api.openai.com/v1/images/generations", {
+    if (route.project) headers["openai-project"] = route.project;
+    const baseUrl = route.baseURL?.replace(/\/$/, "") ?? "https://api.openai.com/v1";
+    const response = await fetch(`${baseUrl}/images/generations`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ model, prompt, size: "1024x1024", quality: "medium", output_format: "png" }),
+      body: JSON.stringify(buildImageGenerationRequest(route.provider, route.model, prompt)),
       redirect: "error",
       signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS),
     });
@@ -189,12 +204,15 @@ export class StudioFunctionExecutor {
     const base64 = typeof result?.b64_json === "string" ? result.b64_json : null;
     if (!response.ok || !base64) {
       const detail = typeof payload?.error?.message === "string" ? payload.error.message.slice(0, 500) : "画像データがありません";
-      throw new Error(`OpenAIで画像を生成できませんでした（HTTP ${response.status}）: ${detail}`);
+      const provider = route.provider === "orcarouter" ? "Orca Router" : "OpenAI";
+      throw new Error(`${provider}で画像を生成できませんでした（HTTP ${response.status}）: ${detail}`);
     }
     const bytes = Buffer.from(base64, "base64");
     if (bytes.byteLength > MAX_SOCIAL_MEDIA_BYTES) throw new Error("生成画像がArtifact上限を超えました");
     return {
       bytes,
+      provider: route.provider,
+      model: route.model,
       ...(typeof result?.revised_prompt === "string" ? { revisedPrompt: result.revised_prompt } : {}),
       ...(payload?.usage ? { usage: payload.usage } : {}),
     };
@@ -219,7 +237,7 @@ export class StudioFunctionExecutor {
     await this.db.org(organizationId, async (tx) => {
       await tx.run_artifacts.upsert({
         where: { organization_id_run_id_path: { organization_id: organizationId, run_id: context.runId, path } },
-        create: { organization_id: organizationId, run_id: context.runId, path, object_key: objectKey, mime_type: "image/png", size_bytes: generated.bytes.byteLength, sha256, scan_status: "passed", scan_engine: inspected.scanEngine, source: "openai_image_generation", retained_until: new Date(Date.now() + 30 * 24 * 60 * 60_000) },
+        create: { organization_id: organizationId, run_id: context.runId, path, object_key: objectKey, mime_type: "image/png", size_bytes: generated.bytes.byteLength, sha256, scan_status: "passed", scan_engine: inspected.scanEngine, source: `${generated.provider}_image_generation`, retained_until: new Date(Date.now() + 30 * 24 * 60 * 60_000) },
         update: { object_key: objectKey, size_bytes: generated.bytes.byteLength, sha256, scan_status: "passed", scan_engine: inspected.scanEngine, retained_until: new Date(Date.now() + 30 * 24 * 60 * 60_000) },
       });
       await tx.audit_logs.create({ data: {
@@ -230,10 +248,10 @@ export class StudioFunctionExecutor {
         target_type: "run",
         target_id: context.runId,
         result: "success",
-        detail: { tool: tool.name, model, artifact_path: path, mime_type: "image/png", bytes: generated.bytes.byteLength, sha256, safety_status: "provider_accepted", usage: generated.usage ?? null },
+        detail: { tool: tool.name, provider: generated.provider, model: generated.model, artifact_path: path, mime_type: "image/png", bytes: generated.bytes.byteLength, sha256, safety_status: "provider_accepted", usage: generated.usage ?? null },
       } });
     });
-    return JSON.stringify({ artifact_path: path, mime_type: "image/png", bytes: generated.bytes.byteLength, sha256, model, safety_status: "provider_accepted", ...(generated.revisedPrompt ? { revised_prompt: generated.revisedPrompt } : {}), ...(generated.usage ? { usage: generated.usage } : {}) });
+    return JSON.stringify({ artifact_path: path, mime_type: "image/png", bytes: generated.bytes.byteLength, sha256, provider: generated.provider, model: generated.model, safety_status: "provider_accepted", ...(generated.revisedPrompt ? { revised_prompt: generated.revisedPrompt } : {}), ...(generated.usage ? { usage: generated.usage } : {}) });
   }
 
   private async linkedSecret(
@@ -328,8 +346,8 @@ export class StudioFunctionExecutor {
             tool: tool.name,
             stage: context.stage,
             status: mediaResponse.status,
-            provider: "openai_image_generation",
-            model: spec.model,
+            provider: `${generated.provider}_image_generation`,
+            model: generated.model,
             bytes: bytes.byteLength,
           },
         },

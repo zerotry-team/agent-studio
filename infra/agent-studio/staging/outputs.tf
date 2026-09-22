@@ -79,3 +79,7 @@ output "cloudfront_domain_name" {
 output "anthropic_api_key_secret_name" {
   value = module.control_plane.anthropic_api_key_secret_name
 }
+
+output "orcarouter_api_key_secret_name" {
+  value = module.control_plane.orcarouter_api_key_secret_name
+}

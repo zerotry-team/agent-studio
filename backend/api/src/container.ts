@@ -16,7 +16,7 @@ import { createUserInviter } from "./infrastructure/auth/user-inviter.js";
 import { DevRuntimeIdentityVerifier, StsRuntimeIdentityVerifier } from "./infrastructure/aws/sts-identity.js";
 import type { Database } from "./infrastructure/db/prisma.js";
 import { SystemDb, TenantDb } from "./infrastructure/db/tenant-db.js";
-import { OpenAIManifestGenerator, TemplateManifestGenerator } from "./infrastructure/llm/manifest-generator.js";
+import { RoutedManifestGenerator, TemplateManifestGenerator } from "./infrastructure/llm/manifest-generator.js";
 import { AgentsApiProvider } from "./infrastructure/openai/agents-api-provider.js";
 import { createSecretStore } from "./infrastructure/secrets/secret-store.js";
 import { createObjectStore } from "./infrastructure/storage/object-store.js";
@@ -58,7 +58,7 @@ export function buildDeps(env: Env, logger: Logger, database: Database, override
     generator:
       env.AGENTS_API_MODE === "fake"
         ? new TemplateManifestGenerator()
-        : new OpenAIManifestGenerator(env, db, secrets, logger),
+        : new RoutedManifestGenerator(env, db, secrets, logger),
     identity: createIdentityVerifier(env),
     runtimeIdentity:
       env.RUNTIME_IDENTITY_MODE === "dev" ? new DevRuntimeIdentityVerifier() : new StsRuntimeIdentityVerifier(env.RUNTIME_SERVER_ID),

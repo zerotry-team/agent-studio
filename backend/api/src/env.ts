@@ -59,6 +59,10 @@ const envSchema = z
     /** ローカル開発だけで使う共通キー（本番では組織ごとのキーのみ使う） */
     OPENAI_API_KEY: z.string().optional(),
 
+    // OpenAI互換のモデル呼び出しだけに使う。Agents APIには絶対に渡さない。
+    ORCAROUTER_API_KEY: z.string().optional(),
+    ORCAROUTER_BASE_URL: z.string().url().refine((url) => url.startsWith("https://"), "HTTPS URL が必要です").default("https://api.orcarouter.ai/v1"),
+
     // 日本語 → Agent Project Draft の生成（OpenAI Responses API）
     ANTHROPIC_API_KEY: z.string().optional(),
     MANIFEST_GENERATOR_MODEL: z.string().default("gpt-5.6"),

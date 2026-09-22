@@ -69,6 +69,7 @@ locals {
     DB_APP_PASSWORD           = local.secret_arn["db-app"]
     RUNTIME_TOKEN_SECRET      = local.secret_arn["runtime-token-secret"]
     ANTHROPIC_API_KEY         = local.secret_arn["anthropic-api-key"]
+    ORCAROUTER_API_KEY        = local.secret_arn["orcarouter-api-key"]
     QIITA_OAUTH_CLIENT_ID     = local.secret_arn["qiita-oauth-client-id"]
     QIITA_OAUTH_CLIENT_SECRET = local.secret_arn["qiita-oauth-client-secret"]
   }

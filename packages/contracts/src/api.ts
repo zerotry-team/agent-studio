@@ -82,6 +82,14 @@ export const setOpenAiCredentialsSchema = z
     app_api_key: z.string().min(20).max(500).optional(),
     /** 環境キー（Runtime に配布する。環境接続以外の権限を持たないこと） */
     environment_api_key: z.string().min(20).max(500).optional(),
+    /** Orca Router キー。OpenAI のキーとは別の Secret として保存する */
+    orcarouter_api_key: z.string().min(20).max(500).optional(),
+    /** Builder の自然言語からの構成生成だけを Orca Router へ切り替える */
+    orcarouter_text_enabled: z.boolean().optional(),
+    /** Studio の画像生成 function だけを Orca Router へ切り替える */
+    orcarouter_image_enabled: z.boolean().optional(),
+    orcarouter_text_model: z.string().trim().min(1).max(200).optional(),
+    orcarouter_image_model: z.string().trim().min(1).max(200).optional(),
   })
   .strict();
 export type SetOpenAiCredentialsInput = z.infer<typeof setOpenAiCredentialsSchema>;
@@ -90,6 +98,11 @@ export interface OpenAiSettingsDto {
   openai_project_id: string | null;
   has_app_api_key: boolean;
   has_environment_api_key: boolean;
+  has_orcarouter_api_key: boolean;
+  orcarouter_text_enabled: boolean;
+  orcarouter_image_enabled: boolean;
+  orcarouter_text_model: string;
+  orcarouter_image_model: string;
   updated_at: string | null;
 }
 

@@ -29,11 +29,12 @@ locals {
     "origin-verify",
     "cognito-client-secret",
     "anthropic-api-key",
+    "orcarouter-api-key",
     "qiita-oauth-client-id",
     "qiita-oauth-client-secret",
   ])
 
-  # Terraform が値を持つシークレット（anthropic-api-key 以外）
+  # Terraform が値を持つシークレット（外部モデル/OAuthキー以外）
   generated_secret_names = toset([
     "db-app",
     "runtime-token-secret",
@@ -73,6 +74,16 @@ resource "aws_secretsmanager_secret_version" "generated" {
 # それまでは "unset" が入っている（アプリは未設定として扱う）
 resource "aws_secretsmanager_secret_version" "anthropic_api_key" {
   secret_id     = aws_secretsmanager_secret.this["anthropic-api-key"].id
+  secret_string = "unset"
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
+# 共有 Orca Router キーは任意。組織ごとの管理画面設定がある場合はそちらを優先する。
+resource "aws_secretsmanager_secret_version" "orcarouter_api_key" {
+  secret_id     = aws_secretsmanager_secret.this["orcarouter-api-key"].id
   secret_string = "unset"
 
   lifecycle {

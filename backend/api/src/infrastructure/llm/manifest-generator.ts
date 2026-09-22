@@ -1,11 +1,13 @@
 import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
+import type { ChatCompletionMessageFunctionToolCall } from "openai/resources/chat/completions/completions";
 import { z } from "zod";
-import { AppError, preconditionFailed } from "../../domain/errors.js";
+import { AppError } from "../../domain/errors.js";
 import type { Env } from "../../env.js";
 import type { Logger } from "../../logger.js";
 import type { TenantDb } from "../db/tenant-db.js";
 import type { SecretStore } from "../secrets/secret-store.js";
+import { resolveModelRoute } from "./model-routing.js";
 
 const GENERATION_TIMEOUT_MS = 90_000;
 
@@ -101,8 +103,8 @@ export interface ManifestGenerator {
   }): Promise<GeneratedAgent>;
 }
 
-/** 組織ごとのOpenAI Project/API keyを使い、Responses APIの構造化出力でDraftを作る。 */
-export class OpenAIManifestGenerator implements ManifestGenerator {
+/** 組織設定に応じたOpenAI互換Responses APIでDraftを作る。OFFなら従来のOpenAI経路を維持する。 */
+export class RoutedManifestGenerator implements ManifestGenerator {
   constructor(
     private readonly env: Env,
     private readonly db: TenantDb,
@@ -119,17 +121,65 @@ export class OpenAIManifestGenerator implements ManifestGenerator {
     const settings = await this.db.org(input.organizationId, (tx) =>
       tx.organization_openai_settings.findUnique({ where: { organization_id: input.organizationId } }),
     );
-    let apiKey = settings?.app_key_secret_arn ? await this.secrets.get(settings.app_key_secret_arn) : null;
-    if (!apiKey && this.env.NODE_ENV !== "production") apiKey = this.env.OPENAI_API_KEY ?? null;
-    if (!apiKey) throw preconditionFailed("OpenAIの接続が未設定です。設定から接続してください");
-
-    const client = new OpenAI({ apiKey, project: settings?.openai_project_id ?? undefined, maxRetries: 2 });
+    const route = await resolveModelRoute({
+      capability: "text",
+      settings,
+      env: this.env,
+      secrets: this.secrets,
+      openAiModel: this.env.MANIFEST_GENERATOR_MODEL,
+    });
+    const client = new OpenAI({
+      apiKey: route.apiKey,
+      maxRetries: 2,
+      ...(route.baseURL ? { baseURL: route.baseURL } : {}),
+      ...(route.project ? { project: route.project } : {}),
+    });
+    const inputText = `# 利用可能な連携サービスと能力\n${JSON.stringify({ tools: input.tools, environments: input.profiles }, null, 2)}\n\n# 利用者の業務説明\n${input.description}`;
     try {
+      if (route.provider === "orcarouter") {
+        // Anthropicはresponse_formatを持たないため、全プロバイダーで変換されるfunction toolを構造化出力として使う。
+        const parameters = z.toJSONSchema(generatedAgentSchema);
+        delete parameters.$schema;
+        const response = await client.chat.completions.create(
+          {
+            model: route.model,
+            messages: [
+              { role: "system", content: SYSTEM_PROMPT },
+              { role: "user", content: inputText },
+            ],
+            tools: [{
+              type: "function",
+              function: {
+                name: "submit_agent_project_draft",
+                description: "検証可能なAgent Project Draftを返す",
+                parameters,
+              },
+            }],
+            tool_choice: { type: "function", function: { name: "submit_agent_project_draft" } },
+          },
+          { signal: AbortSignal.timeout(GENERATION_TIMEOUT_MS) },
+        );
+        const call = response.choices[0]?.message.tool_calls?.find(
+          (tool): tool is ChatCompletionMessageFunctionToolCall => tool.type === "function" && tool.function.name === "submit_agent_project_draft",
+        );
+        if (!call) throw new AppError("generation_failed", 502, "エージェントの構成を作れませんでした。もう一度お試しください");
+        let raw: unknown;
+        try {
+          raw = JSON.parse(call.function.arguments);
+        } catch {
+          throw new AppError("generation_failed", 502, "エージェントの構成を作れませんでした。もう一度お試しください");
+        }
+        const parsed = generatedAgentSchema.safeParse(raw);
+        if (!parsed.success) throw new AppError("generation_failed", 502, "エージェントの構成を作れませんでした。もう一度お試しください");
+        this.logger.info({ provider: route.provider, model: response.model, usage: response.usage }, "Agent Project Draftを生成しました");
+        return parsed.data;
+      }
+
       const response = await client.responses.parse(
         {
-          model: this.env.MANIFEST_GENERATOR_MODEL,
+          model: route.model,
           instructions: SYSTEM_PROMPT,
-          input: `# 利用可能な連携サービスと能力\n${JSON.stringify({ tools: input.tools, environments: input.profiles }, null, 2)}\n\n# 利用者の業務説明\n${input.description}`,
+          input: inputText,
           text: { format: zodTextFormat(generatedAgentSchema, "agent_project_draft") },
         },
         { signal: AbortSignal.timeout(GENERATION_TIMEOUT_MS) },
@@ -137,7 +187,7 @@ export class OpenAIManifestGenerator implements ManifestGenerator {
       if (!response.output_parsed) {
         throw new AppError("generation_failed", 502, "エージェントの構成を作れませんでした。もう一度お試しください");
       }
-      this.logger.info({ model: response.model, usage: response.usage }, "OpenAIでAgent Project Draftを生成しました");
+      this.logger.info({ provider: route.provider, model: response.model, usage: response.usage }, "Agent Project Draftを生成しました");
       return response.output_parsed;
     } catch (error) {
       if (error instanceof AppError) throw error;
@@ -148,7 +198,7 @@ export class OpenAIManifestGenerator implements ManifestGenerator {
         throw new AppError("generation_timeout", 503, "要件整理が時間内に完了しませんでした。自動再試行できます");
       }
       if (error instanceof OpenAI.APIError) {
-        this.logger.error({ status: error.status, message: error.message }, "Agent Project Draftの生成に失敗しました");
+        this.logger.error({ provider: route.provider, status: error.status, message: error.message }, "Agent Project Draftの生成に失敗しました");
         throw new AppError("generation_failed", 502, "エージェントの構成を作れませんでした。もう一度お試しください");
       }
       throw error;

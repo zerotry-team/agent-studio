@@ -23,6 +23,7 @@ import {
 import { conflict, forbidden, notFound, preconditionFailed } from "../domain/errors.js";
 import { recordAudit } from "../infrastructure/audit.js";
 import type { Tx } from "../infrastructure/db/tenant-db.js";
+import { configuredApiKey, DEFAULT_ORCAROUTER_IMAGE_MODEL, DEFAULT_ORCAROUTER_TEXT_MODEL } from "../infrastructure/llm/model-routing.js";
 import { secretNames } from "../infrastructure/secrets/secret-store.js";
 import { auditBy, requireRole, scopeOf, type MemberActor, type UserActor } from "./context.js";
 import type { Deps } from "./deps.js";
@@ -209,6 +210,11 @@ export class OrganizationService {
         openai_project_id: s?.openai_project_id ?? null,
         has_app_api_key: Boolean(s?.app_key_secret_arn),
         has_environment_api_key: Boolean(s?.env_key_secret_arn),
+        has_orcarouter_api_key: Boolean(s?.orcarouter_key_secret_arn) || Boolean(configuredApiKey(this.deps.env.ORCAROUTER_API_KEY)),
+        orcarouter_text_enabled: s?.orcarouter_text_enabled ?? false,
+        orcarouter_image_enabled: s?.orcarouter_image_enabled ?? false,
+        orcarouter_text_model: s?.orcarouter_text_model ?? DEFAULT_ORCAROUTER_TEXT_MODEL,
+        orcarouter_image_model: s?.orcarouter_image_model ?? DEFAULT_ORCAROUTER_IMAGE_MODEL,
         updated_at: s?.updated_at.toISOString() ?? null,
       };
     });
@@ -218,6 +224,14 @@ export class OrganizationService {
     requireRole(actor, "owner");
     const { env, secrets } = this.deps;
     const tags = { "agentstudio:organization_id": actor.organizationId };
+    const existing = await this.deps.db.run(scopeOf(actor), (tx) =>
+      tx.organization_openai_settings.findUnique({ where: { organization_id: actor.organizationId } }),
+    );
+    const routerWillBeEnabled = (input.orcarouter_text_enabled ?? existing?.orcarouter_text_enabled ?? false)
+      || (input.orcarouter_image_enabled ?? existing?.orcarouter_image_enabled ?? false);
+    if (routerWillBeEnabled && !input.orcarouter_api_key && !existing?.orcarouter_key_secret_arn && !configuredApiKey(env.ORCAROUTER_API_KEY)) {
+      throw preconditionFailed("Orca Routerを有効にするにはAPIキーを設定してください");
+    }
     // Secrets Manager への書き込みはトランザクションの外で行う
     const appKeyArn = input.app_api_key
       ? await secrets.put(secretNames.openAiAppKey(env.SECRETS_PREFIX, actor.organizationId), input.app_api_key, tags)
@@ -225,12 +239,20 @@ export class OrganizationService {
     const envKeyArn = input.environment_api_key
       ? await secrets.put(secretNames.openAiEnvKey(env.SECRETS_PREFIX, actor.organizationId), input.environment_api_key, tags)
       : undefined;
+    const orcaRouterKeyArn = input.orcarouter_api_key
+      ? await secrets.put(secretNames.orcaRouterApiKey(env.SECRETS_PREFIX, actor.organizationId), input.orcarouter_api_key, tags)
+      : undefined;
 
     const result = await this.deps.db.run(scopeOf(actor), async (tx) => {
       const data = {
         openai_project_id: input.openai_project_id,
         ...(appKeyArn ? { app_key_secret_arn: appKeyArn } : {}),
         ...(envKeyArn ? { env_key_secret_arn: envKeyArn } : {}),
+        ...(orcaRouterKeyArn ? { orcarouter_key_secret_arn: orcaRouterKeyArn } : {}),
+        ...(input.orcarouter_text_enabled !== undefined ? { orcarouter_text_enabled: input.orcarouter_text_enabled } : {}),
+        ...(input.orcarouter_image_enabled !== undefined ? { orcarouter_image_enabled: input.orcarouter_image_enabled } : {}),
+        ...(input.orcarouter_text_model !== undefined ? { orcarouter_text_model: input.orcarouter_text_model } : {}),
+        ...(input.orcarouter_image_model !== undefined ? { orcarouter_image_model: input.orcarouter_image_model } : {}),
       };
       const s = await tx.organization_openai_settings.upsert({
         where: { organization_id: actor.organizationId },
@@ -259,13 +281,25 @@ export class OrganizationService {
           action: "openai_settings.update",
           targetType: "organization",
           targetId: actor.organizationId,
-          detail: { openai_project_id: input.openai_project_id, app_key_updated: Boolean(appKeyArn), environment_key_updated: Boolean(envKeyArn) },
+          detail: {
+            openai_project_id: input.openai_project_id,
+            app_key_updated: Boolean(appKeyArn),
+            environment_key_updated: Boolean(envKeyArn),
+            orcarouter_key_updated: Boolean(orcaRouterKeyArn),
+            orcarouter_text_enabled: s.orcarouter_text_enabled,
+            orcarouter_image_enabled: s.orcarouter_image_enabled,
+          },
         }),
       );
       return {
         openai_project_id: s.openai_project_id,
         has_app_api_key: Boolean(s.app_key_secret_arn),
         has_environment_api_key: Boolean(s.env_key_secret_arn),
+        has_orcarouter_api_key: Boolean(s.orcarouter_key_secret_arn) || Boolean(configuredApiKey(env.ORCAROUTER_API_KEY)),
+        orcarouter_text_enabled: s.orcarouter_text_enabled,
+        orcarouter_image_enabled: s.orcarouter_image_enabled,
+        orcarouter_text_model: s.orcarouter_text_model,
+        orcarouter_image_model: s.orcarouter_image_model,
         updated_at: s.updated_at.toISOString(),
       };
     });

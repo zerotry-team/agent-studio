@@ -56,7 +56,7 @@ Dockerfile はすべてリポジトリのルートをビルドコンテキスト
 - S3: `as-<env>-artifacts-<account>`（実行の成果物）、`as-<env>-audit-<account>`（Object Lock・ガバナンスモード 365 日）
 - Cognito ユーザープール（メールでサインイン、MFA 任意）+ アプリクライアント（シークレットあり、認可コードフロー、コールバック `https://<公開ドメイン>/auth/callback`、サインアウト `https://<公開ドメイン>/`）+ Hosted UI ドメイン
 - KMS キー（Secrets Manager・S3・RDS・ログ用）
-- Secrets Manager: `as-<env>/db-app`（アプリ用 DB パスワード、Terraform の random_password）、`as-<env>/runtime-token-secret`（32 バイト以上）、`as-<env>/web-session-secret`、`as-<env>/anthropic-api-key`（値は運用者が設定）、`as-<env>/origin-verify`
+- Secrets Manager: `as-<env>/db-app`（アプリ用 DB パスワード、Terraform の random_password）、`as-<env>/runtime-token-secret`（32 バイト以上）、`as-<env>/web-session-secret`、`as-<env>/anthropic-api-key` / `as-<env>/orcarouter-api-key`（値は運用者が設定）、`as-<env>/origin-verify`
 - 組織ごとの OpenAI キーはアプリが実行時に `agent-studio/<env>/orgs/<organization_id>/openai-app-key` と `.../openai-env-key` に作る
 - SSM パラメータ `/as/<env>/deployed-image-tag`（CI/CD が書く）
 
@@ -97,6 +97,7 @@ Dockerfile はすべてリポジトリのルートをビルドコンテキスト
 | `AGENTS_API_MODE` | `openai`（ローカル・CI では `fake` も可） | 環境変数 |
 | `OPENAI_DEFAULT_MODEL` | 既定のモデル名 | 環境変数 |
 | `ANTHROPIC_API_KEY` | `as-<env>/anthropic-api-key` | シークレット |
+| `ORCAROUTER_API_KEY` | `as-<env>/orcarouter-api-key` | 任意の共有シークレット。組織ごとの管理画面設定を優先 |
 | `MANIFEST_GENERATOR_MODEL` | OpenAI Responses API のモデル ID | 環境変数 |
 | `LOG_LEVEL` | `info` | 環境変数 |
 
@@ -236,6 +237,6 @@ session-worker（Controller が RunTask の containerOverrides で渡す）:
 | WAF | `SizeRestrictions_BODY` は記録のみ | Manifest の保存で 8KB を超えるため |
 | long-poll | Runtime の long-poll は 25 秒まで | CloudFront のオリジン応答待ちが最大 60 秒のため |
 | DB の TLS | RDS は `rds.force_ssl=1`。アプリは RDS の CA（イメージに同梱）で検証する | |
-| 仮のシークレット | `anthropic-api-key`、`bootstrap-token`、`openai-environment-key` は値 `unset` で作る | ECS はシークレットの値が無いとタスクを起動できないため |
+| 仮のシークレット | `anthropic-api-key`、`orcarouter-api-key`、`bootstrap-token`、`openai-environment-key` は値 `unset` で作る | ECS はシークレットの値が無いとタスクを起動できないため |
 | config.yaml | `stages.<stage>.organization_id` と `stages.<stage>.runtime` で上書きできる | staging の Agent Studio は DB が別で、組織 ID も別になるため |
 | タグ | `agentstudio:runtime_id` は登録前は `unregistered`。`agentstudio:tenant` を追加 | |

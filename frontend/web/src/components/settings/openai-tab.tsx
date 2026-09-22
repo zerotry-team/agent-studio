@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardFooter, CardHeader } from "@/components/ui/card";
 import { Field } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
+import { Checkbox, Input } from "@/components/ui/input";
 import { CardSkeleton } from "@/components/ui/skeleton";
 import { useActionMutation } from "@/hooks/use-action-mutation";
 import { useActionQuery } from "@/hooks/use-action-query";
@@ -26,6 +26,8 @@ const DESCRIPTIONS = {
     "Agent Studio がエージェントや実行（セッション）を作成するときに使うキーです。Agent Studio の中だけに保管され、実行環境には渡しません。",
   environmentKey:
     "自社の AWS などの実行環境が OpenAI に接続するためだけに使うキーです。OpenAI のダッシュボードで、環境への接続以外の権限をすべて「なし」にして発行してください。",
+  orcaRouter:
+    "Builderの構成生成と画像生成だけをOrca Routerへ切り替えます。AgentのRun本体やOpenAIの環境・Sessionには影響しません。",
 } as const;
 
 function KeyStatusBadge({ configured }: { configured: boolean }) {
@@ -78,6 +80,11 @@ function OpenAiSettingsForm({
   const [projectId, setProjectId] = useState(settings.openai_project_id ?? "");
   const [appKey, setAppKey] = useState("");
   const [environmentKey, setEnvironmentKey] = useState("");
+  const [orcaRouterKey, setOrcaRouterKey] = useState("");
+  const [orcaRouterTextEnabled, setOrcaRouterTextEnabled] = useState(settings.orcarouter_text_enabled);
+  const [orcaRouterImageEnabled, setOrcaRouterImageEnabled] = useState(settings.orcarouter_image_enabled);
+  const [orcaRouterTextModel, setOrcaRouterTextModel] = useState(settings.orcarouter_text_model);
+  const [orcaRouterImageModel, setOrcaRouterImageModel] = useState(settings.orcarouter_image_model);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const mutation = useActionMutation(updateOpenAiSettingsAction, {
     successMessage: "OpenAI の設定を保存しました",
@@ -85,7 +92,12 @@ function OpenAiSettingsForm({
       // キーは書き込み専用。保存したら入力欄を空に戻す
       setAppKey("");
       setEnvironmentKey("");
+      setOrcaRouterKey("");
       setProjectId(next.openai_project_id ?? "");
+      setOrcaRouterTextEnabled(next.orcarouter_text_enabled);
+      setOrcaRouterImageEnabled(next.orcarouter_image_enabled);
+      setOrcaRouterTextModel(next.orcarouter_text_model);
+      setOrcaRouterImageModel(next.orcarouter_image_model);
       onSaved(next);
     },
   });
@@ -98,6 +110,11 @@ function OpenAiSettingsForm({
       openai_project_id: projectId.trim(),
       app_api_key: appKey.trim() || undefined,
       environment_api_key: environmentKey.trim() || undefined,
+      orcarouter_api_key: orcaRouterKey.trim() || undefined,
+      orcarouter_text_enabled: orcaRouterTextEnabled,
+      orcarouter_image_enabled: orcaRouterImageEnabled,
+      orcarouter_text_model: orcaRouterTextModel.trim(),
+      orcarouter_image_model: orcaRouterImageModel.trim(),
     };
     const parsed = setOpenAiCredentialsSchema.safeParse(input);
     if (!parsed.success) {
@@ -204,6 +221,77 @@ function OpenAiSettingsForm({
             </p>
           )}
         </SettingRow>
+
+        <SettingRow
+          title="Orca Router APIキー"
+          status={<KeyStatusBadge configured={settings.has_orcarouter_api_key} />}
+          description={DESCRIPTIONS.orcaRouter}
+        >
+          {canEdit ? (
+            <Field
+              label={settings.has_orcarouter_api_key ? "新しいAPIキー" : "APIキー"}
+              hint={settings.has_orcarouter_api_key ? "空欄のままなら、今のキーを使い続けます。保存したキーは表示されません。" : "sk-orca-... のキーを設定します。保存後は表示されません。"}
+              error={error("orcarouter_api_key")}
+            >
+              <Input
+                type="password"
+                autoComplete="new-password"
+                value={orcaRouterKey}
+                onChange={(e) => setOrcaRouterKey(e.target.value)}
+                placeholder={keyPlaceholder(settings.has_orcarouter_api_key)}
+                spellCheck={false}
+                className="font-mono"
+              />
+            </Field>
+          ) : (
+            <p className="text-sm text-gray-700">{settings.has_orcarouter_api_key ? "登録されています（値は表示できません）" : "登録されていません"}</p>
+          )}
+        </SettingRow>
+
+        <SettingRow
+          title="Orca Routerを使う処理"
+          description="チェックしている処理だけを切り替えます。チェックを外して保存すれば、従来のOpenAI経路へ戻ります。"
+        >
+          {canEdit ? (
+            <div className="space-y-4">
+              <Checkbox
+                label="Builderのテキスト生成で使用"
+                description="自然言語からAgent構成を生成する処理だけを切り替えます。"
+                checked={orcaRouterTextEnabled}
+                onChange={(event) => setOrcaRouterTextEnabled(event.target.checked)}
+              />
+              <Field label="テキストモデル" error={error("orcarouter_text_model")}>
+                <Input
+                  value={orcaRouterTextModel}
+                  onChange={(event) => setOrcaRouterTextModel(event.target.value)}
+                  disabled={!orcaRouterTextEnabled}
+                  placeholder="google/gemini-2.5-pro"
+                  className="font-mono"
+                />
+              </Field>
+              <Checkbox
+                label="画像生成で使用"
+                description="画像Artifact生成とSocial Router向け画像生成だけを切り替えます。"
+                checked={orcaRouterImageEnabled}
+                onChange={(event) => setOrcaRouterImageEnabled(event.target.checked)}
+              />
+              <Field label="画像モデル" error={error("orcarouter_image_model")}>
+                <Input
+                  value={orcaRouterImageModel}
+                  onChange={(event) => setOrcaRouterImageModel(event.target.value)}
+                  disabled={!orcaRouterImageEnabled}
+                  placeholder="openai/gpt-image-1"
+                  className="font-mono"
+                />
+              </Field>
+            </div>
+          ) : (
+            <div className="space-y-1 text-sm text-gray-700">
+              <p>Builderテキスト生成: {settings.orcarouter_text_enabled ? `有効（${settings.orcarouter_text_model}）` : "無効（OpenAIを使用）"}</p>
+              <p>画像生成: {settings.orcarouter_image_enabled ? `有効（${settings.orcarouter_image_model}）` : "無効（OpenAIを使用）"}</p>
+            </div>
+          )}
+        </SettingRow>
       </div>
     </CardBody>
   );
@@ -215,8 +303,8 @@ function OpenAiSettingsForm({
   return (
     <Card>
       <CardHeader
-        title="OpenAI との連携"
-        description="エージェントの実行に使う、御社専用の OpenAI の Project とキーです。キーの値は保存したあと表示されません。"
+        title="OpenAI とモデルルーター"
+        description="OpenAIの実行設定を維持したまま、対応する生成処理だけをOrca Routerへ切り替えられます。キーの値は保存後に表示されません。"
       />
       {canEdit ? (
         <form

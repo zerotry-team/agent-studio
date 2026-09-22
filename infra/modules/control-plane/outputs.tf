@@ -104,3 +104,8 @@ output "anthropic_api_key_secret_name" {
   description = "運用者が Anthropic の API キーを設定するシークレット"
   value       = aws_secretsmanager_secret.this["anthropic-api-key"].name
 }
+
+output "orcarouter_api_key_secret_name" {
+  description = "運用者が共有 Orca Router API キーを設定するシークレット"
+  value       = aws_secretsmanager_secret.this["orcarouter-api-key"].name
+}

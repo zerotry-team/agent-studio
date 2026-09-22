@@ -119,6 +119,7 @@ export function createSecretStore(env: Env): SecretStore {
 export const secretNames = {
   openAiAppKey: (prefix: string, organizationId: string) => `${prefix}/orgs/${organizationId}/openai-app-key`,
   openAiEnvKey: (prefix: string, organizationId: string) => `${prefix}/orgs/${organizationId}/openai-env-key`,
+  orcaRouterApiKey: (prefix: string, organizationId: string) => `${prefix}/orgs/${organizationId}/orcarouter-api-key`,
   connection: (prefix: string, organizationId: string, connectionId: string) =>
     `${prefix}/orgs/${organizationId}/connections/${connectionId}`,
   connectorOAuthApp: (prefix: string, organizationId: string, connectorId: string) =>
