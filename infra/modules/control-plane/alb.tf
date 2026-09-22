@@ -11,8 +11,9 @@ locals {
 
   # CloudFront でも同じパスを api に振り分ける
   api_path_patterns = ["/api/*", "/runtime/*", "/health", "/health/*"]
-  # GitHub App などからの webhook（認証は署名で行う）。ALB のルールは条件の値が 5 つまでなので別ルールにする
-  webhook_path_patterns = ["/webhooks/*"]
+  # GitHub App などからの webhook と、デプロイした Agent を外部から呼ぶ API（認証は署名・API Key で行う）。
+  # ALB のルールは条件の値が 5 つまでなので別ルールにする
+  webhook_path_patterns = ["/webhooks/*", "/triggers/*"]
 }
 
 resource "aws_lb" "this" {
