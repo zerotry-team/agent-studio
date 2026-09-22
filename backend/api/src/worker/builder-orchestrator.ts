@@ -1278,9 +1278,6 @@ export class BuilderOrchestrator {
         where: { project_id: projectId, status: "registered", health_status: "ready" },
         select: { id: true },
       });
-      // package登録後はCode Workspaceをもう一度準備しない。通常の生成経路で
-      // descriptor由来のToolをBuildへ固定し、Preview実行まで続行する。
-      if (registeredPackage) return false;
       const latest = await tx.capability_plans.findFirst({ where: { project_id: projectId }, orderBy: { version: "desc" } });
       if (!latest) return false;
       const previousRequirements = Array.isArray(latest.requirements)
@@ -1296,13 +1293,22 @@ export class BuilderOrchestrator {
         where: { project_id: projectId, kind: "code_workspace", status: { in: ["planned", "applied"] } },
         select: { id: true, status: true, artifacts: true },
       });
-      const plannedCodeTopics = new Set(workspaceChanges.flatMap((change) => artifactList(change.artifacts)).flatMap((artifact) =>
+      // PR作成済み・merge済みのTopicは作り終えているので、もう一度実装先を聞かない
+      const builtChanges = await tx.builder_change_sets.findMany({
+        where: { project_id: projectId, kind: "code_workspace", status: { in: ["pr_open", "merged"] } },
+        select: { artifacts: true },
+      });
+      const plannedCodeTopics = new Set([...workspaceChanges, ...builtChanges].flatMap((change) => artifactList(change.artifacts)).flatMap((artifact) =>
         artifact.type === "capability_topic" && typeof artifact.id === "string" ? [artifact.id] : [],
       ));
       const questions = [
         ...codeWorkspaceQuestionsFor(answered, requirements, plannedCodeTopics),
         ...organizationCodeWorkspaceQuestionsFor(projectRequest, answered, requirements, plannedCodeTopics),
       ];
+      // package登録後、準備・実行すべきCode Workspaceが残っていなければ、通常の生成経路で
+      // descriptor由来のToolをBuildへ固定し、Preview実行まで続行する。
+      // 残っていれば（社内Toolが複数必要なAgent）、次のCode Workspaceを続けて進める。
+      if (registeredPackage && questions.length === 0 && !workspaceChanges.some((change) => change.status === "planned")) return false;
       const codeTopics = new Set([...plannedCodeTopics, ...questions.map((question) => question.sourceTopic)]);
       for (const item of answered) {
         if (answerTopic(item) !== "compliance_source") continue;
