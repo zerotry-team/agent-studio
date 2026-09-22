@@ -17,7 +17,8 @@ export interface IdentityVerifier {
 export class CognitoIdentityVerifier implements IdentityVerifier {
   private readonly verifier;
 
-  constructor(userPoolId: string, clientId: string) {
+  /** Web と CLI で別の app client を使うため、aud はその両方を受け付ける */
+  constructor(userPoolId: string, clientId: string | string[]) {
     this.verifier = CognitoJwtVerifier.create({ userPoolId, clientId, tokenUse: "id" });
   }
 
@@ -50,5 +51,6 @@ export class DevIdentityVerifier implements IdentityVerifier {
 
 export function createIdentityVerifier(env: Env): IdentityVerifier {
   if (env.AUTH_MODE === "dev") return new DevIdentityVerifier();
-  return new CognitoIdentityVerifier(env.COGNITO_USER_POOL_ID!, env.COGNITO_CLIENT_ID!);
+  const clientIds = [env.COGNITO_CLIENT_ID!, ...(env.COGNITO_CLI_CLIENT_ID ? [env.COGNITO_CLI_CLIENT_ID] : [])];
+  return new CognitoIdentityVerifier(env.COGNITO_USER_POOL_ID!, clientIds.length === 1 ? clientIds[0]! : clientIds);
 }

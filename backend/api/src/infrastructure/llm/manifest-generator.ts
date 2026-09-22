@@ -9,7 +9,8 @@ import type { TenantDb } from "../db/tenant-db.js";
 import type { SecretStore } from "../secrets/secret-store.js";
 import { resolveModelRoute } from "./model-routing.js";
 
-const GENERATION_TIMEOUT_MS = 90_000;
+/** Worker の Builder Run lease（120秒）より短くする。推論モデルは 90 秒を超えることがある */
+const GENERATION_TIMEOUT_MS = 110_000;
 
 export interface GeneratorToolInfo {
   name: string;
@@ -194,7 +195,7 @@ export class RoutedManifestGenerator implements ManifestGenerator {
       if (error instanceof OpenAI.RateLimitError) {
         throw new AppError("generation_rate_limited", 429, "混み合っています。しばらくしてからお試しください");
       }
-      if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError" || error.name === "APIUserAbortError")) {
+      if (error instanceof OpenAI.APIUserAbortError || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError" || error.name === "APIUserAbortError"))) {
         throw new AppError("generation_timeout", 503, "要件整理が時間内に完了しませんでした。自動再試行できます");
       }
       if (error instanceof OpenAI.APIError) {
@@ -219,7 +220,7 @@ export class TemplateManifestGenerator implements ManifestGenerator {
       list_accounts: ["アカウント", "account"],
       list_posts: ["過去投稿", "投稿を分析", "posts"],
       get_post: ["投稿詳細", "投稿内容", "post"],
-      publish_post: ["投稿する", "公開", "publish"],
+      publish_post: ["投稿する", "公開投稿", "sns", "publish"],
       generate_image: ["画像", "挿絵", "イラスト", "サムネイル", "image"],
       publish_qiita_article: ["qiita", "記事を投稿", "技術記事を公開", "qiitaに投稿"],
       publish_zenn_article: ["zenn", "記事を投稿", "技術記事を公開", "zennに投稿"],

@@ -11,6 +11,7 @@
 
 | メソッド | パス | リクエスト | レスポンス | 権限 |
 |---|---|---|---|---|
+| GET | `/auth/config` | — | `{ mode, cognito: { domain, cli_client_id } \| null }`（CLI のログイン方法。秘密は含まない） | 認証不要 |
 | GET | `/me` | — | `MeDto` | ログインのみ（組織ヘッダ不要） |
 | POST | `/admin/organizations` | `createOrganizationSchema` | `OrganizationDto` | 運営管理者（組織ヘッダ不要） |
 | GET | `/organization` | — | `OrganizationDto` | viewer |
@@ -39,6 +40,13 @@
 | POST | `/builder-projects/:id/self-hosted/plan` | `createRuntimeSchema` | `BuilderProjectDto` | admin |
 | POST | `/builder-projects/:id/production/approve` | — | `BuilderProjectDto` | admin |
 | POST | `/builder-human-actions/:id/complete` | — | `BuilderProjectDto` | Human Actionの`assignee_role`以上 |
+| GET | `/connectors/catalog` | — | `ProviderCatalogEntryDto[]`（有名サービスのカタログと登録状況） | viewer |
+| POST | `/connectors/catalog/:key/ensure` | — | `ConnectorDto`（登録済みなら再利用して200、新規は201） | builder |
+| GET | `/connectors/:id/oauth-app` | — | `ConnectorOAuthAppDto`（Client Secretは有無だけ） | viewer |
+| PUT | `/connectors/:id/oauth-app` | `setConnectorOAuthAppSchema` | `ConnectorOAuthAppDto` | owner |
+| POST | `/connectors/:id/oauth/start` | `connectorOAuthStartSchema` | `ConnectorOAuthStartDto`（認可URL。stateとPKCEはフロントの封印cookieが保持） | builder |
+| POST | `/connectors/:id/oauth/exchange` | `connectorOAuthExchangeSchema` | `ConnectionDto`（tokenはSecret Storeへ。成功時にBuilderの接続待ちActionを自動完了） | builder |
+| POST | `/connectors/:id/qiita-oauth/exchange` | `exchangeQiitaOAuthSchema` | `ConnectionDto`（旧経路。`/oauth/exchange`の別名） | builder |
 | GET | `/tools` | — | `ToolDto[]` | viewer |
 | POST | `/tools` | `createToolInputSchema` | `ToolDto` | builder |
 | GET | `/tools/:id` | — | `ToolDto`（`versions` 付き） | viewer |

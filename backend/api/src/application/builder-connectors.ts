@@ -11,6 +11,10 @@ import type {
 import type { Prisma } from "@prisma/client";
 import { parse } from "yaml";
 import { conflict, notFound } from "../domain/errors.js";
+import { canonicalJson } from "@agent-studio/contracts";
+import { createHash } from "node:crypto";
+import type { ProviderCatalogEntry } from "../domain/provider-catalog.js";
+import { createConnectionHumanAction } from "./builder-human-actions.js";
 import { inspectOpenApi } from "../domain/openapi-connector.js";
 import { inspectMcpDiscovery } from "../domain/mcp-connector.js";
 import { recordAudit } from "../infrastructure/audit.js";
@@ -87,6 +91,58 @@ export class BuilderConnectorService {
     await this.recordMcpGeneration(actor, projectId, proposal, connector);
     if (!proposal.authentication.requires_human_action && options.resume !== false) await this.projects.resume(actor, projectId);
     return { project: await this.projects.get(actor, projectId), connector };
+  }
+
+  /**
+   * Provider Catalog から Connector を用意し、Builder の証跡（discovery source / change set）を冪等に残す。
+   * Human Action はここでは作らない（Orchestrator が能力解決の結果に応じて作る）。
+   */
+  async ensureCatalogConnector(
+    actor: MemberActor,
+    projectId: string,
+    entry: ProviderCatalogEntry,
+    requirementTexts: string[],
+  ): Promise<{ connector: ConnectorDto; created: boolean; added_operations: string[] }> {
+    const result = await this.tools.ensureCatalogConnector(actor, entry, requirementTexts);
+    const sourceHash = createHash("sha256").update(canonicalJson({ key: entry.key, version: entry.version, operations: result.connector.tools.map((tool) => tool.name).sort() })).digest("hex");
+    await this.deps.db.run(scopeOf(actor), async (tx) => {
+      // exactBuilderDraft が「利用者が明示した契約」として扱う declarative_connector とは分け、
+      // カタログ由来は LLM の能力解決に任せる（必要な操作だけを選ぶ）
+      const recorded = await tx.builder_change_sets.findFirst({ where: { project_id: projectId, kind: "catalog_connector", source_hash: sourceHash }, select: { id: true } });
+      if (recorded) return;
+      await tx.builder_discovery_sources.create({ data: {
+        organization_id: actor.organizationId,
+        project_id: projectId,
+        kind: "catalog",
+        title: entry.name,
+        spec_version: String(entry.version),
+        source_url: entry.base_url ?? null,
+        content_hash: sourceHash,
+        metadata: { provider_key: entry.key, reused: !result.created, added_operations: result.added_operations, auth_kind: entry.auth.kind } as Prisma.InputJsonValue,
+      } });
+      await tx.builder_change_sets.create({ data: {
+        organization_id: actor.organizationId,
+        project_id: projectId,
+        kind: "catalog_connector",
+        status: "applied",
+        summary: result.created
+          ? `${entry.name} を連携サービスとして自動登録（${result.added_operations.length}件の操作）`
+          : `登録済みの ${entry.name} を再利用${result.added_operations.length ? `（${result.added_operations.length}件の操作を追加）` : ""}`,
+        risk: highestRisk(result.connector.tools.map((tool) => tool.risk)),
+        artifacts: [
+          { type: "connector", id: result.connector.id, name: result.connector.name },
+          ...result.connector.tools.map((tool) => ({ type: "tool", id: tool.id, name: tool.name, version: tool.latest_version })),
+        ] as Prisma.InputJsonValue,
+        source_hash: sourceHash,
+      } });
+      await recordAudit(tx, auditBy(actor, {
+        action: "builder.catalog.apply",
+        targetType: "builder_project",
+        targetId: projectId,
+        detail: { provider_key: entry.key, connector_id: result.connector.id, created: result.created, added_operations: result.added_operations },
+      }));
+    });
+    return result;
   }
 
   /** Human Actionで指定された公開HTTPSの仕様を、Control Planeへ永続化せずに取得する。 */
@@ -270,17 +326,8 @@ export class BuilderConnectorService {
         },
       ] });
       if (proposal.authentication.requires_human_action) {
-        await tx.human_actions.create({ data: {
-          organization_id: actor.organizationId,
-          project_id: projectId,
-          type: "enter_secret",
-          title: `${connector.name}のBearer接続を設定`,
-          reason: `${connector.name}のMCP操作をPreviewで検証するために認証が必要です`,
-          assignee_role: "admin",
-          fields: [],
-          instructions: ["接続済みアカウント画面を開きます", "このMCP連携用のPreview接続を作成します", "Tokenは専用入力欄から保存し、接続テストを実行します"],
-          resume_condition: { type: "connection_status", connector_id: connector.id, stage: "staging", status: "connected" },
-        } });
+        const stored = await tx.connectors.findUniqueOrThrow({ where: { id: connector.id } });
+        await createConnectionHumanAction(tx, { organizationId: actor.organizationId, projectId, env: this.deps.env, tools: this.tools }, stored);
         await tx.builder_projects.update({ where: { id: projectId }, data: { status: "waiting_human_action" } });
       } else {
         await tx.builder_projects.update({ where: { id: projectId }, data: { status: "implementing" } });
@@ -385,29 +432,15 @@ export class BuilderConnectorService {
       });
 
       if (proposal.authentication.requires_human_action) {
-        const oauth = proposal.authentication.kind === "oauth2";
-        await tx.human_actions.create({
-          data: {
-            organization_id: actor.organizationId,
-            project_id: projectId,
-            type: oauth ? "provider_app_registration" : "enter_secret",
-            title: oauth ? `${connector.name}のOAuth接続を準備` : `${connector.name}の接続情報を設定`,
-            reason: `${connector.name}のAPIをPreviewで検証するために認証が必要です`,
-            assignee_role: "admin",
-            fields: [],
-            instructions: oauth
-              ? ["Providerの管理画面でOAuth Appを登録します", "Callback URLと必要Scopeを確認します", "連携サービス画面からOAuth接続を完了します"]
-              : ["接続済みアカウント画面を開きます", "この連携サービス用のPreview接続を作成します", "Secretは専用入力欄から保存し、接続テストを実行します"],
-            resume_condition: {
-              type: "connection_status",
-              connector_id: connector.id,
-              stage: "staging",
-              status: "connected",
-              ...(proposal.authentication.header_name ? { header_name: proposal.authentication.header_name } : {}),
-              ...(proposal.authentication.scopes.length > 0 ? { scopes: proposal.authentication.scopes } : {}),
-            },
-          },
-        });
+        const stored = await tx.connectors.findUniqueOrThrow({ where: { id: connector.id } });
+        await createConnectionHumanAction(tx, {
+          organizationId: actor.organizationId,
+          projectId,
+          env: this.deps.env,
+          tools: this.tools,
+          headerName: proposal.authentication.header_name,
+          scopes: proposal.authentication.scopes,
+        }, stored);
         await tx.builder_projects.update({ where: { id: projectId }, data: { status: "waiting_human_action" } });
       } else {
         await tx.builder_projects.update({ where: { id: projectId }, data: { status: "implementing" } });

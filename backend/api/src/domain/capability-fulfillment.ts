@@ -4,7 +4,10 @@ import type {
   CapabilityResolutionDto,
 } from "@agent-studio/contracts";
 
-const SHARED_PROVIDER_PATTERN = /(?:kintone|salesforce|slack|notion|github|jira|confluence|google(?:\s+workspace| drive| sheets| calendar)?|microsoft(?:\s+365| teams| outlook)?|supabase|stripe|shopify|zendesk|hubspot|freee|moneyforward|マネーフォワード|スマレジ)/i;
+import { providerMatchPattern } from "./provider-catalog.js";
+
+/** 外部SaaSの名前。Provider Catalogを唯一の真実にする */
+const SHARED_PROVIDER_PATTERN = providerMatchPattern();
 const ORGANIZATION_PRIVATE_PATTERN = /(?:自社|社内|社用|社内専用|独自|private|internal|intranet|オンプレ|閉域|vpn|vpc|社内サーバー|ファイルサーバー|自社(?:db|データベース)|社内(?:db|データベース)|基幹システム)/i;
 const EXTERNAL_ACTION_PATTERN = /(?:(?:sns|x|twitter|slack|メール|外部サービス|外部システム|crm|saas).*(?:投稿|送信|登録|更新|削除|予約|購入|決済)|(?:投稿|送信|登録|更新|削除|予約|購入|決済).*(?:sns|x|twitter|slack|メール|外部サービス|外部システム|crm|saas))/i;
 

@@ -11,6 +11,7 @@ import type {
   CreatedDeploymentWebhookDto,
   DeploymentDto,
   Policy,
+  ProviderCatalogEntryDto,
   Stage,
   ToolDto,
 } from "@agent-studio/contracts";
@@ -27,8 +28,11 @@ import {
   setBrowserAccessAction,
   updateAgentSettingsAction,
 } from "@/actions/agents";
-import { listConnectionsAction } from "@/actions/connections";
-import { listConnectorsAction, setConnectorOAuthAppAction } from "@/actions/connectors";
+import { createConnectionAction, listConnectionsAction, validateConnectionAction } from "@/actions/connections";
+import { listConnectorsAction, listProviderCatalogAction } from "@/actions/connectors";
+import { ConnectorOAuthAppSetup } from "@/components/builder-projects/connection-action";
+import { EnvironmentPlanCard } from "@/components/builder-projects/environment-plan-card";
+import { SetConnectionSecretDialog } from "@/components/connections/set-connection-secret-dialog";
 import {
   createDeploymentApiKeyAction,
   createDeploymentWebhookAction,
@@ -160,6 +164,13 @@ function Overview({ project, connectionError, onChanged, onGoTo }: { project: Ag
   });
   const connections = useActionQuery(() => listConnectionsAction(), [organization?.id]);
   const connectors = useActionQuery(() => listConnectorsAction(), [organization?.id]);
+  const catalog = useActionQuery(() => listProviderCatalogAction(), [organization?.id]);
+  const catalogFor = (connector: ConnectorDto | undefined): ProviderCatalogEntryDto | undefined =>
+    connector ? (catalog.data ?? []).find((entry) => entry.key === (connector.provider_key ?? connector.key)) : undefined;
+  const environmentPlan = project.build_jobs[0]?.latest_plan?.environment_plan ?? null;
+  // Builder が Preview を自動で作るので、手動ボタンは Preview が無いときだけの予備
+  const hasPreview = project.deployments.some((deployment) => deployment.stage === "staging" && deployment.status === "active");
+  const managedByBuilder = project.build_jobs.length > 0;
   const resolution = project.agent.capability_resolution;
   // 操作の識別子だけでは何をするか分からないので、連携サービスの定義から表示名と影響を引く
   const operations = new Map((connectors.data ?? []).flatMap((connector) => connector.tools.map((tool) => [tool.name, tool] as const)));
@@ -188,10 +199,10 @@ function Overview({ project, connectionError, onChanged, onGoTo }: { project: Ag
       <Card>
         <CardHeader title="Agent Builder" description="必要な能力と接続を解決し、実行できるPreviewまで準備します。" />
         <CardBody className="space-y-3">
-          {connectionError === "qiita_oauth_not_configured" ? (
-            <Alert tone="warning">Qiitaを初めて使うため、運営者による1回限りの準備が必要です。下の案内から設定すると、自動で認証へ進みます。</Alert>
+          {connectionError === "oauth_not_configured" || connectionError === "qiita_oauth_not_configured" ? (
+            <Alert tone="warning">このサービスを初めて使うため、運営者による1回限りの準備が必要です。下の案内から設定すると、自動で接続へ進みます。</Alert>
           ) : connectionError ? (
-            <Alert tone="danger">Qiitaとの接続を完了できませんでした。もう一度認証してください。</Alert>
+            <Alert tone="danger">サービスとの接続を完了できませんでした。もう一度お試しください。</Alert>
           ) : null}
           {resolution.requirements.map((requirement, index) => (
             <RequirementRow
@@ -208,16 +219,17 @@ function Overview({ project, connectionError, onChanged, onGoTo }: { project: Ag
             <ConnectorSetup
               key={connectorId}
               agentId={project.agent.id}
+              connector={(connectors.data ?? []).find((c) => c.id === connectorId)}
               connectorId={connectorId}
               connectorName={group.connectorName}
-              connectorKey={group.connectorKey}
-              oauthSetupRequired={connectionError === "qiita_oauth_not_configured" && group.connectorKey === "qiita"}
+              catalogEntry={catalogFor((connectors.data ?? []).find((c) => c.id === connectorId))}
+              oauthSetupRequired={connectionError === "oauth_not_configured" || connectionError === "qiita_oauth_not_configured"}
               canConfigureOAuthApp={can("organization.edit")}
+              canManageConnection={can("connection.manage")}
               connected={group.requirements.every((requirement) => requirement.state === "resolved")}
+              linked={project.connection_links.some((link) => link.stage === "staging" && link.connector.id === connectorId)}
               capabilities={[...new Set(group.requirements.flatMap((requirement) => requirement.tool_names))]}
-              connections={(connections.data ?? []).filter(
-                (connection) => connection.connector_id === connectorId && connection.has_secret,
-              )}
+              connections={(connections.data ?? []).filter((connection) => connection.connector_id === connectorId)}
               onChanged={async () => {
                 await connections.reload();
                 await onChanged();
@@ -229,6 +241,7 @@ function Overview({ project, connectionError, onChanged, onGoTo }: { project: Ag
               agentId={project.agent.id}
               access={project.agent.browser_access}
               domains={project.agent.browser_allowed_domains}
+              managed={managedByBuilder}
               onChanged={onChanged}
             />
           ) : null}
@@ -236,7 +249,7 @@ function Overview({ project, connectionError, onChanged, onGoTo }: { project: Ag
 
           {createPreview.error ? <Alert tone="danger">{createPreview.error.message}</Alert> : null}
           <div className="flex flex-wrap gap-2 pt-2">
-            {resolution.ready && (!usesBrowser || browserReady) ? (
+            {hasPreview ? null : resolution.ready && (!usesBrowser || browserReady) ? (
               <Button onClick={() => void createPreview.mutate(project.agent.id)} loading={createPreview.pending} icon={<CloudUpload className="h-4 w-4" />}>Previewを作成</Button>
             ) : (
               // 割り当てはこの画面で済ませられるので、詳細を見たい人だけ Settings へ
@@ -246,6 +259,7 @@ function Overview({ project, connectionError, onChanged, onGoTo }: { project: Ag
         </CardBody>
       </Card>
       <div className="space-y-6">
+      {environmentPlan ? <EnvironmentPlanCard plan={environmentPlan} /> : null}
       {project.agent.project_brief ? (
         <Card>
           <CardHeader title="この Agent の元になった説明" description="入力した文章と、AIがそれをどう読み取ったかを並べています。" />
@@ -363,16 +377,20 @@ function BrowserAccessSetup({
   agentId,
   access,
   domains,
+  managed = false,
   onChanged,
 }: {
   agentId: string;
   access: BrowserAccess;
   domains: string[];
+  /** Builder が依頼内容から範囲を決めた Agent。通常は変更不要なので読み取り専用で見せる */
+  managed?: boolean;
   onChanged: () => Promise<void>;
 }) {
   const configured = isBrowserAccessConfigured(access, domains);
   const [choice, setChoice] = useState<BrowserAccess>(access);
   const [text, setText] = useState(domains.join("\n"));
+  const [editing, setEditing] = useState(false);
   const save = useActionMutation(setBrowserAccessAction, { successMessage: "接続範囲を保存し、稼働中の環境に反映しました", onSuccess: onChanged });
 
   const submit = () =>
@@ -380,6 +398,23 @@ function BrowserAccessSetup({
       access: choice,
       allowed_domains: choice === "public" ? [] : text.split("\n").map((line) => line.trim()).filter(Boolean),
     });
+
+  if (managed && configured && !editing) {
+    return (
+      <div className="rounded-lg border border-gray-100 px-3 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-medium text-gray-900">ブラウザで接続できる範囲</p>
+            <p className="mt-0.5 text-xs text-gray-600">{access === "public" ? "公開Webサイト全般" : `指定したサイトだけ: ${domains.join("、")}`}（Builderが依頼内容から決めました）</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge tone="success">自動設定</Badge>
+            <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>変更する</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={cn("rounded-lg border px-3 py-3", configured ? "border-gray-100" : "border-amber-200 bg-amber-50/60")}>
@@ -431,149 +466,139 @@ function BrowserAccessSetup({
 /** 連携サービス1つぶんの接続。上で「使う」にした作業だけを許可して、PreviewとProductionへまとめて設定する */
 function ConnectorSetup({
   agentId,
+  connector,
   connectorId,
   connectorName,
-  connectorKey,
+  catalogEntry,
   oauthSetupRequired,
   canConfigureOAuthApp,
+  canManageConnection,
   connected,
+  linked,
   capabilities,
   connections,
   onChanged,
 }: {
   agentId: string;
+  connector: ConnectorDto | undefined;
   connectorId: string;
   connectorName: string;
-  connectorKey: string | null;
+  catalogEntry: ProviderCatalogEntryDto | undefined;
   oauthSetupRequired: boolean;
   canConfigureOAuthApp: boolean;
+  canManageConnection: boolean;
   connected: boolean;
+  linked: boolean;
   capabilities: string[];
   connections: ConnectionDto[];
   onChanged: () => Promise<void>;
 }) {
+  const [secretTarget, setSecretTarget] = useState<ConnectionDto | null>(null);
   const [selected, setSelected] = useState("");
+  const prepare = useActionMutation(createConnectionAction);
+  const validate = useActionMutation(validateConnectionAction, { successMessage: `${connectorName}に接続しました`, onSuccess: onChanged });
   const link = useActionMutation(linkAgentConnectionAction, { successMessage: `${connectorName}を設定しました`, onSuccess: onChanged });
-  const connectionId = connections.length === 1 ? connections[0]!.id : selected;
+  const usable = connections.filter((connection) => connection.has_secret && connection.status === "connected");
+  const isOAuth = catalogEntry?.auth_kind === "oauth2";
+  const startUrl = `/integrations/oauth/start?connector=${encodeURIComponent(connectorId)}&agent=${encodeURIComponent(agentId)}`;
 
-  const apply = async () => {
-    if (!connectionId) return;
-    for (const stage of ["staging", "production"] as Stage[]) {
-      await link.mutate(agentId, { stage, connector_id: connectorId, connection_id: connectionId, allowed_capabilities: capabilities });
+  /** OAuth なら同意画面へ。API キーなら Connection 枠を用意してその場で入力する */
+  const connect = async () => {
+    if (isOAuth) {
+      window.location.assign(startUrl);
+      return;
     }
+    const existing = connections.find((connection) => connection.status !== "revoked");
+    if (existing) {
+      setSecretTarget(existing);
+      return;
+    }
+    const created = await prepare.mutate({
+      name: `${connectorName}（Preview用）`,
+      connector_id: connectorId,
+      scope: connector?.adapter === "mcp" ? "openai_vault" : "studio",
+      header_name: connector?.adapter === "mcp" ? undefined : "Authorization",
+    });
+    if (created.ok) setSecretTarget(created.data);
   };
 
-  if (connections.length === 0) {
-    if (connectorKey === "qiita" && oauthSetupRequired) {
+  if (usable.length === 0) {
+    if (isOAuth && oauthSetupRequired) {
       return (
-        <QiitaOAuthAppSetup
-          agentId={agentId}
+        <ConnectorOAuthAppSetup
           connectorId={connectorId}
+          connectorName={connectorName}
+          consoleUrl={catalogEntry?.oauth_console_url ?? undefined}
           canConfigure={canConfigureOAuthApp}
+          onConfigured={() => undefined}
+          startUrl={startUrl}
         />
       );
     }
     return (
       <div className="rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-3">
         <p className="text-sm font-medium text-gray-900">{connectorName}に接続してください</p>
-        <p className="mt-0.5 text-xs text-gray-600">{connectorName}の認証情報がまだ登録されていません。</p>
-        <ButtonLink
-          href={connectorKey === "qiita" ? `/integrations/qiita/oauth/start?connector=${encodeURIComponent(connectorId)}&agent=${encodeURIComponent(agentId)}` : "/integrations"}
-          size="sm"
-          variant="secondary"
-          className="mt-2.5"
-        >
-          {connectorKey === "qiita" ? "Qiitaで認証して続ける" : "連携サービスを開く"}
-        </ButtonLink>
+        <p className="mt-0.5 text-xs text-gray-600">
+          {isOAuth ? `${connectorName}の画面で許可すると、必要な権限だけで接続します。` : `${connectorName}のAPIキーを設定します。値はSecret領域だけに保存されます。`}
+        </p>
+        {canManageConnection || isOAuth ? (
+          <Button size="sm" variant="secondary" className="mt-2.5" loading={prepare.pending} onClick={() => void connect()} icon={<Link2 className="h-4 w-4" />}>
+            {connectorName}に接続する
+          </Button>
+        ) : (
+          <p className="mt-2 text-xs text-amber-800">管理者に接続を依頼してください。</p>
+        )}
+        {secretTarget ? (
+          <SetConnectionSecretDialog
+            connection={secretTarget}
+            onClose={() => setSecretTarget(null)}
+            onSaved={async () => {
+              const target = secretTarget;
+              setSecretTarget(null);
+              await validate.mutate(target.id);
+            }}
+          />
+        ) : null}
       </div>
     );
   }
 
+  // 接続済みの Connection は Preview 作成時に自動で割り当てる。複数ある場合だけ選べるようにする
+  const connectionId = usable.length === 1 ? usable[0]!.id : selected;
+  const apply = async () => {
+    if (!connectionId) return;
+    for (const stage of ["staging", "production"] as const) {
+      await link.mutate(agentId, { stage, connector_id: connectorId, connection_id: connectionId, allowed_capabilities: capabilities });
+    }
+  };
   return (
     <div className="rounded-lg border border-indigo-100 bg-indigo-50/50 px-3 py-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <p className="text-sm font-medium text-gray-900">{connectorName}の接続</p>
           <p className="mt-0.5 text-xs text-gray-600">
-            {connected
-              ? `設定済みです。${capabilities.length}個の操作を許可しています。`
-              : `1回の設定で、上のすべての作業に反映されます。${capabilities.length}個の操作を許可します。`}
+            {connected || linked
+              ? `接続済みです。${capabilities.length}個の操作を許可しています。`
+              : usable.length === 1
+                ? `${usable[0]!.name} を使います。Preview作成時に自動で割り当てます（${capabilities.length}個の操作）。`
+                : `複数の接続があります。使うものを選んでください（${capabilities.length}個の操作）。`}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {connections.length > 1 ? (
-            <Select className="w-48" value={selected} onChange={(event) => setSelected(event.target.value)}>
-              <option value="">接続を選ぶ</option>
-              {connections.map((connection) => (
-                <option key={connection.id} value={connection.id}>{connection.name}</option>
-              ))}
-            </Select>
+          {usable.length > 1 ? (
+            <>
+              <Select className="w-48" value={selected} onChange={(event) => setSelected(event.target.value)}>
+                <option value="">接続を選ぶ</option>
+                {usable.map((connection) => <option key={connection.id} value={connection.id}>{connection.name}</option>)}
+              </Select>
+              <Button size="sm" loading={link.pending} disabled={!connectionId} onClick={() => void apply()} icon={<Link2 className="h-4 w-4" />}>{linked ? "更新" : "使う"}</Button>
+            </>
           ) : (
-            <span className="text-xs text-gray-600">{connections[0]!.name}</span>
+            <Badge tone="success">{linked ? "設定済み" : "自動で割り当て"}</Badge>
           )}
-          <Button size="sm" loading={link.pending} disabled={!connectionId} onClick={() => void apply()} icon={<Link2 className="h-4 w-4" />}>
-            {connected ? "更新" : "接続"}
-          </Button>
         </div>
       </div>
       {link.error ? <p className="mt-2 text-xs text-red-600">{link.error.message}</p> : null}
-    </div>
-  );
-}
-
-/** Provider側でOAuth applicationが未登録でも、Agent Builderから離れず準備して認証を再開する。 */
-function QiitaOAuthAppSetup({ agentId, connectorId, canConfigure }: { agentId: string; connectorId: string; canConfigure: boolean }) {
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [callbackUrl, setCallbackUrl] = useState("/integrations/qiita/oauth/callback");
-  useEffect(() => setCallbackUrl(`${window.location.origin}/integrations/qiita/oauth/callback`), []);
-  const save = useActionMutation(setConnectorOAuthAppAction, {
-    successMessage: "Qiita OAuthアプリを安全に保存しました。認証へ進みます",
-    onSuccess: () => {
-      window.location.assign(
-        `/integrations/qiita/oauth/start?connector=${encodeURIComponent(connectorId)}&agent=${encodeURIComponent(agentId)}`,
-      );
-    },
-  });
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!clientId.trim() || !clientSecret) return;
-    void save.mutate(connectorId, { client_id: clientId.trim(), client_secret: clientSecret });
-  };
-
-  return (
-    <div className="rounded-lg border border-amber-300 bg-amber-50/70 px-4 py-4">
-      <p className="text-sm font-semibold text-gray-900">Qiitaを利用可能にする（初回のみ）</p>
-      <p className="mt-1 text-xs leading-relaxed text-gray-600">
-        この準備はAgentごとではなく、この組織で最初の1回だけです。完了後、他の利用者は「Qiitaで認証」を押すだけになります。
-      </p>
-      {!canConfigure ? (
-        <Alert className="mt-3" tone="warning">組織のownerにこの初回設定を依頼しました。設定が終わると、ここから続行できます。</Alert>
-      ) : (
-        <form className="mt-3 space-y-3" onSubmit={submit}>
-          <ol className="list-decimal space-y-1 pl-5 text-xs leading-relaxed text-gray-700">
-            <li>
-              <a className="font-medium text-accent-700 underline" href="https://qiita.com/settings/applications" target="_blank" rel="noreferrer">
-                QiitaでOAuthアプリを登録 <ExternalLink className="inline h-3 w-3" aria-hidden="true" />
-              </a>
-            </li>
-            <li>リダイレクト先URLに次を指定します。</li>
-          </ol>
-          <code className="block break-all rounded-md border border-amber-200 bg-white px-2.5 py-2 text-xs text-gray-800">{callbackUrl}</code>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Client ID" required error={save.fieldErrors.client_id}>
-              <Input value={clientId} onChange={(event) => setClientId(event.target.value)} autoComplete="off" />
-            </Field>
-            <Field label="Client Secret" required hint="保存後は表示されません" error={save.fieldErrors.client_secret}>
-              <Input type="password" value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} autoComplete="new-password" />
-            </Field>
-          </div>
-          {save.error ? <Alert tone="danger">{save.error.message}</Alert> : null}
-          <Button type="submit" size="sm" loading={save.pending} disabled={!clientId.trim() || !clientSecret}>
-            安全に保存してQiita認証へ進む
-          </Button>
-        </form>
-      )}
     </div>
   );
 }

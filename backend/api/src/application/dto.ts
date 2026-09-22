@@ -129,6 +129,7 @@ export const toCapabilityPlanDto = (plan: capability_plans): CapabilityPlanDto =
   graph: plan.graph as unknown as CapabilityPlanDto["graph"],
   risks: plan.risks as string[],
   execution_locations: plan.execution_locations as string[],
+  environment_plan: (plan.environment_plan as unknown as CapabilityPlanDto["environment_plan"]) ?? null,
   created_at: plan.created_at.toISOString(),
 });
 
@@ -155,6 +156,10 @@ export const toHumanActionDto = (action: human_actions): HumanActionDto => ({
   completed_at: iso(action.completed_at),
   expires_at: iso(action.expires_at),
   created_at: action.created_at.toISOString(),
+  // 画面補助情報。Secretは含まれない前提で、そのまま平坦に展開する
+  ...(action.presentation && typeof action.presentation === "object" && !Array.isArray(action.presentation)
+    ? (action.presentation as Partial<HumanActionDto>)
+    : {}),
 });
 
 /** Runtimeのcommand line・一時path・外部応答本文をBuilder画面/APIへ露出しない。詳細はRuntimeログだけに残す。 */
@@ -447,6 +452,7 @@ export const toConnectorDto = (
 ): ConnectorDto => ({
   id: connector.id,
   key: connector.key,
+  provider_key: connector.provider_key,
   name: connector.name,
   description: connector.description,
   adapter: connector.adapter as ConnectorDto["adapter"],

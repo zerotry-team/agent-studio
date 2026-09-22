@@ -23,3 +23,11 @@ export async function discoverMcpToolsAction(input: DiscoverMcpToolsInput) {
 export async function setConnectorOAuthAppAction(id: string, input: SetConnectorOAuthAppInput) {
   return runAction(() => new ConnectorRepository().setOAuthApp(id, input), "OAuthアプリを保存できませんでした");
 }
+
+export async function listProviderCatalogAction() {
+  return runAction(() => new ConnectorRepository().listCatalog(), "連携できるサービスの一覧を取得できませんでした");
+}
+
+export async function ensureCatalogConnectorAction(key: string) {
+  return runAction(() => new ConnectorRepository().ensureCatalog(key), "連携サービスを用意できませんでした");
+}

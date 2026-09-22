@@ -47,6 +47,22 @@ AWS は過去の基盤commitで production の Control Plane と Sample A 社 Ru
 
 したがって、現時点では最終Definition of Done未達であり「Agent Studio完成」とは報告しない。
 
+## CLI（2026-09-22）
+
+`packages/cli`（`agent-studio` コマンド）を追加した。連携サービスの接続（API キーは標準入力/環境変数、OAuth はブラウザで許可→ローカル待ち受け）、OAuth アプリ登録、貴社 AWS 用 Runtime の作成と登録用トークン、GitHub App の manifest flow による作成〜接続、本番承認、`doctor`（待ち中の Human Action と解決コマンド）を画面なしで行える。Human Action の `cli_command` を作成状況カードにも表示する。本番のブラウザログインは Cognito の CLI 用公開クライアント（Terraform `aws_cognito_user_pool_client.cli`、API は両方の client ID を aud として受け付ける）が前提。ローカルの dev ログイン・API キー方式・runtime_secret 方式は実 API で確認済み。OAuth と GitHub manifest flow の実 Provider 通しは未実施。
+
+## Builder Agent による自動設定（2026-09-22）
+
+利用者に「実行環境」「連携サービス」の設定をさせず、Builder Agent が自動で用意する方向へ寄せた。人に求めるのは OAuth 同意・API キー入力・AWS 管理者の承認・業務事実の確認・Production 承認だけにする。
+
+- Provider Catalog（`backend/api/src/domain/provider-catalog.ts`）を追加し、Slack / Notion / Google Drive / Google スプレッドシート / freee / Qiita / Social Router（X） / ブラウザ操作を、依頼文から必要な操作だけ選んで自動登録する（`connectors.provider_key`）。登録済みなら再利用し、重複エラーにしない。GitHub は従来の GitHub App 経路へ委譲する
+- Qiita 専用だった OAuth を `ConnectorOAuthService` に一般化した（`/connectors/:id/oauth/start|exchange`、フロントは `/integrations/oauth/start|callback`）。scope は登録済み操作の最小集合。token は Secret Store だけに保存する
+- 認証が必要な Human Action は連携サービス画面へ誘導せず、Builder が Connection 枠を事前作成して `oauth_consent`（同意開始 URL 付き）または `enter_secret`（値だけを入力）として作成状況カード内で完結する（`human_actions.presentation`）。接続テスト成功で自動再開する
+- 実行環境は `planEnvironment`（`domain/environment-plan.ts`）が能力から決め、`capability_plans.environment_plan` に保存する。OpenAI 環境は Builder が自動作成・再利用し、「Previewを動かす環境がありません」で止めない。Self-hosted が必要なときは AWS アカウント ID とリージョンだけを聞き、Runtime・実行環境・Terraform Plan 証跡を自動で用意する
+- Builder の質問から `integration` を外し、OpenAPI/MCP URL と Runtime Tool 名は `advanced`（詳細設定に畳む任意項目）にした。不足能力があるのに質問が無い行き止まりは「使うサービス名」の 1 問にする
+- Preview 作成時に接続済み Connection を自動で Agent に割り当てる。画面は 連携サービス＝状態表示のみ、設定 > 詳細設定＝手動登録・Runtime・GitHub App、Agent 概要＝「Agentが選んだ構成」の読み取り専用表示に整理した
+- 未実施: 実 Provider（Slack / Google / freee）での OAuth E2E、OAuth refresh token の自動更新、GitHub App manifest flow、カタログ外サービスの仕様探索
+
 ## Builder Agent（2026-09-21）
 
 要件定義書 [builder-agent-requirements.md](builder-agent-requirements.md) のBuilder Agent MVPを、Preview Run、Workflow v2、Self-hosted Plan、同一BuildのProduction昇格まで通る縦切りとして実装した。

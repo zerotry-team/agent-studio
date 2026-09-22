@@ -7,12 +7,15 @@ import { approveBuilderProductionAction, completeBuilderHumanActionAction, resum
 import { provisionIntegrationRepositoryAction } from "@/actions/connections";
 import { builderActionDestination } from "@/components/builder-projects/action-destination";
 import { presentBuilderAction } from "@/components/builder-projects/action-presentation";
+import { ConnectionAction } from "@/components/builder-projects/connection-action";
+import { EnvironmentPlanCard } from "@/components/builder-projects/environment-plan-card";
 import { buildEtaLabel, buildLogEntries, buildProgressPercent, buildProgressPhases, primaryBuilderRelease, type BuildPhase } from "@/components/builder-projects/build-progress";
 import { BuilderProjectStatusBadge } from "@/components/builder-projects/status";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button, ButtonLink } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
+import { CodeBlock } from "@/components/ui/code-block";
 import { Field } from "@/components/ui/field";
 import { Input, Select } from "@/components/ui/input";
 import { useActionMutation } from "@/hooks/use-action-mutation";
@@ -31,8 +34,9 @@ function resumeLabel(action: HumanActionDto) {
   }
   const labels: Record<string, string> = {
     builder_answers: "回答の保存後に自動再開します",
-    connection_connected: "Connectionの接続テスト成功を検知すると自動再開します",
-    oauth_connected: "OAuth接続の成功を検知すると自動再開します",
+    connection_connected: "接続の確認に成功すると自動再開します",
+    connection_status: "接続の確認に成功すると自動再開します",
+    oauth_connected: "接続の許可を検知すると自動再開します",
     browser_profile_ready: "Human Loginの成功を検知すると自動再開します",
     browser_runtime_ready: "Runtime heartbeatとTool Catalogの一致を検知すると自動再開します",
     code_workspace_runtime_ready: "Code Workspace対応Runtimeのheartbeatを検知すると自動再開します",
@@ -149,9 +153,15 @@ function NextAction({ action, projectId, projectRequest, onChanged }: { action: 
   const approveProduction = useActionMutation(approveBuilderProductionAction, { successMessage: "Productionへ昇格し、最終確認を開始しました", onSuccess: onChanged });
   const provisionRepository = useActionMutation(provisionIntegrationRepositoryAction, { successMessage: "企業専用Repositoryを作成しました", onSuccess: onChanged });
   const presentation = presentBuilderAction(action, projectRequest);
-  const fields = presentation.fields.filter((field) => !field.secret);
+  const visibleFields = presentation.fields.filter((field) => !field.secret);
+  const fields = visibleFields.filter((field) => !field.advanced);
+  const advancedFields = visibleFields.filter((field) => field.advanced);
   const destination = builderActionDestination(action);
-  const automatic = presentation.requiresRepositoryChange || (["human_login", "aws_admin_action", "provider_app_registration", "oauth_consent", "enter_secret", "adapter_delivery"].includes(action.type) && fields.length === 0);
+  const inlineConnection = (action.type === "oauth_consent" && Boolean(action.oauth_start_url)) || (action.type === "enter_secret" && Boolean(action.connection_id));
+  const connectorName = presentation.title.replace(/(に接続してください|のAPIキーを設定してください|を接続)$/, "");
+  // Self-hosted 環境の構成案を確定済み（Runtime 登録待ち）
+  const runtimePrepared = action.type === "aws_admin_action" && typeof action.response?.runtime_id === "string";
+  const automatic = presentation.requiresRepositoryChange || inlineConnection || runtimePrepared || (["human_login", "aws_admin_action", "provider_app_registration", "oauth_consent", "enter_secret", "adapter_delivery"].includes(action.type) && visibleFields.length === 0);
   const condition = action.resume_condition && typeof action.resume_condition === "object" && !Array.isArray(action.resume_condition)
     ? action.resume_condition as { repository_connection_id?: unknown }
     : {};
@@ -188,19 +198,39 @@ function NextAction({ action, projectId, projectRequest, onChanged }: { action: 
         <p><span className="font-medium">なぜ必要か:</span> {presentation.reason}</p>
         <p className="mt-1"><span className="font-medium">自動再開:</span> {resumeLabel(action)}</p>
       </div>}
-      {fields.map((field) => <Field key={field.name} label={field.label} required={field.required !== false} hint={field.description}>
+      {inlineConnection ? <ConnectionAction action={action} connectorName={connectorName} onChanged={onChanged} /> : null}
+      {action.cli_command ? <details className="group rounded-lg border border-gray-200">
+        <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2 text-xs font-medium text-gray-500">コマンドで行う（管理者向け）<ChevronDown className="h-4 w-4 transition group-open:rotate-180" /></summary>
+        <div className="space-y-2 border-t border-gray-100 p-3">
+          <p className="text-xs text-gray-500">ターミナルで次を実行すると、この操作を画面なしで完了できます。秘密の値は標準入力か環境変数で渡します。</p>
+          <CodeBlock code={action.cli_command} copyable />
+        </div>
+      </details> : null}
+      {action.prepared_plan ? <div className="rounded-lg border border-gray-200 p-4"><p className="mb-3 text-xs font-medium text-gray-500">Builderが用意した構成案</p><EnvironmentPlanCard plan={action.prepared_plan} compact /></div> : null}
+      {runtimePrepared ? <Alert tone="info" title="構成案を確定しました">
+        AWS管理者は「設定 &gt; 詳細設定」の実行環境から一度限りの登録用トークンを発行し、構成を適用してください。環境の準備が確認できると自動で再開します。
+      </Alert> : null}
+      {!runtimePrepared ? fields.map((field) => <Field key={field.name} label={field.label} required={field.required !== false} hint={field.description}>
         {field.options?.length ? <Select value={answers[field.name] ?? ""} onChange={(event) => setAnswers((current) => ({ ...current, [field.name]: event.target.value }))}>
           <option value="">選択してください</option>
           {field.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </Select> : <Input value={answers[field.name] ?? ""} placeholder={field.placeholder} maxLength={4000} onChange={(event) => setAnswers((current) => ({ ...current, [field.name]: event.target.value }))} />}
-      </Field>)}
-      {!presentation.implementation && presentation.instructions.length ? <ol className="space-y-1 text-sm text-gray-600">{presentation.instructions.map((instruction, index) => <li key={`${index}-${instruction}`}>{index + 1}. {instruction}</li>)}</ol> : null}
+      </Field>) : null}
+      {!runtimePrepared && advancedFields.length ? <details className="group rounded-lg border border-gray-200">
+        <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2 text-xs font-medium text-gray-500">詳細設定（通常は入力不要）<ChevronDown className="h-4 w-4 transition group-open:rotate-180" /></summary>
+        <div className="space-y-4 border-t border-gray-100 p-3">
+          {advancedFields.map((field) => <Field key={field.name} label={field.label} required={field.required !== false} hint={field.description}>
+            <Input value={answers[field.name] ?? ""} placeholder={field.placeholder} maxLength={4000} onChange={(event) => setAnswers((current) => ({ ...current, [field.name]: event.target.value }))} />
+          </Field>)}
+        </div>
+      </details> : null}
+      {!presentation.implementation && !inlineConnection && presentation.instructions.length ? <ol className="space-y-1 text-sm text-gray-600">{presentation.instructions.map((instruction, index) => <li key={`${index}-${instruction}`}>{index + 1}. {instruction}</li>)}</ol> : null}
       <div className="flex justify-end gap-2">
-        {destination === "infrastructure" ? <ButtonLink href="/settings?tab=infrastructure" variant="secondary">実行・開発基盤を設定</ButtonLink> : null}
+        {destination === "infrastructure" && (visibleFields.length === 0 || runtimePrepared) ? <ButtonLink href="/settings?tab=advanced" variant="secondary">{runtimePrepared ? "登録用トークンを発行する" : "詳細設定を開く"}</ButtonLink> : null}
         {presentation.requiresRepositoryChange && sourceRepositoryConnectionId ? <Button loading={provisionRepository.pending} onClick={() => provisionRepository.mutate(sourceRepositoryConnectionId)}>{presentation.primaryActionLabel}</Button> : null}
-        {destination === "github" && !sourceRepositoryConnectionId ? <ButtonLink href="/settings?tab=infrastructure&connect=github" variant="secondary">{action.type === "provider_app_registration" ? presentation.primaryActionLabel : "GitHub Repositoryを接続"}</ButtonLink> : null}
+        {destination === "github" && !sourceRepositoryConnectionId ? <ButtonLink href="/settings?tab=advanced&connect=github" variant="secondary">{action.type === "provider_app_registration" ? presentation.primaryActionLabel : "GitHub Repositoryを接続"}</ButtonLink> : null}
         {destination === "integrations" ? <ButtonLink href="/integrations" variant="secondary">連携サービスを設定</ButtonLink> : null}
-        {isProductionApproval ? <Button loading={approveProduction.pending} icon={<Check className="h-4 w-4" />} onClick={() => approveProduction.mutate(projectId)}>承認して本番で使えるようにする</Button> : !automatic && !mergeRequested ? <Button disabled={missing} loading={complete.pending} icon={<Check className="h-4 w-4" />} onClick={() => complete.mutate({ id: action.id, value: { answers } })}>{fields.length && presentation.isImplementationApproval ? `選択して${presentation.primaryActionLabel}` : presentation.primaryActionLabel}</Button> : null}
+        {isProductionApproval ? <Button loading={approveProduction.pending} icon={<Check className="h-4 w-4" />} onClick={() => approveProduction.mutate(projectId)}>承認して本番で使えるようにする</Button> : !automatic && !mergeRequested ? <Button disabled={missing} loading={complete.pending} icon={<Check className="h-4 w-4" />} onClick={() => complete.mutate({ id: action.id, value: { answers } })}>{action.type === "aws_admin_action" ? "構成案を確定する" : fields.length && presentation.isImplementationApproval ? `選択して${presentation.primaryActionLabel}` : presentation.primaryActionLabel}</Button> : null}
       </div>
       {complete.error ? <Alert tone="danger">{complete.error.message}</Alert> : null}
       {provisionRepository.error ? <Alert tone="danger">{provisionRepository.error.message}</Alert> : null}
@@ -243,8 +273,9 @@ export function AgentBuildStatus({ project, onChanged }: { project: BuilderProje
       <p>{project.runs[0].error}</p>
       {project.runs[0].next_action ? <p className="mt-1 font-medium">次の操作: {project.runs[0].next_action}</p> : null}
     </Alert> : null}
-    {!pending ? <Alert tone={project.status === "completed" || project.status === "production_pending_approval" ? "success" : "info"}>{project.status === "completed" ? "作成とProductionの最終確認まで完了しました。" : project.status === "production_pending_approval" ? "Previewの確認が完了しました。本番で使えるようにするには管理者の承認が必要です。" : "現在、人による操作は必要ありません。処理が進むと自動で更新されます。"}</Alert> : null}
+    {!pending && !["failed", "blocked", "cancelled"].includes(project.status) ? <Alert tone={project.status === "completed" || project.status === "production_pending_approval" ? "success" : "info"}>{project.status === "completed" ? "作成とProductionの最終確認まで完了しました。" : project.status === "production_pending_approval" ? "Previewの確認が完了しました。本番で使えるようにするには管理者の承認が必要です。" : "現在、人による操作は必要ありません。処理が進むと自動で更新されます。"}</Alert> : null}
     {release ? <Card><CardHeader title="Preview到達点" description={release.status} /><CardBody className="flex flex-wrap gap-2"><ButtonLink href={`/agents/${release.agent_id}?tab=preview`}>Previewを開く</ButtonLink>{release.preview_run_id ? <ButtonLink href={`/runs/${release.preview_run_id}`} variant="primary">Run結果</ButtonLink> : null}</CardBody></Card> : null}
+    {project.latest_plan?.environment_plan ? <EnvironmentPlanCard plan={project.latest_plan.environment_plan} /> : null}
     <Details project={project} />
   </div>;
 }

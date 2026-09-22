@@ -26,6 +26,9 @@ const envSchema = z
     AUTH_MODE: z.enum(["cognito", "dev"]).default(isProduction ? "cognito" : "dev"),
     COGNITO_USER_POOL_ID: z.string().optional(),
     COGNITO_CLIENT_ID: z.string().optional(),
+    /** CLI のブラウザログイン用（Hosted UI のドメインと、secret を持たない公開クライアント）。未設定なら CLI は dev ログインか token 貼り付けだけ */
+    COGNITO_DOMAIN: z.string().optional(),
+    COGNITO_CLI_CLIENT_ID: z.string().optional(),
 
     // Runtime の認証
     RUNTIME_TOKEN_SECRET: z.string().min(32).optional(),
@@ -68,6 +71,7 @@ const envSchema = z
     MANIFEST_GENERATOR_MODEL: z.string().default("gpt-5.6"),
 
     // Provider OAuth（tokenは交換後にSecret Storeへ保存し、DBや画面へ返さない）
+    // 汎用は OAUTH_CLIENT_ID_<KEY> / OAUTH_CLIENT_SECRET_<KEY>（loadEnv で PROVIDER_OAUTH へまとめる）。QIITA_* は後方互換
     QIITA_OAUTH_CLIENT_ID: z.string().optional(),
     QIITA_OAUTH_CLIENT_SECRET: z.string().optional(),
 
@@ -108,7 +112,31 @@ const envSchema = z
     }
   });
 
-export type Env = z.infer<typeof envSchema>;
+export type ProviderOAuthCredentials = Record<string, { client_id?: string; client_secret?: string }>;
+
+export type Env = z.infer<typeof envSchema> & {
+  /**
+   * Provider Catalog の key ごとの OAuth クライアント。`OAUTH_CLIENT_ID_<KEY>` / `OAUTH_CLIENT_SECRET_<KEY>`
+   * （KEY は大文字、`-` は `_`）から読む。組織が設定した値があればそちらを優先する。
+   */
+  PROVIDER_OAUTH: ProviderOAuthCredentials;
+};
+
+const OAUTH_ENV_PATTERN = /^OAUTH_CLIENT_(ID|SECRET)_([A-Z0-9_]+)$/;
+
+function providerOAuthFrom(source: NodeJS.ProcessEnv, legacy: { qiitaId?: string; qiitaSecret?: string }): ProviderOAuthCredentials {
+  const credentials: ProviderOAuthCredentials = {};
+  for (const [name, value] of Object.entries(source)) {
+    const match = OAUTH_ENV_PATTERN.exec(name);
+    if (!match || !value) continue;
+    const key = match[2]!.toLowerCase().replace(/_/g, "-");
+    credentials[key] = { ...credentials[key], [match[1] === "ID" ? "client_id" : "client_secret"]: value };
+  }
+  if (legacy.qiitaId || legacy.qiitaSecret) {
+    credentials.qiita = { client_id: legacy.qiitaId, client_secret: legacy.qiitaSecret, ...credentials.qiita };
+  }
+  return credentials;
+}
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const result = envSchema.safeParse(source);
@@ -116,7 +144,10 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     const messages = result.error.issues.map((i) => `- ${i.path.join(".") || "(env)"}: ${i.message}`).join("\n");
     throw new Error(`環境変数が正しくありません:\n${messages}`);
   }
-  return result.data;
+  return {
+    ...result.data,
+    PROVIDER_OAUTH: providerOAuthFrom(source, { qiitaId: result.data.QIITA_OAUTH_CLIENT_ID, qiitaSecret: result.data.QIITA_OAUTH_CLIENT_SECRET }),
+  };
 }
 
 /** 開発用の固定値（本番では superRefine で必須にしている） */

@@ -165,6 +165,8 @@ export type ConnectorOperationInput = z.input<typeof connectorOperationSchema>;
 export const createConnectorSchema = z
   .object({
     key: slugSchema,
+    /** 内部用。Provider Catalog由来のConnectorであることを示す（OAuth設定などの解決キー）。 */
+    provider_key: slugSchema.optional(),
     name: z.string().trim().min(1).max(100),
     description: z.string().trim().min(1).max(1000),
     adapter: connectorAdapterSchema.default("http_openapi"),
@@ -263,6 +265,8 @@ export interface DiscoverMcpToolsResultDto {
 export interface ConnectorDto {
   id: string;
   key: string;
+  /** Provider Catalogのエントリ。カタログ外の手動登録はnull */
+  provider_key: string | null;
   name: string;
   description: string;
   adapter: ConnectorAdapter;
@@ -377,6 +381,45 @@ export const setConnectorOAuthAppSchema = z
   })
   .strict();
 export type SetConnectorOAuthAppInput = z.infer<typeof setConnectorOAuthAppSchema>;
+
+/** Provider OAuthの開始。stateとPKCE verifierはフロントの封印cookieで保持し、APIはURLだけ組み立てる。 */
+export const connectorOAuthStartSchema = z
+  .object({
+    redirect_uri: z.url(),
+    state: z.string().min(16).max(256),
+    code_challenge: z.string().min(16).max(256).optional(),
+  })
+  .strict();
+export type ConnectorOAuthStartInput = z.infer<typeof connectorOAuthStartSchema>;
+
+export interface ConnectorOAuthStartDto {
+  authorize_url: string;
+  scopes: string[];
+}
+
+/** callbackで受け取った認可コード。tokenはAPI側で交換し、レスポンスへ出さない。 */
+export const connectorOAuthExchangeSchema = z
+  .object({
+    code: z.string().min(1).max(2000),
+    redirect_uri: z.url(),
+    code_verifier: z.string().min(16).max(256).optional(),
+  })
+  .strict();
+export type ConnectorOAuthExchangeInput = z.infer<typeof connectorOAuthExchangeSchema>;
+
+/** Provider Catalogの公開情報。画面が「接続して続ける」を出すためだけに使う。 */
+export interface ProviderCatalogEntryDto {
+  key: string;
+  name: string;
+  description: string;
+  auth_kind: "none" | "static_bearer" | "oauth2" | "github_app";
+  /** 実行にSelf-hosted Runtimeが必要か */
+  requires_self_hosted: boolean;
+  /** この組織で既に登録済みのConnector ID */
+  connector_id: string | null;
+  /** OAuth アプリを登録する Provider 側の管理画面（oauth2 のみ） */
+  oauth_console_url: string | null;
+}
 
 export interface ConnectorOAuthAppDto {
   connector_id: string;
@@ -1207,6 +1250,8 @@ export interface CapabilityPlanDto {
   };
   risks: string[];
   execution_locations: string[];
+  /** Builderが決めた実行環境。planning前はnull */
+  environment_plan: EnvironmentPlanDto | null;
   created_at: string;
 }
 
@@ -1224,6 +1269,8 @@ export interface HumanActionDto {
     placeholder?: string;
     description?: string;
     options?: Array<{ value: string; label: string }>;
+    /** 技術的な任意項目。画面では「詳細設定」に畳む */
+    advanced?: boolean;
   }>;
   instructions: string[];
   resume_condition: unknown;
@@ -1232,7 +1279,58 @@ export interface HumanActionDto {
   completed_at: string | null;
   expires_at: string | null;
   created_at: string;
+  /** 以下は画面が設定画面へ遷移せずに操作を完結させるための補助情報（任意） */
+  connector_id?: string;
+  /** Builderが事前作成したConnection。認証情報だけを入力すれば使える */
+  connection_id?: string;
+  /** OAuth同意を開始するURL（フロントのroute。外部URLはAPIが組み立てる） */
+  oauth_start_url?: string;
+  oauth_app_configured?: boolean;
+  /** Provider側でOAuth Appを登録する管理画面 */
+  oauth_app_console_url?: string;
+  scopes?: string[];
+  secret_header_name?: string;
+  /** scope=openai_vault のConnectionで必要 */
+  mcp_server_url?: string;
+  /** APIキーの取得方法を説明する公式ページ */
+  secret_help_url?: string;
+  /** Self-hosted Runtimeが必要なときにBuilderが用意した構成案 */
+  prepared_plan?: EnvironmentPlanDto;
+  /** 画面操作の代わりに、そのまま実行できる CLI コマンド（秘密の値は含めない） */
+  cli_command?: string;
 }
+
+/** Builderが決めた実行環境の構成。利用者には読み取り専用で「実行場所・外部通信・理由」を見せる。 */
+export interface EnvironmentPlanDto {
+  kind: "openai_hosted" | "self_hosted";
+  template: OpenAiTemplate | null;
+  network: NetworkPolicy | null;
+  profile_key: string;
+  profile_name: string;
+  execution_location: "model" | "studio" | "runtime";
+  /** 許可した外部送信先（Connectorのorigin） */
+  egress: string[];
+  reason: string;
+  requires_human: false | "aws_admin_action";
+}
+
+/** Human Actionの自動再開条件。文字列判定を1箇所に集める。 */
+export const builderResumeConditionSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("connector_connected"), connector_id: z.string() }).loose(),
+  z.object({ type: z.literal("connection_status"), connector_id: z.string(), connection_id: z.string().optional(), stage: z.string().optional(), status: z.string().optional() }).loose(),
+  z.object({ type: z.literal("builder_answers"), topic: z.string() }).loose(),
+  z.object({ type: z.literal("capability_selected"), requirement: z.string() }).loose(),
+  z.object({ type: z.literal("github_repository_connected") }).loose(),
+  z.object({ type: z.literal("runtime_active"), runtime_id: z.string() }).loose(),
+  z.object({ type: z.literal("browser_runtime_ready") }).loose(),
+  z.object({ type: z.literal("code_workspace_runtime_ready") }).loose(),
+  z.object({ type: z.literal("browser_profile_ready"), domain: z.string() }).loose(),
+  z.object({ type: z.literal("git_branch_published") }).loose(),
+  z.object({ type: z.literal("git_pr_merged") }).loose(),
+  z.object({ type: z.literal("adapter_registered") }).loose(),
+  z.object({ type: z.literal("production_approval") }).loose(),
+]);
+export type BuilderResumeCondition = z.infer<typeof builderResumeConditionSchema>;
 
 export interface BuilderDiscoverySourceDto {
   id: string;

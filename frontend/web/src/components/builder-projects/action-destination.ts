@@ -4,8 +4,10 @@ export type BuilderActionDestination = "infrastructure" | "integrations" | "gith
 
 /** Human Actionの種類ではなく、自動再開条件も含めて組織設定の案内先を決める。 */
 export function builderActionDestination(
-  action: Pick<HumanActionDto, "type" | "resume_condition">,
+  action: Pick<HumanActionDto, "type" | "resume_condition"> & Partial<Pick<HumanActionDto, "connection_id" | "oauth_start_url">>,
 ): BuilderActionDestination {
+  // 認証をその場で完結できる Action は、連携サービス画面へ遷移させない
+  if (action.connection_id || action.oauth_start_url) return null;
   const condition = action.resume_condition && typeof action.resume_condition === "object" && !Array.isArray(action.resume_condition)
     ? action.resume_condition as { type?: string; topic?: string; repository_url?: string }
     : {};

@@ -9,6 +9,8 @@ import {
   createConnectorSchema,
   discoverMcpToolsSchema,
   exchangeQiitaOAuthSchema,
+  connectorOAuthExchangeSchema,
+  connectorOAuthStartSchema,
   setBrowserAccessSchema,
   updateConnectorSchema,
   createDeploymentSchema,
@@ -55,7 +57,8 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import type { Deps } from "../application/deps.js";
 import type { Services } from "../container.js";
-import { AppError } from "../domain/errors.js";
+import { AppError, notFound } from "../domain/errors.js";
+import { PROVIDER_CATALOG } from "../domain/provider-catalog.js";
 import { requireMember, requireUser, type AppEnv } from "./middleware.js";
 
 const uuidParam = z.uuid({ message: "ID の形式が正しくありません" });
@@ -195,23 +198,40 @@ export function createApiRoutes(deps: Deps, s: Services) {
 
   org.get("/connectors", async (c) => c.json(await s.tools.listConnectors(c.get("member"))));
   org.post("/connectors", async (c) => c.json(await s.tools.createConnector(c.get("member"), await json(c, createConnectorSchema)), 201));
+  // Provider Catalog: 利用者に識別子・URL・操作を入力させず、有名サービスをワンクリックで用意する
+  org.get("/connectors/catalog", async (c) => c.json(await s.tools.listCatalog(c.get("member"))));
+  org.post("/connectors/catalog/:key/ensure", async (c) => {
+    const entry = PROVIDER_CATALOG.find((candidate) => candidate.key === c.req.param("key"));
+    if (!entry) throw notFound("連携サービスのカタログ");
+    const result = await s.tools.ensureCatalogConnector(c.get("member"), entry, [entry.description]);
+    return c.json(result.connector, result.created ? 201 : 200);
+  });
   org.post("/connectors/discover", async (c) => c.json(await s.tools.discoverMcpTools(c.get("member"), await json(c, discoverMcpToolsSchema))));
   org.patch("/connectors/:id", async (c) =>
     c.json(await s.tools.updateConnector(c.get("member"), id(c.req.param("id")), await json(c, updateConnectorSchema))),
   );
   org.get("/connectors/:id", async (c) => c.json(await s.tools.getConnector(c.get("member"), id(c.req.param("id")))));
   org.get("/connectors/:id/oauth-app", async (c) =>
-    c.json(await s.tools.getConnectorOAuthApp(c.get("member"), id(c.req.param("id")))),
+    c.json(await s.connectorOAuth.getApp(c.get("member"), id(c.req.param("id")))),
   );
   org.put("/connectors/:id/oauth-app", async (c) =>
     c.json(
-      await s.tools.setConnectorOAuthApp(
+      await s.connectorOAuth.setApp(
         c.get("member"),
         id(c.req.param("id")),
         await json(c, setConnectorOAuthAppSchema),
       ),
     ),
   );
+  org.post("/connectors/:id/oauth/start", async (c) =>
+    c.json(await s.connectorOAuth.start(c.get("member"), id(c.req.param("id")), await json(c, connectorOAuthStartSchema))),
+  );
+  org.post("/connectors/:id/oauth/exchange", async (c) => {
+    const actor = c.get("member");
+    const connection = await s.connectorOAuth.exchange(actor, id(c.req.param("id")), await json(c, connectorOAuthExchangeSchema));
+    await s.builderProjects.completeConnectionActions(actor, connection);
+    return c.json(connection, 201);
+  });
 
   org.get("/connections", async (c) => c.json(await s.tools.listConnections(c.get("member"))));
   org.post("/connections", async (c) => c.json(await s.tools.createConnection(c.get("member"), await json(c, createConnectionSchema)), 201));
@@ -227,10 +247,12 @@ export function createApiRoutes(deps: Deps, s: Services) {
     await s.builderProjects.completeGitHubRepositoryActions(actor, connection);
     return c.json(connection, 201);
   });
+  // 旧経路（Qiita専用）。汎用の /connectors/:id/oauth/exchange の別名として残す
   org.post("/connectors/:id/qiita-oauth/exchange", async (c) => {
     const input = await json(c, exchangeQiitaOAuthSchema);
     const actor = c.get("member");
-    const connection = await s.tools.exchangeQiitaOAuth(actor, id(c.req.param("id")), input.code);
+    const redirectUri = `${deps.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/integrations/oauth/callback`;
+    const connection = await s.connectorOAuth.exchange(actor, id(c.req.param("id")), { code: input.code, redirect_uri: redirectUri });
     await s.builderProjects.completeConnectionActions(actor, connection);
     return c.json(connection, 201);
   });

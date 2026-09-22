@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import {
+  canonicalJson,
   createRuntimeProfileSchema,
   createManagedRuntimeEnvironmentSchema,
   isBrowserAccessConfigured,
@@ -15,6 +16,7 @@ import {
   type CreateManagedRuntimeEnvironmentInput,
   type ManagedRuntimeEnvironmentDto,
   type DeploymentDto,
+  type EnvironmentPlanDto,
   type NetworkPolicy,
   type OpenAiTemplate,
   type Policy,
@@ -80,6 +82,46 @@ export class EnvironmentService {
     });
   }
 
+  /**
+   * Builder が決めた構成に合う実行環境を用意する。利用者に名前・キー・テンプレートを入力させない。
+   * 既存の openai_hosted で同じ構成があれば再利用し、無ければ Builder 名義で作る（管理者ロール不要）。
+   */
+  async ensureBuilderProfile(actor: MemberActor, plan: EnvironmentPlanDto): Promise<RuntimeProfileDto> {
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      if (plan.kind === "self_hosted") {
+        const profile = await tx.runtime_profiles.findFirst({
+          where: { organization_id: actor.organizationId, type: "self_hosted", runtime: { status: { in: ["active", "degraded"] } } },
+          include: { runtime: true },
+          orderBy: { created_at: "asc" },
+        });
+        if (!profile) throw preconditionFailed("貴社専用の実行環境がまだ準備できていません。AWS管理者の承認後に自動で再開します");
+        return toRuntimeProfileDto(profile);
+      }
+      const candidates = await tx.runtime_profiles.findMany({
+        where: { organization_id: actor.organizationId, type: "openai_hosted", template: plan.template },
+        include: { runtime: true },
+        orderBy: { created_at: "asc" },
+      });
+      const sameNetwork = candidates.find((profile) => canonicalJson(profile.network ?? { mode: "disabled" }) === canonicalJson(plan.network ?? { mode: "disabled" }));
+      if (sameNetwork) return toRuntimeProfileDto(sameNetwork);
+      const byKey = await tx.runtime_profiles.findUnique({ where: { organization_id_key: { organization_id: actor.organizationId, key: plan.profile_key } }, include: { runtime: true } });
+      if (byKey) return toRuntimeProfileDto(byKey);
+      const profile = await tx.runtime_profiles.create({
+        data: {
+          organization_id: actor.organizationId,
+          key: plan.profile_key,
+          name: plan.profile_name,
+          type: "openai_hosted",
+          template: plan.template,
+          network: (plan.network ?? { mode: "disabled" }) as Prisma.InputJsonValue,
+        },
+        include: { runtime: true },
+      });
+      await recordAudit(tx, auditBy(actor, { action: "environment.create", targetType: "runtime_profile", targetId: profile.id, detail: { key: profile.key, type: "openai_hosted", managed_by: "builder", reason: plan.reason } }));
+      return toRuntimeProfileDto(profile);
+    });
+  }
+
   async deleteProfile(actor: MemberActor, id: string): Promise<void> {
     requireRole(actor, "admin");
     await this.deps.db.run(scopeOf(actor), async (tx) => {
@@ -112,8 +154,19 @@ export class EnvironmentService {
   /** Runtime を作る（RTM-01）。AWS アカウント ID とロール名は、登録時の身元確認に使う */
   async createRuntime(actor: MemberActor, input: CreateRuntimeInput): Promise<RuntimeDto> {
     requireRole(actor, "admin");
-    return this.deps.db.run(scopeOf(actor), async (tx) => {
-      // 同じ AWS プリンシパルは全組織を通じて1つの Runtime にしか使えない（一意制約で 409 になる）
+    return this.deps.db.run(scopeOf(actor), (tx) => this.createRuntimeIn(tx, actor, input));
+  }
+
+  /** Builder の Human Action からも同じ手順で Runtime を作る（ロール検査は呼び出し側）。 */
+  async createRuntimeIn(tx: Prisma.TransactionClient, actor: MemberActor, input: CreateRuntimeInput): Promise<RuntimeDto> {
+    requireRole(actor, "admin");
+    {
+      // 同じ AWS プリンシパルは全組織を通じて1つの Runtime にしか使えない
+      const duplicate = await tx.runtimes.findUnique({ where: { aws_account_id_expected_role_name: { aws_account_id: input.aws_account_id, expected_role_name: input.expected_role_name } } });
+      if (duplicate) {
+        if (duplicate.organization_id === actor.organizationId) return toRuntimeDto(duplicate);
+        throw conflict("このAWSアカウントとロール名の組み合わせは、すでに別の環境で使われています");
+      }
       const r = await tx.runtimes.create({
         data: {
           organization_id: actor.organizationId,
@@ -135,7 +188,22 @@ export class EnvironmentService {
         }),
       );
       return toRuntimeDto(r);
+    }
+  }
+
+  /** Builder が用意した Runtime に対応する self_hosted の実行環境（キー・名前は自動）。 */
+  async ensureSelfHostedProfileIn(tx: Prisma.TransactionClient, actor: MemberActor, runtimeId: string): Promise<RuntimeProfileDto> {
+    const existing = await tx.runtime_profiles.findFirst({ where: { organization_id: actor.organizationId, type: "self_hosted", runtime_id: runtimeId }, include: { runtime: true } });
+    if (existing) return toRuntimeProfileDto(existing);
+    const base = "builder-self-hosted";
+    let key = base;
+    for (let attempt = 2; await tx.runtime_profiles.findUnique({ where: { organization_id_key: { organization_id: actor.organizationId, key } } }); attempt += 1) key = `${base}-${attempt}`;
+    const profile = await tx.runtime_profiles.create({
+      data: { organization_id: actor.organizationId, key, name: "貴社専用の実行環境", type: "self_hosted", runtime_id: runtimeId },
+      include: { runtime: true },
     });
+    await recordAudit(tx, auditBy(actor, { action: "environment.create", targetType: "runtime_profile", targetId: profile.id, detail: { key, type: "self_hosted", managed_by: "builder" } }));
+    return toRuntimeProfileDto(profile);
   }
 
   /**
@@ -352,6 +420,8 @@ export class EnvironmentService {
           });
       if (!profile) throw preconditionFailed("Previewを動かす環境がありません。SettingsでEnvironmentを設定してください");
 
+      // 接続済みのConnectionがあれば、利用者に選ばせず自動でこのAgentへ割り当てる（未接続の連携は従来どおり使わない扱い）
+      await this.autoLinkConnections(tx, actor, agentId, "staging", resolution);
       const { variables, allowedTools } = await this.assertProjectDependencies(tx, actor.organizationId, agentId, "staging", resolution);
       const { config, warnings } = await this.compile(tx, actor.organizationId, manifest, profile, allowedTools, {
         access: browserAccess,
@@ -506,6 +576,56 @@ export class EnvironmentService {
    * Build の前提条件を確認し、この環境で実際に使える能力を返す。
    * 利用者が Connection で許可しなかった操作は、エラーにせず Build から外す（使わない、という選択）。
    */
+  /** 認証が必要な連携サービスごとに、接続テスト済みの最新Connectionを自動で割り当てる。既に割り当て済みなら触らない。 */
+  private async autoLinkConnections(
+    tx: Prisma.TransactionClient,
+    actor: MemberActor,
+    agentId: string,
+    stage: "staging" | "production",
+    resolution: CapabilityResolutionDto,
+  ): Promise<void> {
+    const byConnector = new Map<string, Set<string>>();
+    // 旧データでは requirements が欠けていることがある（空配列として扱う）
+    for (const requirement of resolution.requirements ?? []) {
+      if (!requirement.connector_id || requirement.state !== "resolved") continue;
+      const set = byConnector.get(requirement.connector_id) ?? new Set<string>();
+      for (const name of requirement.tool_names) set.add(name);
+      byConnector.set(requirement.connector_id, set);
+    }
+    if (byConnector.size === 0) return;
+    const connectors = await tx.connectors.findMany({ where: { organization_id: actor.organizationId, id: { in: [...byConnector.keys()] } }, include: { tools: { select: { name: true } } } });
+    const links = await tx.agent_connection_links.findMany({ where: { organization_id: actor.organizationId, agent_id: agentId, stage }, select: { connector_id: true } });
+    const linked = new Set(links.map((link) => link.connector_id));
+    for (const connector of connectors) {
+      if (connector.auth_type === "none" || linked.has(connector.id)) continue;
+      const connection = await tx.connections.findFirst({
+        where: { organization_id: actor.organizationId, connector_id: connector.id, status: "connected", revoked_at: null, ...(stage === "production" ? {} : {}) },
+        orderBy: { last_validated_at: "desc" },
+      });
+      if (!connection || (connection.scope !== "runtime" && !connection.secret_locator)) continue;
+      const available = new Set(connector.tools.map((tool) => tool.name));
+      const capabilities = [...(byConnector.get(connector.id) ?? [])].filter((name) => available.has(name));
+      if (!capabilities.length) continue;
+      await tx.agent_connection_links.create({
+        data: {
+          organization_id: actor.organizationId,
+          agent_id: agentId,
+          connector_id: connector.id,
+          connection_id: connection.id,
+          stage,
+          allowed_capabilities: capabilities,
+          created_by: actor.userId,
+        },
+      });
+      await recordAudit(tx, auditBy(actor, {
+        action: "agent.connection.link",
+        targetType: "agent",
+        targetId: agentId,
+        detail: { connector_id: connector.id, connection_id: connection.id, stage, capabilities, automatic: true },
+      }));
+    }
+  }
+
   private async assertProjectDependencies(
     tx: Prisma.TransactionClient,
     organizationId: string,

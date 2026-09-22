@@ -27,7 +27,8 @@
     "prisma:migrate:status": "prisma migrate status --config=prisma/prisma.config.ts",
     "prisma:migrate:diff": "prisma migrate diff --config=prisma/prisma.config.ts",
     "prisma:migrate:reset": "prisma migrate reset --config=prisma/prisma.config.ts",
-    "prisma:seed": "yarn workspace @agent-studio/api seed"
+    "prisma:seed": "yarn workspace @agent-studio/api seed",
+    "cli": "yarn workspace @agent-studio/cli start"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
