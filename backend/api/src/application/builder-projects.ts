@@ -538,7 +538,8 @@ export class BuilderProjectService {
         const risk = sourceTopic === "public_x_post" ? "external_send" : "read";
         const sourceHash = requestHash(JSON.stringify({ sourceTopic, repositoryUrl, baseBranch, adapterPath, interfaceNotes: answers.interface_notes?.trim() ?? "" }));
         const existing = await tx.builder_change_sets.findFirst({
-          where: { project_id: action.project_id, kind: "code_workspace", source_hash: sourceHash },
+          // 公開に失敗したもの（基点branchの更新など）は作り直して、最新の基点から再生成する
+          where: { project_id: action.project_id, kind: "code_workspace", source_hash: sourceHash, status: { not: "failed" } },
           select: { id: true },
         });
         if (!existing) {
