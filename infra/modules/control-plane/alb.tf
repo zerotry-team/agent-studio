@@ -72,6 +72,14 @@ resource "aws_lb_target_group" "web" {
   vpc_id               = module.network.vpc_id
   deregistration_delay = 30
 
+  # Next.js の HTML と versioned chunk を、rolling deploy 中も同じ世代の
+  # Web task から返す。Cookie は CloudFront の AllViewer policy で往復する。
+  stickiness {
+    type            = "lb_cookie"
+    enabled         = true
+    cookie_duration = 300
+  }
+
   health_check {
     path                = "/api/health"
     matcher             = "200"
