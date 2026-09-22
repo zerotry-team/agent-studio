@@ -172,6 +172,20 @@ describe("Agent Project / Preview / Promote", () => {
     }
   });
 
+  it("旧Agentの不足したCapability配列を空配列として扱いPreviewできる", async () => {
+    const created = await createThroughBuilder("社内向けの文章を要約する");
+    const agentId = created.body.agent.id as string;
+    await h.admin.agents.update({
+      where: { id: agentId },
+      data: { capability_resolution: { ready: true } },
+    });
+
+    const preview = await h.request("POST", `/api/v1/agents/${agentId}/preview`, owner);
+    expect(preview.status, JSON.stringify(preview.body)).toBe(201);
+    expect(preview.body).toMatchObject({ stage: "staging", status: "active" });
+    expect(preview.body.build_number).toBeGreaterThan(0);
+  });
+
   it("不足ConnectionとVariablesだけを設定し、Preview Buildを作る", async () => {
     const created = await createThroughBuilder("ベンチマーク投稿と自社の過去投稿を分析し、投稿案を作成してSocial Router経由でSNSへ投稿する。");
     projectId = created.body.agent.id;

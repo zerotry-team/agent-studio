@@ -513,10 +513,14 @@ export class EnvironmentService {
     stage: "staging" | "production",
     resolution: CapabilityResolutionDto,
   ): Promise<{ variables: Record<string, string>; allowedTools: Set<string> }> {
-    const unresolved = resolution.requirements.find((requirement) => requirement.state === "missing" || requirement.state === "ambiguous");
+    // Capability Resolutionの配列が追加される前に保存されたAgentもPreviewできるようにする。
+    // APIのDTOでは既に正規化しているが、Build作成はDBのJSONを直接読むため同じ境界が必要。
+    const requirements = Array.isArray(resolution?.requirements) ? resolution.requirements : [];
+    const missingVariables = Array.isArray(resolution?.missing_variables) ? resolution.missing_variables : [];
+    const unresolved = requirements.find((requirement) => requirement.state === "missing" || requirement.state === "ambiguous");
     if (unresolved) throw preconditionFailed(`必要な能力「${unresolved.requirement}」を解決できていません`);
 
-    const connectorIds = [...new Set(resolution.requirements.flatMap((requirement) => (requirement.connector_id ? [requirement.connector_id] : [])))];
+    const connectorIds = [...new Set(requirements.flatMap((requirement) => (requirement.connector_id ? [requirement.connector_id] : [])))];
     const connectors = await tx.connectors.findMany({ where: { organization_id: organizationId, id: { in: connectorIds } } });
     const links = await tx.agent_connection_links.findMany({
       where: { organization_id: organizationId, agent_id: agentId, stage, connector_id: { in: connectorIds } },
@@ -526,16 +530,17 @@ export class EnvironmentService {
 
     const allowedTools = new Set<string>();
     let hasConnectorRequirement = false;
-    for (const requirement of resolution.requirements) {
+    for (const requirement of requirements) {
+      const toolNames = Array.isArray(requirement.tool_names) ? requirement.tool_names : [];
       if (!requirement.connector_id) {
-        for (const tool of requirement.tool_names) allowedTools.add(tool);
+        for (const tool of toolNames) allowedTools.add(tool);
         continue;
       }
       hasConnectorRequirement = true;
       const connector = connectors.find((candidate) => candidate.id === requirement.connector_id);
       if (!connector) throw preconditionFailed(`連携サービス「${requirement.connector_name ?? requirement.requirement}」が見つかりません`);
       if (connector.auth_type === "none") {
-        for (const tool of requirement.tool_names) allowedTools.add(tool);
+        for (const tool of toolNames) allowedTools.add(tool);
         continue;
       }
       const link = links.find((candidate) => candidate.connector_id === connector.id);
@@ -546,14 +551,14 @@ export class EnvironmentService {
         throw preconditionFailed(`${connector.name} Connectionの認証情報が未設定です`);
       }
       const allowed = new Set(link.allowed_capabilities as string[]);
-      for (const tool of requirement.tool_names) if (allowed.has(tool)) allowedTools.add(tool);
+      for (const tool of toolNames) if (allowed.has(tool)) allowedTools.add(tool);
     }
     if (hasConnectorRequirement && allowedTools.size === 0) {
       throw preconditionFailed("このAgentで使う作業を1つ以上選んでください");
     }
 
     const variables = (environment?.variables ?? {}) as Record<string, string>;
-    const missingVariable = resolution.missing_variables.find((name) => !variables[name]);
+    const missingVariable = missingVariables.find((name) => !variables[name]);
     if (missingVariable) throw preconditionFailed(`Variable ${missingVariable} を設定してください`);
     return { variables, allowedTools };
   }
