@@ -4,6 +4,29 @@ import { workflowDefinitionSchema } from "@agent-studio/contracts";
 import { buildFactoringWorkflow, codeWorkspaceQuestionsFor, ensureAnsweredSourceRequirements, ensureRequiredScenarioTools, explicitOrganizationToolDraft, humanCapabilityRequirements, intakeQuestionsFor, organizationCodeWorkspaceQuestionsFor, registeredAdapterToolNames } from "./builder-orchestrator.js";
 import { judge, renderArgumentsTemplate, renderTemplate } from "./engines.js";
 import { isPrivateAddress } from "./studio-functions.js";
+import { SingleFlight } from "./run-driver.js";
+
+describe("SingleFlight（Run副作用の二重実行防止）", () => {
+  it("同時に呼ばれたidle処理を1回だけ実行し、完了後は次の処理を許可する", async () => {
+    const singleFlight = new SingleFlight<number>();
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const task = async () => {
+      calls++;
+      await gate;
+      return calls;
+    };
+
+    const first = singleFlight.run(task);
+    const concurrent = singleFlight.run(task);
+    expect(calls).toBe(1);
+    release();
+    await expect(Promise.all([first, concurrent])).resolves.toEqual([1, 1]);
+
+    await expect(singleFlight.run(async () => ++calls)).resolves.toBe(2);
+  });
+});
 
 describe("isPrivateAddress（SSRF 対策）", () => {
   it.each(["10.0.0.1", "127.0.0.1", "169.254.169.254", "172.16.5.5", "192.168.1.1", "100.64.0.1", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1"])(

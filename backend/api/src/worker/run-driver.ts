@@ -46,6 +46,23 @@ const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 
 const BROWSER_TOOL_PREFIX = "browser_";
 
+/**
+ * 同じRunでevent streamとwatchdogが同時にidleを検知しても、副作用を1回だけ実行する。
+ * 完了後は次のidle処理を受け付けるため、承認後や追加入力の再開は妨げない。
+ */
+export class SingleFlight<T> {
+  private current: Promise<T> | null = null;
+
+  run(task: () => Promise<T>): Promise<T> {
+    if (this.current) return this.current;
+    const operation = task().finally(() => {
+      if (this.current === operation) this.current = null;
+    });
+    this.current = operation;
+    return operation;
+  }
+}
+
 function safeWorkflowToolOutput(output: string): string {
   try {
     return JSON.stringify(redactLogValue(JSON.parse(output))).slice(0, 20_000);
@@ -110,6 +127,7 @@ interface DriverState {
  */
 export class RunDriver {
   private readonly log: Logger;
+  private readonly idleSingleFlight = new SingleFlight<Outcome>();
   private api!: AgentsApi;
 
   constructor(
@@ -579,7 +597,11 @@ export class RunDriver {
   }
 
   /** セッションが空いた: 入力を送るか、承認待ちにするか、完了にする */
-  private async onIdle(state: DriverState): Promise<Outcome> {
+  private onIdle(state: DriverState): Promise<Outcome> {
+    return this.idleSingleFlight.run(() => this.processIdle(state));
+  }
+
+  private async processIdle(state: DriverState): Promise<Outcome> {
     // self_hosted は Session Worker が接続するまで入力を送らない
     if (state.environmentType === "self_hosted" && !state.connected) return "continue";
 
