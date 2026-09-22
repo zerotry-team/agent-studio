@@ -10,6 +10,8 @@ import type {
   RegisterRequest,
   RegisterResponse,
   RuntimeJob,
+  SessionArtifactRequest,
+  SessionArtifactResponse,
   SessionEventRequest,
   SessionGrant,
   TokenRequest,
@@ -19,9 +21,11 @@ import type {
   GitCredentialResponse,
 } from "@agent-studio/contracts";
 import { adapterDescriptorSchema, browserLoginResultSchema, builderWorkspaceResultSchema, canonicalJson, gitPublishResultSchema, type RuntimeBrowserProfile } from "@agent-studio/contracts";
+import { inspectArtifact } from "../domain/artifact-security.js";
 import { AppError, notFound } from "../domain/errors.js";
 import { evaluateOrganizationAutoApproval } from "../domain/organization-auto-approval.js";
 import { recordAudit } from "../infrastructure/audit.js";
+import { artifactPrefix } from "../infrastructure/storage/object-store.js";
 import type { Tx } from "../infrastructure/db/tenant-db.js";
 import type { Deps } from "./deps.js";
 import { hashToken } from "./environments.js";
@@ -881,6 +885,59 @@ export class RuntimeApiService {
   private async failSession(tx: Tx, sessionId: string, message: string) {
     const session = await tx.agent_sessions.update({ where: { id: sessionId }, data: { status: "failed" } });
     await appendRunEvent(tx, { id: session.run_id, organization_id: session.organization_id }, "error", message, {});
+  }
+
+  /**
+   * Runtime内で取得したファイル（Browser Download）をRun Artifactとして保存する。
+   * 自分のRuntimeが持つ実行中Sessionだけを受け付け、hash・サイズ・安全検査をこちらでもやり直す。
+   */
+  async storeSessionArtifact(ctx: RuntimeContext, sessionId: string, req: SessionArtifactRequest): Promise<SessionArtifactResponse> {
+    const bucket = this.deps.env.ARTIFACTS_BUCKET;
+    if (!bucket) throw new AppError("artifacts_unavailable", 503, "成果物の保存先が設定されていません");
+    const session = await this.deps.db.org(ctx.organizationId, (tx) =>
+      tx.agent_sessions.findFirst({ where: { id: sessionId, runtime_id: ctx.runtimeId, ended_at: null }, select: { id: true, run_id: true } }),
+    );
+    if (!session) throw notFound("セッション");
+
+    const body = Buffer.from(req.content_base64, "base64");
+    if (body.byteLength !== req.size_bytes) throw new AppError("artifact_mismatch", 400, "ファイルのサイズが一致しません");
+    const path = `browser-downloads/${req.source_artifact_id}/${req.filename}`;
+    const inspected = inspectArtifact(path, body);
+    if (inspected.sha256 !== req.sha256) throw new AppError("artifact_mismatch", 400, "ファイルのhashが一致しません");
+    const objectKey = `${artifactPrefix(ctx.organizationId, session.run_id)}${inspected.path}`;
+    if (inspected.scanStatus === "passed") await this.deps.objects.put(bucket, objectKey, body, inspected.mimeType);
+    const retainedUntil = new Date(Date.now() + 30 * 24 * 60 * 60_000);
+
+    const artifact = await this.deps.db.org(ctx.organizationId, async (tx) => {
+      const saved = await tx.run_artifacts.upsert({
+        where: { organization_id_run_id_path: { organization_id: ctx.organizationId, run_id: session.run_id, path: inspected.path } },
+        create: {
+          organization_id: ctx.organizationId, run_id: session.run_id, path: inspected.path, object_key: objectKey,
+          mime_type: inspected.mimeType, size_bytes: body.byteLength, sha256: inspected.sha256,
+          scan_status: inspected.scanStatus, scan_engine: inspected.scanEngine, source: req.source, retained_until: retainedUntil,
+        },
+        update: {},
+      });
+      if (saved.sha256 !== inspected.sha256) throw new AppError("artifact_conflict", 409, "同じArtifact IDで別のファイルが保存されています");
+      await appendRunEvent(tx, { id: session.run_id, organization_id: ctx.organizationId }, "message",
+        inspected.scanStatus === "passed" ? `Downloadしたファイルを成果物として保存しました: ${req.filename}` : `Downloadしたファイルは安全検査で拒否されました: ${req.filename}`,
+        { role: "system", text: `${inspected.path} (${inspected.scanStatus}, ${body.byteLength} bytes, sha256 ${inspected.sha256})` },
+      );
+      await recordAudit(tx, {
+        organizationId: ctx.organizationId,
+        actorType: "runtime",
+        actorId: ctx.runtimeId,
+        action: "artifact.store",
+        targetType: "run",
+        targetId: session.run_id,
+        result: inspected.scanStatus === "passed" ? "success" : "denied",
+        sourceIp: ctx.sourceIp,
+        detail: { session_id: sessionId, source: req.source, artifact_id: saved.id, path: inspected.path, mime_type: inspected.mimeType, bytes: body.byteLength, sha256: inspected.sha256, scan_status: inspected.scanStatus },
+      });
+      return saved;
+    });
+    if (inspected.scanStatus !== "passed") throw new AppError("artifact_rejected", 400, "安全検査で拒否されたファイルです");
+    return { run_artifact_id: artifact.id, path: artifact.path, scan_status: "passed", retained_until: artifact.retained_until.toISOString() };
   }
 
   /** Tool Gateway がツール呼び出しを認可するための情報（Controller の再起動時に使う） */

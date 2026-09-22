@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CompiledFunctionTool } from "../domain/manifest-compiler.js";
 import { AuditExporter } from "../worker/audit-export.js";
@@ -285,6 +286,37 @@ describe("実行の流れ（擬似 OpenAI）", () => {
         body: { session_id: session.session_id, tool: "update_price", args_hash: argsHash, args_preview: "x", reason: "x", timeout_minutes: 60 },
       });
       expect(again.body.approval_id).toBe(created.body.approval_id);
+
+      // Browser Download: Runtimeが取得したファイルを、このRunのArtifactとしてだけ保存する
+      const csv = Buffer.from("id,total\n1,100\n");
+      const downloadId = "70000000-0000-4000-8000-000000000001";
+      const download = {
+        source: "browser_download", source_artifact_id: downloadId, filename: "report.csv", mime_type: "text/csv",
+        sha256: createHash("sha256").update(csv).digest("hex"), size_bytes: csv.byteLength, content_base64: csv.toString("base64"),
+      };
+      const stored = await h.request("POST", `/runtime/v1/sessions/${session.session_id}/artifacts`, { token: access, body: download });
+      expect(stored.status, JSON.stringify(stored.body)).toBe(200);
+      expect(stored.body).toMatchObject({ path: `browser-downloads/${downloadId}/report.csv`, scan_status: "passed" });
+      expect(h.objects.objects.get(`test-artifacts/orgs/${org.id}/runs/${run.body.id}/browser-downloads/${downloadId}/report.csv`)?.equals(csv)).toBe(true);
+      const listed = await h.request("GET", `/api/v1/runs/${run.body.id}/artifacts`, owner);
+      expect(listed.body).toContainEqual(expect.objectContaining({ id: stored.body.run_artifact_id, sha256: download.sha256, scan_status: "passed" }));
+
+      const tampered = await h.request("POST", `/runtime/v1/sessions/${session.session_id}/artifacts`, {
+        token: access, body: { ...download, source_artifact_id: "70000000-0000-4000-8000-000000000002", sha256: "0".repeat(64) },
+      });
+      expect(tampered.status).toBe(400);
+      const eicar = Buffer.from("EICAR-STANDARD-ANTIVIRUS-TEST-FILE");
+      const rejected = await h.request("POST", `/runtime/v1/sessions/${session.session_id}/artifacts`, {
+        token: access,
+        body: { ...download, source_artifact_id: "70000000-0000-4000-8000-000000000003", filename: "eicar.txt", sha256: createHash("sha256").update(eicar).digest("hex"), size_bytes: eicar.byteLength, content_base64: eicar.toString("base64") },
+      });
+      expect(rejected.body.error.code).toBe("artifact_rejected");
+      const rejectedRow = await h.admin.run_artifacts.findFirst({ where: { run_id: run.body.id, path: { endsWith: "eicar.txt" } } });
+      expect(rejectedRow?.scan_status).toBe("rejected");
+      expect([...h.objects.objects.keys()].some((key) => key.endsWith("eicar.txt"))).toBe(false);
+      // 自分のRuntimeのものではないSessionには保存できない
+      const foreign = await h.request("POST", `/runtime/v1/sessions/${randomUUID()}/artifacts`, { token: access, body: download });
+      expect(foreign.status).toBe(404);
 
       await h.request("POST", `/runtime/v1/jobs/${job.body.job.job_id}/result`, { token: access, body: { status: "succeeded" } });
       await h.request("POST", `/runtime/v1/sessions/${session.session_id}/events`, { token: access, body: { type: "worker_running" } });

@@ -1,8 +1,11 @@
 import {
   approvalResponseSchema,
+  sessionArtifactResponseSchema,
   sessionGrantSchema,
   type ApprovalRequest,
   type ApprovalResponse,
+  type SessionArtifactRequest,
+  type SessionArtifactResponse,
   type SessionGrant,
   type ToolAuditEvent,
 } from "@agent-studio/contracts";
@@ -27,6 +30,7 @@ export interface ControllerApi {
   getApproval(approvalId: string): Promise<ApprovalResponse>;
   consumeApproval(approvalId: string): Promise<ApprovalResponse>;
   sendAudit(events: ToolAuditEvent[]): Promise<void>;
+  storeSessionArtifact(sessionId: string, body: SessionArtifactRequest): Promise<SessionArtifactResponse>;
 }
 
 export class ControllerClient implements ControllerApi {
@@ -36,14 +40,14 @@ export class ControllerClient implements ControllerApi {
     private readonly timeoutMs = 10_000,
   ) {}
 
-  private async request(method: "GET" | "POST", path: string, body?: unknown): Promise<{ status: number; json: unknown }> {
+  private async request(method: "GET" | "POST", path: string, body?: unknown, timeoutMs = this.timeoutMs): Promise<{ status: number; json: unknown }> {
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
         headers: body === undefined ? { accept: "application/json" } : { accept: "application/json", "content-type": "application/json" },
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
       throw new ControllerError(`Runtime Controller に接続できません: ${(err as Error).message}`);
@@ -95,5 +99,13 @@ export class ControllerClient implements ControllerApi {
   async sendAudit(events: ToolAuditEvent[]): Promise<void> {
     const { status, json } = await this.request("POST", "/internal/audit", { events });
     if (status < 200 || status >= 300) this.fail(status, json, "監査イベントの送信");
+  }
+
+  async storeSessionArtifact(sessionId: string, body: SessionArtifactRequest): Promise<SessionArtifactResponse> {
+    const { status, json } = await this.request("POST", `/internal/sessions/${encodeURIComponent(sessionId)}/artifacts`, body, 150_000);
+    if (status !== 200) this.fail(status, json, "成果物の保存");
+    const parsed = sessionArtifactResponseSchema.safeParse(json);
+    if (!parsed.success) throw new ControllerError("成果物の保存結果の形式が正しくありません");
+    return parsed.data;
   }
 }

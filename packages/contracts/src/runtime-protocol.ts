@@ -404,6 +404,35 @@ export const approvalResponseSchema = z.object({
 });
 export type ApprovalResponse = z.infer<typeof approvalResponseSchema>;
 
+/** Browser Downloadなど、Runtime内で取得したファイルの本文上限（base64前） */
+export const SESSION_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Runtime内で取得したファイルをRun Artifactとして保存する（Tool Gateway → Controller → Agent Studio）。
+ * 本文はモデルへ返さず、保存後のメタデータだけをTool結果に載せる。
+ */
+export const sessionArtifactRequestSchema = z
+  .object({
+    source: z.enum(["browser_download"]),
+    /** Browser Worker内のArtifact ID。Upload時にも同じIDを使う */
+    source_artifact_id: z.uuid(),
+    filename: z.string().min(1).max(255).refine((value) => !/[\\/\0\r\n]/.test(value) && value !== "." && value !== "..", "ファイル名が不正です"),
+    mime_type: z.string().min(1).max(200),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    size_bytes: z.number().int().nonnegative().max(SESSION_ARTIFACT_MAX_BYTES),
+    content_base64: z.string().max(Math.ceil(SESSION_ARTIFACT_MAX_BYTES / 3) * 4 + 4),
+  })
+  .strict();
+export type SessionArtifactRequest = z.infer<typeof sessionArtifactRequestSchema>;
+
+export const sessionArtifactResponseSchema = z.object({
+  run_artifact_id: z.uuid(),
+  path: z.string(),
+  scan_status: z.enum(["passed", "rejected"]),
+  retained_until: z.iso.datetime(),
+});
+export type SessionArtifactResponse = z.infer<typeof sessionArtifactResponseSchema>;
+
 export const toolAuditEventSchema = z.object({
   session_id: z.uuid(),
   tool: z.string().max(128),
@@ -435,4 +464,5 @@ export const RUNTIME_API = {
   environmentKey: "/runtime/v1/environment-key",
   gitCredential: (jobId: string) => `/runtime/v1/jobs/${jobId}/git-credential`,
   browserProfile: (profileId: string) => `/runtime/v1/browser-profiles/${profileId}`,
+  sessionArtifacts: (sessionId: string) => `/runtime/v1/sessions/${sessionId}/artifacts`,
 } as const;

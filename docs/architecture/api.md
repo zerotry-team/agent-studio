@@ -97,6 +97,8 @@ GitHub App webhookは認証不要の`POST /webhooks/github`で受けるが、`X-
 
 Runtime向け`POST /runtime/v1/jobs/:id/git-credential`は、対象Runtimeへlease済みの`publish_builder_branch` Jobに限って1回だけ短期Installation tokenを返す。Tokenは永続化せず、Runtimeはstdin経由のaskpassで許可repositoryの`builder/*` branchだけへpushする。
 
+Runtime向け`POST /runtime/v1/sessions/:id/artifacts`は、Tool Gatewayが`browser_download`の本文をRun Artifactとして保存するときだけ使う（Browser Worker → Tool Gateway → Controller 内部API → Agent Studio）。自分のRuntimeが持つ未終了Sessionに限り、base64本文（25MB以下）のサイズ・SHA-256を再検証し、安全検査を通ったものだけS3の`orgs/<org>/runs/<run>/browser-downloads/<artifact_id>/<filename>`へ保存する。拒否したファイルは`scan_status=rejected`の記録だけを残す。モデルへはメタデータとRun Artifact IDだけを返し、本文は返さない。
+
 ヘルスチェック: `GET /health`（認証なし）。
 
 `BuilderProjectDto.releases`は、Builderが生成したAgent、Immutable Build、Preview Deployment、Preview Run、構成ハッシュとPreview受け入れ状態を返す。Projectの`completed`はPreview Runが終端になっただけでは成立せず、選択した読み取りToolの成功イベントと`outcome=succeeded`を確認した場合だけ設定する。

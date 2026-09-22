@@ -129,6 +129,11 @@ export class BrowserSession {
     return artifact;
   }
 
+  artifactBody(artifactId: string): BrowserArtifact | undefined {
+    this.sweepArtifacts();
+    return this.artifacts.get(artifactId);
+  }
+
   private sweepArtifacts(): void {
     const now = Date.now();
     for (const [id, artifact] of this.artifacts) {
