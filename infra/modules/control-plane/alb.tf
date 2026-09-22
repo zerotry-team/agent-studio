@@ -10,7 +10,7 @@ locals {
   alb_listener_port = local.alb_https ? 443 : 80
 
   # CloudFront でも同じパスを api に振り分ける
-  api_path_patterns = ["/api/*", "/runtime/*", "/health"]
+  api_path_patterns = ["/api/*", "/runtime/*", "/health", "/health/*"]
 }
 
 resource "aws_lb" "this" {
