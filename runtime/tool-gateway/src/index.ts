@@ -17,6 +17,8 @@ import { ToolCallService } from "./tool-call.js";
 import { loadToolConfig, ToolConfigError } from "./tool-config.js";
 import { createUpstreamConnector, listUpstreamTools, UpstreamSessionPool } from "./upstream.js";
 import { createSessionOutputsHandler } from "./session-outputs-handler.js";
+import { createBuilderTransferHandler } from "./builder-transfer-handler.js";
+import { AdapterHost } from "./adapter-host.js";
 
 function readVersion(): string {
   try {
@@ -93,6 +95,14 @@ async function main(): Promise<void> {
     createMcpServer: (grant) => createSessionMcpServer(grant, { catalog, toolCalls, version }),
     logger,
     sessionOutputs: createSessionOutputsHandler({ controller, logger }),
+    builderTransfer: createBuilderTransferHandler({ controller, controllerInternalUrl: config.controllerInternalUrl, logger }),
+  });
+  const adapters = new AdapterHost({
+    controllerInternalUrl: config.controllerInternalUrl,
+    catalog,
+    runtime: toolConfig.adapter_runtime,
+    secrets,
+    logger,
   });
   const internalServer = createInternalServer(catalog);
   await listen(publicServer, config.port, config.host);
@@ -110,8 +120,17 @@ async function main(): Promise<void> {
     "Tool Gateway を起動しました",
   );
 
+  void adapters.sync();
+  let syncingAdapters = false;
   const timers = [
     setInterval(() => void catalog.refreshUpstreams(), config.upstreamRefreshMs),
+    setInterval(() => {
+      if (syncingAdapters) return;
+      syncingAdapters = true;
+      void adapters.sync().finally(() => {
+        syncingAdapters = false;
+      });
+    }, 30_000),
     setInterval(() => {
       void pool.sweep();
       toolCalls.sweepCounters();
@@ -121,6 +140,7 @@ async function main(): Promise<void> {
   const shutdown = (signal: string) => {
     logger.info({ signal }, "停止します");
     for (const t of timers) clearInterval(t);
+    adapters.stopAll();
     publicServer.close();
     internalServer.close();
     Promise.allSettled([audit.stop(), pool.closeAll()]).finally(() => process.exit(0));

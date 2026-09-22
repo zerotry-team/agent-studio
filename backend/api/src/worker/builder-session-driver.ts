@@ -39,6 +39,8 @@ export function buildBuilderSessionPrompt(input: BuilderWorkspaceInput): string 
     "",
     "必須条件:",
     "- /workspace/repo の既存構成と規約を確認し、対象ディレクトリとその配下のテストだけを最小変更する。",
+    "- /workspace/repo/AGENTS.md があれば、そこに書かれたAdapterの形式（descriptor、HTTPの入出力、テストの実行方法）に必ず従う。",
+    "- Adapterが呼ぶ社内APIのURLや認証情報はコードに書かず、AGENTS.mdに書かれた環境変数から読む。",
     "- unit、contract、security testとgit diff --checkを実行し、失敗を隠さない。",
     "- Secret、環境変数、実在顧客情報、口座番号、通帳画像、外部応答本文を出力またはcommitしない。",
     "- 外部送信、git push、PR作成、default/protected branch更新を行わない。",

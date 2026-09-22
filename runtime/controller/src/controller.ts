@@ -21,6 +21,9 @@ import type { WorkspaceExecutor } from "./workspace-executor.js";
 import type { GitPublisher } from "./git-publisher.js";
 import type { BuilderResultCollector } from "./builder-result-collector.js";
 import type { BrowserProfileBroker } from "./browser-profile-broker.js";
+import type { EcsBuilderWorkspaces } from "./ecs-builder.js";
+import type { AdapterInstaller } from "./adapters.js";
+import type { ObjectStore } from "./object-store.js";
 import {
   RegistrationFailedError,
   RuntimeNotRegisteredError,
@@ -44,6 +47,10 @@ export interface ControllerDeps {
   browserProfileBroker: BrowserProfileBroker;
   secrets: ControllerSecrets;
   controllerVersion: string;
+  builderWorkspaces?: Pick<EcsBuilderWorkspaces, "prepare">;
+  adapterInstaller?: Pick<AdapterInstaller, "install" | "list" | "bundle">;
+  /** Builder 作業領域の受け渡し先（ECS） */
+  artifactStore?: ObjectStore;
   fetchImpl?: typeof fetch;
 }
 
@@ -89,6 +96,8 @@ export class Controller {
       gitPublisher,
       builderResultCollector,
       browserProfileBroker,
+      ...(deps.builderWorkspaces ? { builderWorkspaces: deps.builderWorkspaces } : {}),
+      ...(deps.adapterInstaller ? { adapterInstaller: deps.adapterInstaller } : {}),
       studio,
       secrets,
       logger,
@@ -119,6 +128,8 @@ export class Controller {
         pending_audit_events: this.audit.size,
       }),
       logger,
+      ...(this.deps.builderWorkspaces && this.deps.artifactStore ? { builderArtifacts: this.deps.artifactStore } : {}),
+      ...(this.deps.adapterInstaller ? { adapters: this.deps.adapterInstaller } : {}),
     });
     this.server = startInternalServer(app, config.internalPort);
     logger.info({ port: config.internalPort, launcher: this.deps.launcher.kind }, "Runtime Controller を起動しました");
@@ -379,6 +390,20 @@ export class Controller {
     }
   }
 
+  /**
+   * Builder は通常 Run と同じ exec-server Session Worker で実行する。
+   * - Docker: 同じ隔離 volume で結果回収と branch 公開まで行う
+   * - ECS: S3 の保存先があるときだけ（作業領域を Tool Gateway 経由で受け渡す）
+   * noop launcher では Environment 接続が成立しないため広告しない。
+   */
+  private capabilities(): Array<"builder_workspace" | "adapter_delivery"> {
+    const kind = this.deps.launcher.kind;
+    const out: Array<"builder_workspace" | "adapter_delivery"> = [];
+    if (kind === "docker" || (kind === "ecs" && this.deps.builderWorkspaces)) out.push("builder_workspace");
+    if (this.deps.adapterInstaller && kind !== "noop") out.push("adapter_delivery");
+    return out;
+  }
+
   async heartbeat(): Promise<void> {
     const { auth, studio, grants, config, controllerVersion } = this.deps;
     if (auth.state !== "active") return;
@@ -387,10 +412,7 @@ export class Controller {
       gateway_url: config.gatewayPublicUrl,
       active_sessions: grants.activeSessionIds().slice(0, 1000),
       tools: (await this.fetchCatalog()).slice(0, 500),
-      // Builderは通常Runと同じexec-server Session Workerで実行する。
-      // noop launcherではEnvironment接続が成立しないため能力を広告しない。
-      // Docker launcherでは同じ隔離workspaceを使って専用branchの公開も処理する。
-      capabilities: this.deps.launcher.kind !== "noop" ? ["builder_workspace", "adapter_delivery"] : [],
+      capabilities: this.capabilities(),
     });
     await studio.heartbeat(body);
   }

@@ -1,6 +1,7 @@
 import { CliError } from "./api.js";
 import { approve, connect, doctor, login, oauthApp, orgs, runtime, services, use } from "./commands.js";
 import { githubConnect } from "./github.js";
+import { initIntegrationRepo } from "./integration-repo.js";
 import { parseArgs } from "./input.js";
 
 const HELP = `agent-studio — Agent Studio の設定を画面操作なしで行う CLI
@@ -12,7 +13,9 @@ const HELP = `agent-studio — Agent Studio の設定を画面操作なしで行
   oauth-app set <key> --client-id <ID> --client-secret-stdin   OAuth アプリの登録（オーナー、初回のみ）
   runtime add --aws-account <ID> [--region] [--project <ID>]   貴社 AWS 用 Runtime の作成と登録用トークン
   runtime list | runtime token <id> | runtime secret <key>     Runtime の一覧・再発行・貴社 AWS に置く認証情報
-  github connect --org <GitHubの組織名> [--repo owner/name]     GitHub App の作成〜接続（ブラウザで 2 回押すだけ）
+  github connect --org <GitHubの組織名> [--repo owner/name | --create-repo owner/name]
+                                                               GitHub App の作成〜接続（ブラウザで 2 回押すだけ）
+  github init-repo <owner/name>                                Adapter 用 private repository と CI の用意（gh CLI を使う）
   approve <作成プロジェクトID>                                  本番への昇格を承認
   doctor                                                       人の操作を待っている Agent 作成と、解決するコマンド
 
@@ -33,6 +36,11 @@ export async function main(argv: string[]): Promise<void> {
       case "oauth-app": return await oauthApp(sub, rest[0], flags);
       case "runtime": return await runtime(sub, rest, flags);
       case "github":
+        if (sub === "init-repo") {
+          if (!rest[0]) throw new CliError("使い方: agent-studio github init-repo <owner/name>");
+          initIntegrationRepo(rest[0]);
+          return;
+        }
         if (sub !== "connect") throw new CliError("使い方: agent-studio github connect --org <GitHubの組織名>");
         return await githubConnect(flags);
       case "approve": return await approve(sub);

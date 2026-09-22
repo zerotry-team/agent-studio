@@ -1,3 +1,4 @@
+import { adapterDescriptorSchema } from "./adapter-descriptor.js";
 import { z } from "zod";
 import { toolNameSchema } from "./common.js";
 import { policySchema } from "./policy.js";
@@ -334,6 +335,38 @@ export const gitPublishResultSchema = z.object({
 }).strict();
 export type GitPublishResult = z.infer<typeof gitPublishResultSchema>;
 
+/**
+ * CIが署名した企業専用Adapter packageを、このRuntimeへ導入する。
+ * RuntimeはGitHub Releaseの添付ファイルを読み取り専用tokenで取得し、digestとEd25519署名を
+ * 自分で検証してからTool Gatewayで起動する。Control Planeはソース本文を扱わない。
+ */
+export const installAdapterJobSchema = z.object({
+  type: z.literal("install_adapter"),
+  job_id: z.uuid(),
+  project_id: z.uuid(),
+  change_set_id: z.uuid(),
+  connection_id: z.uuid(),
+  repository_url: z.url().refine((value) => value.startsWith("https://github.com/") && !new URL(value).username),
+  release_asset_id: z.number().int().positive(),
+  connector_key: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+  source_commit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  descriptor_hash: z.string().regex(/^[0-9a-f]{64}$/),
+  contract_hash: z.string().regex(/^[0-9a-f]{64}$/),
+  image_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  sbom_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  package_signature: z.string().min(20).max(1000),
+  signing_public_key: z.string().includes("BEGIN PUBLIC KEY").max(10000),
+  descriptor: adapterDescriptorSchema,
+}).strict();
+export type InstallAdapterJob = z.infer<typeof installAdapterJobSchema>;
+
+export const adapterInstallResultSchema = z.object({
+  connector_key: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+  image_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  installed: z.literal(true),
+}).strict();
+export type AdapterInstallResult = z.infer<typeof adapterInstallResultSchema>;
+
 export const runtimeJobSchema = z.discriminatedUnion("type", [
   startSessionJobSchema,
   stopSessionJobSchema,
@@ -343,6 +376,7 @@ export const runtimeJobSchema = z.discriminatedUnion("type", [
   publishBuilderBranchJobSchema,
   startBrowserLoginJobSchema,
   revokeBrowserProfileJobSchema,
+  installAdapterJobSchema,
 ]);
 export type RuntimeJob = z.infer<typeof runtimeJobSchema>;
 export type StartSessionJob = z.infer<typeof startSessionJobSchema>;
@@ -355,7 +389,7 @@ export const jobResultRequestSchema = z
     error: z.string().max(2000).optional(),
     // builderSessionResultはbuilderWorkspaceResultの上位互換なので先に評価し、
     // base_shaがstripされないようにする。
-    output: z.union([browserLoginResultSchema, builderSessionResultSchema, builderWorkspaceResultSchema, gitPublishResultSchema]).optional(),
+    output: z.union([browserLoginResultSchema, builderSessionResultSchema, builderWorkspaceResultSchema, gitPublishResultSchema, adapterInstallResultSchema]).optional(),
   })
   .strict()
   .superRefine((result, ctx) => {

@@ -73,6 +73,8 @@ export interface PublicServerDeps {
   maxBodyBytes?: number;
   /** Session Worker からの作業領域の成果物（/session-outputs/...） */
   sessionOutputs?: (req: IncomingMessage, res: ServerResponse, path: string) => Promise<void>;
+  /** ECS の Builder Session Worker との作業領域の受け渡し（/builder-workspaces/...） */
+  builderTransfer?: (req: IncomingMessage, res: ServerResponse, path: string) => Promise<void>;
 }
 
 /**
@@ -94,6 +96,10 @@ export function createPublicHandler(deps: PublicServerDeps): (req: IncomingMessa
     }
     if (deps.sessionOutputs && path.startsWith("/session-outputs/")) {
       await deps.sessionOutputs(req, res, path);
+      return;
+    }
+    if (deps.builderTransfer && path.startsWith("/builder-workspaces/")) {
+      await deps.builderTransfer(req, res, path);
       return;
     }
     if (path !== "/mcp") {

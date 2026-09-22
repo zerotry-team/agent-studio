@@ -107,7 +107,7 @@ function githubProvisioningSource(connections: Array<{ id: string; name: string;
 }
 
 function codeWorkspaceAction(question: CodeWorkspaceQuestion, repositories: GitHubRepositoryOption[]) {
-  const adapterPath = question.fields.find((field) => field.name === "adapter_path")?.placeholder ?? `integrations/${question.sourceTopic.replace(/_/g, "-")}`;
+  const adapterPath = question.fields.find((field) => field.name === "adapter_path")?.placeholder ?? `adapters/${question.sourceTopic.replace(/_/g, "-")}`;
   const answerFields = question.fields.filter((field) => !["repository_url", "adapter_path", "base_branch", "interface_notes"].includes(field.name));
   const repositoryField = repositories.length > 1 ? [{
     name: "repository_connection_id",
@@ -434,10 +434,10 @@ export function explicitOrganizationToolDraft(request: string, projectId: string
 }
 
 const CODE_ADAPTER_LABELS: Record<string, { source: string; capability: string; target: string }> = {
-  past_inquiry_source: { source: "問い合わせ履歴", capability: "過去の問い合わせ履歴を安定した業務スキーマで取得する", target: "integrations/customer-history" },
-  bank_document_source: { source: "口座画像の取得元", capability: "口座画像を顧客Runtime内だけで取得・集計する", target: "integrations/bank-documents" },
-  internal_denied_list: { source: "自社の否決一覧", capability: "自社の否決一覧を安定した業務スキーマで照合する", target: "integrations/internal-denied-list" },
-  public_x_post: { source: "X投稿", capability: "匿名化した審査結果を冪等に投稿し完了状態を取得する", target: "integrations/x-publisher" },
+  past_inquiry_source: { source: "問い合わせ履歴", capability: "過去の問い合わせ履歴を安定した業務スキーマで取得する", target: "adapters/customer-history" },
+  bank_document_source: { source: "口座画像の取得元", capability: "口座画像を顧客Runtime内だけで取得・集計する", target: "adapters/bank-documents" },
+  internal_denied_list: { source: "自社の否決一覧", capability: "自社の否決一覧を安定した業務スキーマで照合する", target: "adapters/internal-denied-list" },
+  public_x_post: { source: "X投稿", capability: "匿名化した審査結果を冪等に投稿し完了状態を取得する", target: "adapters/x-publisher" },
   compliance_source: { source: "反社照合サイト", capability: "指定された反社照合サイトを許可ドメイン内のBrowser Flowで検索する", target: "browser/compliance-screening" },
 };
 
@@ -584,7 +584,7 @@ export function organizationCodeWorkspaceQuestionsFor(
       reason: "このAgentが社内システムから必要以上の情報を取得したり、意図せずデータを変更したりしないよう、利用範囲を確認します",
       fields: [
         { name: "repository_url", label: "会社のIntegration Repository", secret: false, required: true, placeholder: "例: https://github.com/example/company-agent-tools.git", description: "未作成の場合は、GitHub Appで会社用Repositoryを作成できるようにする予定です。現時点では接続済みRepositoryを指定してください。" },
-        { name: "adapter_path", label: "生成先ディレクトリ", secret: false, required: true, placeholder: `integrations/company-${topic.slice(-6)}` },
+        { name: "adapter_path", label: "生成先ディレクトリ", secret: false, required: true, placeholder: `adapters/company-${topic.slice(-6)}` },
         { name: "interface_notes", label: "検索に使う項目と、取得・更新する情報", secret: false, required: true, placeholder: "例: 契約IDで検索し、契約状況と更新日だけ取得する。登録・更新はしない", description: "技術用語やAPI仕様は不要です。パスワード、APIキー、実際の顧客データは入力しないでください。" },
       ],
     }];

@@ -307,3 +307,11 @@ runtime:
               additionalProperties: false
 
     policies: []
+
+    # Builder が作る企業専用 Adapter（Integration Repository の CI が署名したもの）に渡す値。
+    # env は平文の設定、secrets は環境変数名 → connections の名前（値は Secrets Manager から Tool Gateway が読む）
+    adapter_runtime:
+      env:
+        DEMO_API_BASE_URL: "http://demo-api.<prefix>.internal:8090"
+      secrets:
+        DEMO_API_TOKEN: demo-internal-api

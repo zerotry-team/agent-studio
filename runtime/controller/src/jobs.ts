@@ -11,6 +11,9 @@ import type { GitPublisher } from "./git-publisher.js";
 import type { BuilderResultCollector } from "./builder-result-collector.js";
 import type { BrowserProfileBroker } from "./browser-profile-broker.js";
 import { sessionOutputsToken, sessionOutputsUrl } from "./session-outputs.js";
+import { builderTransferToken, builderTransferUrl } from "./builder-transfer.js";
+import type { EcsBuilderWorkspaces } from "./ecs-builder.js";
+import type { AdapterInstaller } from "./adapters.js";
 
 export interface JobHandlerDeps {
   grants: GrantStore;
@@ -20,6 +23,9 @@ export interface JobHandlerDeps {
   gitPublisher?: GitPublisher;
   builderResultCollector?: BuilderResultCollector;
   browserProfileBroker?: BrowserProfileBroker;
+  /** ECS: Builder Session の作業領域を Controller が用意し、Tool Gateway 経由で受け渡す */
+  builderWorkspaces?: Pick<EcsBuilderWorkspaces, "prepare">;
+  adapterInstaller?: Pick<AdapterInstaller, "install">;
   studio: Pick<StudioApi, "sessionEvent" | "environmentKey" | "browserProfile">;
   secrets: Pick<ControllerSecrets, "saveEnvironmentKey">;
   logger: Logger;
@@ -84,6 +90,9 @@ export class JobHandler {
         case "start_browser_login":
           if (!this.deps.browserProfileBroker) return fail("このRuntimeではHuman Login Relay / Browser Profile Brokerが有効になっていません");
           return { status: "succeeded", output: await this.deps.browserProfileBroker.startLogin(job) };
+        case "install_adapter":
+          if (!this.deps.adapterInstaller) return fail("このRuntimeでは企業専用Adapterの導入が有効になっていません");
+          return { status: "succeeded", output: await this.deps.adapterInstaller.install(job) };
         case "revoke_browser_profile":
           if (!this.deps.browserProfileBroker) return fail("このRuntimeではBrowser Profile Brokerが有効になっていません");
           await this.deps.browserProfileBroker.revoke(job.runtime_object_key);
@@ -133,7 +142,25 @@ export class JobHandler {
       );
     }
 
+    let builderTransfer: { url: string; token: string } | undefined;
+    if (builderWorkspace && this.deps.builderWorkspaces) {
+      if (!this.deps.gatewayPublicUrl) return fail("Tool GatewayのURLが設定されていないため、Builderの作業領域を受け渡せません");
+      try {
+        await this.deps.builderWorkspaces.prepare(job.job_id, builderWorkspace);
+      } catch (err) {
+        const detail = `Builderの作業領域を準備できませんでした: ${errorInfo(err).message}`;
+        log.error({ err: errorInfo(err) }, "Builderの作業領域を準備できませんでした");
+        await this.postEvent(sessionId, { type: "worker_failed", detail });
+        return fail(detail);
+      }
+      builderTransfer = {
+        url: builderTransferUrl(this.deps.gatewayPublicUrl, sessionId, builderWorkspace.change_set_id),
+        token: builderTransferToken(sessionId, builderWorkspace.change_set_id, grant.token_hash),
+      };
+    }
+
     const record = grants.upsert(grant, {
+      ...(builderWorkspace ? { builderChangeSetId: builderWorkspace.change_set_id } : {}),
       openaiSessionId,
       environmentId,
       maxLifetimeMinutes: Math.min(requestedLifetime, limits.sessionMaxLifetimeMinutes),
@@ -202,6 +229,7 @@ export class JobHandler {
         remoteUrl,
         environmentId,
         ...(builderWorkspace ? { builderWorkspace } : {}),
+        ...(builderTransfer ? { builderTransfer } : {}),
         ...(!builderWorkspace && this.deps.gatewayPublicUrl
           ? { outputs: { url: sessionOutputsUrl(this.deps.gatewayPublicUrl, sessionId), token: sessionOutputsToken(sessionId, grant.token_hash) } }
           : {}),

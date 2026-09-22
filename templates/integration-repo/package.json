@@ -1,0 +1,11 @@
+{
+  "name": "agent-studio-integrations",
+  "private": true,
+  "type": "module",
+  "description": "Agent Studio の Builder が作る、この組織専用の社内システム用 Adapter",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "check": "node scripts/agent-studio/check.mjs",
+    "test": "node scripts/agent-studio/check.mjs"
+  }
+}

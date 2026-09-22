@@ -81,6 +81,8 @@ export function buildDynamicUpstreamTools(upstream: RuntimeUpstreamMcp): Catalog
 export class ToolCatalog {
   private readonly httpTools = new Map<string, CatalogTool>();
   private readonly upstreamTools = new Map<string, CatalogTool[]>();
+  /** 企業専用 Adapter（connector key ごと）。設定ファイルのツールと同名のものは公開しない */
+  private readonly adapterTools = new Map<string, CatalogTool[]>();
 
   constructor(
     private readonly config: RuntimeToolConfig,
@@ -130,9 +132,27 @@ export class ToolCatalog {
     );
   }
 
+  setAdapterTools(connectorKey: string, tools: CatalogTool[]): void {
+    const taken = new Set([...this.httpTools.keys(), ...[...this.upstreamTools.values()].flat().map((t) => t.name)]);
+    for (const [key, list] of this.adapterTools) if (key !== connectorKey) for (const t of list) taken.add(t.name);
+    const accepted = tools.filter((tool) => !taken.has(tool.name));
+    if (accepted.length < tools.length) {
+      this.logger.warn({ connector_key: connectorKey, skipped: tools.filter((t) => taken.has(t.name)).map((t) => t.name) }, "既存のツールと同じ名前のAdapterツールは公開しません");
+    }
+    this.adapterTools.set(connectorKey, accepted);
+  }
+
+  removeAdapterTools(connectorKey: string): void {
+    this.adapterTools.delete(connectorKey);
+  }
+
   get(name: string): CatalogTool | undefined {
     const http = this.httpTools.get(name);
     if (http) return http;
+    for (const tools of this.adapterTools.values()) {
+      const hit = tools.find((t) => t.name === name);
+      if (hit) return hit;
+    }
     for (const tools of this.upstreamTools.values()) {
       const hit = tools.find((t) => t.name === name);
       if (hit) return hit;
@@ -141,7 +161,7 @@ export class ToolCatalog {
   }
 
   all(): CatalogTool[] {
-    return [...this.httpTools.values(), ...[...this.upstreamTools.values()].flat()];
+    return [...this.httpTools.values(), ...[...this.adapterTools.values()].flat(), ...[...this.upstreamTools.values()].flat()];
   }
 
   /** Controller のハートビートで Agent Studio に報告する形 */

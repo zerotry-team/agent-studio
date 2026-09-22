@@ -59,6 +59,11 @@ const envSchema = z
     BROWSER_PROFILE_KMS_KEY_ARN: z.string().min(20).optional(),
     BROWSER_PROFILE_DIRECTORY: z.string().min(1).default("/tmp/agent-studio-browser-profiles"),
 
+    /** ECS の Builder 作業領域・企業専用 Adapter の保存先（顧客 AWS の S3、SSE-KMS） */
+    RUNTIME_ARTIFACT_STORE: z.enum(["s3", "memory", "disabled"]).default("disabled"),
+    RUNTIME_ARTIFACT_BUCKET: z.string().min(3).max(255).optional(),
+    RUNTIME_ARTIFACT_KMS_KEY_ARN: z.string().min(20).optional(),
+
     BUILDER_WORKSPACE_EXECUTOR: z.enum(["disabled", "docker"]).default("disabled"),
     BUILDER_WORKSPACE_IMAGE: z.string().min(1).optional(),
     BUILDER_WORKSPACE_DOCKER_NETWORK: z.string().min(1).optional(),
@@ -107,6 +112,10 @@ const envSchema = z
     }
     if (env.NODE_ENV === "production" && env.BROWSER_LAUNCHER !== "disabled" && env.BROWSER_PROFILE_STORE !== "s3") {
       ctx.addIssue({ code: "custom", path: ["BROWSER_PROFILE_STORE"], message: "本番のBrowser ProfileはS3 SSE-KMSへ保存してください" });
+    }
+    if (env.RUNTIME_ARTIFACT_STORE === "s3") {
+      need("RUNTIME_ARTIFACT_BUCKET", "RUNTIME_ARTIFACT_STORE=s3");
+      need("RUNTIME_ARTIFACT_KMS_KEY_ARN", "RUNTIME_ARTIFACT_STORE=s3");
     }
     if (env.BUILDER_WORKSPACE_EXECUTOR === "docker") need("BUILDER_WORKSPACE_IMAGE", "BUILDER_WORKSPACE_EXECUTOR=docker");
   });
@@ -160,6 +169,7 @@ export interface ControllerConfig {
     | { type: "filesystem"; directory: string }
     | { type: "disabled" };
   workspaceExecutor: WorkspaceExecutorConfig;
+  artifactStore: { type: "s3"; bucket: string; kmsKeyArn: string } | { type: "memory" } | { type: "disabled" };
   gatewayPublicUrl: string;
   gatewayCatalogUrl: string;
   internalPort: number;
@@ -244,6 +254,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ControllerC
       : e.BROWSER_PROFILE_STORE === "filesystem"
         ? { type: "filesystem", directory: e.BROWSER_PROFILE_DIRECTORY }
         : { type: "disabled" },
+    artifactStore: e.RUNTIME_ARTIFACT_STORE === "s3"
+      ? { type: "s3", bucket: e.RUNTIME_ARTIFACT_BUCKET!, kmsKeyArn: e.RUNTIME_ARTIFACT_KMS_KEY_ARN! }
+      : e.RUNTIME_ARTIFACT_STORE === "memory" ? { type: "memory" } : { type: "disabled" },
     workspaceExecutor: e.BUILDER_WORKSPACE_EXECUTOR === "docker"
       ? {
           type: "docker",

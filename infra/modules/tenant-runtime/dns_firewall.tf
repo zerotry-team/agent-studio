@@ -14,6 +14,8 @@ locals {
       # Cloud Map（gateway / browser / demo-api）
       "*.${local.namespace}",
     ],
+    # Controller が Builder の作業領域を clone・push し、CI が Release に添付した Adapter を取得する
+    var.adapter_delivery_enabled ? ["github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"] : [],
     var.extra_allowed_domains,
   ))
 }

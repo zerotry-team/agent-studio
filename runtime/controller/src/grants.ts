@@ -22,6 +22,8 @@ export interface SessionRecord {
   worker?: WorkerInfo;
   /** Run 専用 Browser Session Worker。accessToken は監査・ログへ出さない。 */
   browser?: WorkerInfo & { accessToken: string; config: BrowserSessionConfig };
+  /** Builder Session のとき、作業領域を受け渡してよい Change Set */
+  builderChangeSetId?: string;
 }
 
 /**

@@ -117,6 +117,15 @@ data "aws_iam_policy_document" "runtime" {
     }
   }
 
+  dynamic "statement" {
+    for_each = var.adapter_delivery_enabled ? [1] : []
+    content {
+      sid       = "RuntimeArtifactObjects"
+      actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+      resources = [aws_s3_bucket.runtime_artifacts[0].arn, "${aws_s3_bucket.runtime_artifacts[0].arn}/*"]
+    }
+  }
+
   # PutSecretValue（環境キーの書き込み）で暗号化にも使うため、Decrypt に加えて GenerateDataKey を許可する。
   # Secrets Manager 経由の利用に限る
   statement {
@@ -131,9 +140,9 @@ data "aws_iam_policy_document" "runtime" {
   }
 
   dynamic "statement" {
-    for_each = local.browser_enabled ? [1] : []
+    for_each = local.browser_enabled || var.adapter_delivery_enabled ? [1] : []
     content {
-      sid       = "BrowserProfileKms"
+      sid       = "S3ObjectKms"
       actions   = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey", "kms:DescribeKey"]
       resources = [aws_kms_key.this.arn]
       condition {

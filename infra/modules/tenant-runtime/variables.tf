@@ -164,6 +164,12 @@ variable "connections" {
   }
 }
 
+variable "adapter_delivery_enabled" {
+  description = "Builder が作った企業専用 Adapter（GitHub の PR → CI → merge）を Runtime へ導入する。作業領域・Adapter の S3 と GitHub への名前解決を用意する"
+  type        = bool
+  default     = true
+}
+
 variable "tool_config" {
   description = "Tool Gateway のツール設定（RuntimeToolConfig）。文字列中の <prefix> は as-<tenant_short>-<stage_short> に置き換える"
   type        = any

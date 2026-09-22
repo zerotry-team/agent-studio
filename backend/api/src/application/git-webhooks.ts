@@ -21,6 +21,8 @@ const deploymentEvidenceSchema = z.object({
   secret_scan: z.object({ status: z.literal("passed"), findings: z.literal(0) }).strict(),
   provenance: z.object({ builder: z.string().min(1), source_repository: z.string().min(1), build_context: z.string().min(1) }).passthrough(),
   descriptor: adapterDescriptorSchema,
+  /** CIがGitHub Releaseへ添付したAdapter package。あればRuntimeへ導入jobを送る */
+  package: z.object({ release_asset_id: z.number().int().positive() }).strict().optional(),
 }).strict();
 
 type WebhookHeaders = { delivery: string | null; event: string | null; signature: string | null };
@@ -68,7 +70,7 @@ export class GitWebhookService {
         const headSha = typeof rawCheck.head_sha === "string" ? rawCheck.head_sha : typeof nestedSuite.head_sha === "string" ? nestedSuite.head_sha : null;
         if (headSha) await this.automation.tryAutoMergeByHead(candidate.organization_id, metadata.repository_url, headSha, null);
       }
-      if (headers.event === "deployment_status") await this.handleDeployment(candidate.organization_id, metadata, payload);
+      if (headers.event === "deployment_status") await this.handleDeployment(candidate.organization_id, connection.id, metadata, payload);
       await this.deps.db.org(candidate.organization_id, (tx) => tx.git_webhook_deliveries.create({ data: {
         organization_id: candidate.organization_id,
         delivery_id: headers.delivery!,
@@ -127,7 +129,7 @@ export class GitWebhookService {
     });
   }
 
-  private async handleDeployment(organizationId: string, metadata: ReturnType<typeof parseGitHubAppMetadata>, payload: Record<string, unknown>) {
+  private async handleDeployment(organizationId: string, connectionId: string, metadata: ReturnType<typeof parseGitHubAppMetadata>, payload: Record<string, unknown>) {
     const status = payload.deployment_status && typeof payload.deployment_status === "object" ? payload.deployment_status as Record<string, unknown> : {};
     const deployment = payload.deployment && typeof payload.deployment === "object" ? payload.deployment as Record<string, unknown> : {};
     if (status.state !== "success" || deployment.environment !== "preview") return;
@@ -171,6 +173,42 @@ export class GitWebhookService {
           health_status: "pending", error_class: null, error: null, deployed_at: new Date(),
         },
       });
+      if (evidence.package) {
+        // 同じpackageの導入jobは1つだけ（webhookの再送・Re-runで重ねない）
+        const existingJob = await tx.runtime_jobs.findFirst({
+          where: {
+            runtime_id: evidence.runtime_id,
+            type: "install_adapter",
+            status: { in: ["pending", "leased", "succeeded"] },
+            AND: [
+              { payload: { path: ["change_set_id"], equals: change.id } },
+              { payload: { path: ["image_digest"], equals: evidence.image_digest } },
+            ],
+          },
+        });
+        if (!existingJob) await tx.runtime_jobs.create({ data: {
+          organization_id: organizationId,
+          runtime_id: evidence.runtime_id,
+          type: "install_adapter",
+          payload: {
+            type: "install_adapter",
+            project_id: change.project_id,
+            change_set_id: change.id,
+            connection_id: connectionId,
+            repository_url: metadata.repository_url,
+            release_asset_id: evidence.package.release_asset_id,
+            connector_key: evidence.connector_key,
+            source_commit: change.merge_sha!,
+            descriptor_hash: evidence.descriptor_hash,
+            contract_hash: evidence.contract_hash,
+            image_digest: evidence.image_digest,
+            sbom_digest: evidence.sbom_digest,
+            package_signature: evidence.package_signature,
+            signing_public_key: metadata.package_signing_public_key,
+            descriptor: evidence.descriptor,
+          } as Prisma.InputJsonValue,
+        } });
+      }
       await tx.builder_validation_runs.create({ data: {
         organization_id: organizationId, project_id: change.project_id, suite: "adapter_package", environment: "preview", status: "passed",
         evidence: { change_set_id: change.id, source_commit: change.merge_sha, connector_key: evidence.connector_key, descriptor_hash: evidence.descriptor_hash, contract_hash: evidence.contract_hash, image_digest: evidence.image_digest, sbom_digest: evidence.sbom_digest, critical_vulnerabilities: 0, secret_findings: 0, signature_present: true }, finished_at: new Date(),
