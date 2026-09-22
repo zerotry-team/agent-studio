@@ -6,8 +6,10 @@ export function isBrowserCapability(name: string): boolean {
   return baseName.startsWith("browser_") || baseName === "computer_action";
 }
 
-export function usesBrowserCapability(resolution: Pick<CapabilityResolutionDto, "selected_tools">): boolean {
-  return resolution.selected_tools.some(isBrowserCapability);
+export function usesBrowserCapability(
+  resolution: Pick<CapabilityResolutionDto, "selected_tools"> | { selected_tools?: readonly string[] | null } | null | undefined,
+): boolean {
+  return (resolution?.selected_tools ?? []).some(isBrowserCapability);
 }
 
 /** restricted は接続先が1件以上固定されるまで未設定として扱う。 */

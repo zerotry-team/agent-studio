@@ -15,6 +15,11 @@ describe("browser access helpers", () => {
     expect(usesBrowserCapability({ selected_tools: ["list_posts"] })).toBe(false);
   });
 
+  it("旧AgentのCapability Resolutionにselected_toolsがなくてもBrowser未使用として扱う", () => {
+    expect(usesBrowserCapability({})).toBe(false);
+    expect(usesBrowserCapability(null)).toBe(false);
+  });
+
   it("publicまたは1件以上の許可ドメインがあるときだけ設定済みにする", () => {
     expect(isBrowserAccessConfigured("public", [])).toBe(true);
     expect(isBrowserAccessConfigured("restricted", ["example.com"])).toBe(true);
