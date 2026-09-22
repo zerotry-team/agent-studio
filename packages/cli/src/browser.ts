@@ -36,12 +36,15 @@ export function waitForCallback(paths: string[], options: { timeoutMs?: number; 
     const server = createServer((request, response) => {
       const url = new URL(request.url ?? "/", `http://127.0.0.1:${CALLBACK_PORT}`);
       if (!paths.includes(url.pathname)) {
-        response.writeHead(404).end();
+        response.writeHead(404, { connection: "close" }).end();
         return;
       }
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      // 接続を使い回させない。使い回されると、次の待ち受け（同じポート）宛ての戻りが
+      // 閉じたこのサーバーに届いて 404 になる
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", connection: "close" });
       response.end(options.page ?? "<html><body style=\"font-family:sans-serif\"><p>完了しました。この画面は閉じて、ターミナルに戻ってください。</p></body></html>");
       clearTimeout(timer);
+      response.once("finish", () => server.closeAllConnections());
       server.close();
       resolve({ path: url.pathname, query: url.searchParams });
     });
@@ -62,10 +65,10 @@ export function serveOnce(path: string, html: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const server = createServer((request, response) => {
       if (new URL(request.url ?? "/", "http://127.0.0.1").pathname !== path) {
-        response.writeHead(404).end();
+        response.writeHead(404, { connection: "close" }).end();
         return;
       }
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", connection: "close" });
       response.end(html);
       server.close();
       resolve();
