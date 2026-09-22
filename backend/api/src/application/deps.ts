@@ -11,6 +11,7 @@ import type { ObjectStore } from "../infrastructure/storage/object-store.js";
 import type { Logger } from "../logger.js";
 import type { DiscoveredMcpToolDto } from "@agent-studio/contracts";
 import type { GitProvider } from "../infrastructure/git/github-app.js";
+import type { ManagedRuntimeProvisioner } from "../infrastructure/aws/managed-runtime-provisioner.js";
 
 /** アプリケーション層が使う依存（container.ts で組み立てる） */
 export interface Deps {
@@ -28,4 +29,5 @@ export interface Deps {
   objects: ObjectStore;
   mcpDiscovery: (serverUrl: string) => Promise<DiscoveredMcpToolDto[]>;
   gitProvider: GitProvider;
+  managedRuntimeProvisioner: ManagedRuntimeProvisioner;
 }

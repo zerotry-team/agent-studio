@@ -238,6 +238,35 @@ variable "log_level" {
   default     = "info"
 }
 
+variable "managed_runtime_provisioning_role_arn" {
+  description = "Organizations管理アカウントにあるManaged Runtime構築ロール。空なら自動構築を無効にする"
+  type        = string
+  default     = ""
+}
+
+variable "managed_runtime_state_bucket" {
+  description = "Managed RuntimeごとのTerraform stateを置く管理アカウントのS3バケット"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.managed_runtime_provisioning_role_arn == "" || var.managed_runtime_state_bucket != ""
+    error_message = "managed_runtime_provisioning_role_arnを指定するときはmanaged_runtime_state_bucketも必要です。"
+  }
+}
+
+variable "managed_runtime_account_email_domain" {
+  description = "新規AWSアカウントの一意なメールアドレスに使うドメイン"
+  type        = string
+  default     = "zerotry.dev"
+}
+
+variable "managed_runtime_max_concurrent" {
+  description = "同時に構築するManaged Runtime数"
+  type        = number
+  default     = 1
+}
+
 # ---- ECS のサイズ ----
 
 variable "api_desired_count" {

@@ -155,7 +155,7 @@ export class RuntimeApiService {
   async token(req: TokenRequest): Promise<TokenResponse> {
     const principal = await this.deps.runtimeIdentity.verify(req.identity);
     const runtime = await this.deps.system.resolveRuntimePrincipal(principal.accountId, principal.roleName);
-    if (!runtime || runtime.status === "pending") throw notRegistered();
+    if (!runtime || runtime.status === "pending" || runtime.status === "provisioning") throw notRegistered();
     if (runtime.status === "revoked") throw revoked();
     const { token, expiresIn } = await this.deps.runtimeTokens.issue({
       runtimeId: runtime.runtime_id,

@@ -54,6 +54,15 @@ locals {
     },
     # 空のときは設定しない（アプリの既定値を使う）
     var.openai_default_model != "" ? { OPENAI_DEFAULT_MODEL = var.openai_default_model } : {},
+    var.managed_runtime_provisioning_role_arn != "" ? {
+      MANAGED_RUNTIME_PROVISIONING_ROLE_ARN = var.managed_runtime_provisioning_role_arn
+      MANAGED_RUNTIME_STATE_BUCKET          = var.managed_runtime_state_bucket
+      MANAGED_RUNTIME_ACCOUNT_EMAIL_DOMAIN  = var.managed_runtime_account_email_domain
+      MANAGED_RUNTIME_IMAGE_REGISTRY        = var.image_registry
+      MANAGED_RUNTIME_IMAGE_TAG             = var.image_tag
+      MANAGED_RUNTIME_TERRAFORM_ROOT        = "/app/infra/managed-runtime"
+      MANAGED_RUNTIME_MAX_CONCURRENT        = tostring(var.managed_runtime_max_concurrent)
+    } : {},
   )
 
   backend_secrets = {
@@ -240,7 +249,7 @@ resource "aws_ecs_task_definition" "worker" {
   cpu                      = tostring(var.worker_cpu)
   memory                   = tostring(var.worker_memory)
   execution_role_arn       = module.exec_app.arn
-  task_role_arn            = aws_iam_role.app_task.arn
+  task_role_arn            = aws_iam_role.worker_task.arn
 
   runtime_platform {
     operating_system_family = "LINUX"

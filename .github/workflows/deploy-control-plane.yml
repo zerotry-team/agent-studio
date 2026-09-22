@@ -22,6 +22,8 @@ on:
       - "infra/modules/control-plane/**"
       - "infra/modules/network/**"
       - "infra/modules/ecs-execution-role/**"
+      - "infra/managed-runtime/**"
+      - "infra/modules/tenant-runtime/**"
       - "yarn.lock"
       - ".github/workflows/deploy-control-plane.yml"
   workflow_dispatch:
@@ -170,6 +172,8 @@ jobs:
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
             -var="image_registry=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com" \
             -var="initial_admin_email=${{ secrets.INITIAL_ADMIN_EMAIL }}" \
+            -var="managed_runtime_provisioning_role_arn=${{ vars.MANAGED_RUNTIME_PROVISIONING_ROLE_ARN }}" \
+            -var="managed_runtime_state_bucket=${{ vars.MANAGED_RUNTIME_STATE_BUCKET }}" \
             -var="image_tag=${{ steps.current.outputs.tag }}" \
             -var="migrate_image_tag=${NEW_TAG}"
 
@@ -203,6 +207,8 @@ jobs:
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
             -var="image_registry=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com" \
             -var="initial_admin_email=${{ secrets.INITIAL_ADMIN_EMAIL }}" \
+            -var="managed_runtime_provisioning_role_arn=${{ vars.MANAGED_RUNTIME_PROVISIONING_ROLE_ARN }}" \
+            -var="managed_runtime_state_bucket=${{ vars.MANAGED_RUNTIME_STATE_BUCKET }}" \
             -var="image_tag=${NEW_TAG}" \
             -var="migrate_image_tag=${NEW_TAG}"
 

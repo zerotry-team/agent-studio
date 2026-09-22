@@ -88,6 +88,7 @@ export const APPROVAL_STATUS: Record<ApprovalStatus, LabelWithTone> = {
 };
 
 export const RUNTIME_STATUS: Record<RuntimeStatus, LabelWithTone> = {
+  provisioning: { label: "構築中", tone: "info" },
   pending: { label: "準備中", tone: "info" },
   active: { label: "接続済み", tone: "success" },
   degraded: { label: "異常", tone: "warning" },
@@ -96,6 +97,7 @@ export const RUNTIME_STATUS: Record<RuntimeStatus, LabelWithTone> = {
 };
 
 export const RUNTIME_STATUS_DESCRIPTIONS: Record<RuntimeStatus, string> = {
+  provisioning: "Agent Studioが専用AWSアカウントとRuntimeを構築しています",
   pending: "登録を待っています。登録用トークンを発行し、AWS 側に設定してください",
   active: "正常に接続されています",
   degraded: "接続はしていますが、一部に問題があります",

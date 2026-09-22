@@ -16,7 +16,7 @@ import type { Deps } from "../application/deps.js";
  * 結合テスト用の環境。アプリ（Hono）と Worker を同じプロセスで動かし、OpenAI は擬似実装を使う。
  * DB は DATABASE_URL（アプリ用ロール）/ DIRECT_URL（所有者: テストデータの準備用）。
  */
-export function createHarness(overrides: Partial<Deps> = {}) {
+export function createHarness(overrides: Partial<Deps> = {}, envOverrides: NodeJS.ProcessEnv = {}) {
   const env = loadEnv({
     ...process.env,
     NODE_ENV: "test",
@@ -30,6 +30,7 @@ export function createHarness(overrides: Partial<Deps> = {}) {
     WORKER_ID: `test-${randomUUID()}`,
     ARTIFACTS_BUCKET: "test-artifacts",
     AUDIT_EXPORT_BUCKET: "test-audit",
+    ...envOverrides,
   });
   const logger = createLogger(env.LOG_LEVEL, "test");
   const database = createDatabase(env);

@@ -1,7 +1,8 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import {
   createRuntimeProfileSchema,
+  createManagedRuntimeEnvironmentSchema,
   isBrowserAccessConfigured,
   usesBrowserCapability,
   type AgentManifest,
@@ -11,6 +12,8 @@ import {
   type CreateDeploymentInput,
   type CreateRuntimeInput,
   type CreateRuntimeProfileInput,
+  type CreateManagedRuntimeEnvironmentInput,
+  type ManagedRuntimeEnvironmentDto,
   type DeploymentDto,
   type NetworkPolicy,
   type OpenAiTemplate,
@@ -135,6 +138,119 @@ export class EnvironmentService {
     });
   }
 
+  /**
+   * Agent Studio 管理のAWS Runtimeを要求する。
+   * AWSアカウント作成とTerraform applyはWorkerが非同期で進める。
+   */
+  async createManagedEnvironment(
+    actor: MemberActor,
+    raw: CreateManagedRuntimeEnvironmentInput,
+  ): Promise<ManagedRuntimeEnvironmentDto> {
+    requireRole(actor, "admin");
+    if (!this.deps.env.MANAGED_RUNTIME_PROVISIONING_ROLE_ARN) {
+      throw preconditionFailed("Agent Studio管理AWSの自動構築がまだ設定されていません");
+    }
+    const input = createManagedRuntimeEnvironmentSchema.parse(raw);
+    const requestSuffix = randomUUID().replaceAll("-", "").slice(0, 10);
+
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const organization = await tx.organizations.findUnique({ where: { id: actor.organizationId } });
+      if (!organization) throw notFound("組織");
+      const duplicate = await tx.runtime_profiles.findUnique({
+        where: { organization_id_key: { organization_id: actor.organizationId, key: input.key } },
+      });
+      if (duplicate) throw conflict(`キー ${input.key} の実行環境はすでにあります`);
+      const existing = await tx.runtimes.findFirst({
+        where: {
+          organization_id: actor.organizationId,
+          provisioning_type: "studio_managed",
+          stage: input.stage,
+          status: { not: "revoked" },
+        },
+      });
+      if (existing) throw conflict(`${input.stage}用のAgent Studio管理Runtimeはすでにあります`);
+
+      const tenantShort = managedTenantShort(organization.slug);
+      const stageShort = input.stage === "production" ? "prod" : "stg";
+      const accountName = managedAccountName(organization.slug, input.stage, requestSuffix);
+      const accountEmail = managedAccountEmail(
+        organization.slug,
+        input.stage,
+        requestSuffix,
+        this.deps.env.MANAGED_RUNTIME_ACCOUNT_EMAIL_DOMAIN,
+      );
+      const runtime = await tx.runtimes.create({
+        data: {
+          organization_id: actor.organizationId,
+          name: input.runtime_name,
+          stage: input.stage,
+          provisioning_type: "studio_managed",
+          aws_account_id: null,
+          aws_region: input.aws_region,
+          expected_role_name: `as-${tenantShort}-${stageShort}-runtime`,
+          status: "provisioning",
+          provisioning_status: "queued",
+          provisioning_step: "専用AWSアカウントの作成を待っています",
+          provisioning_progress: 5,
+          provisioning_account_name: accountName,
+          provisioning_account_email: accountEmail,
+          provisioning_tenant_short: tenantShort,
+        },
+      });
+      const profile = await tx.runtime_profiles.create({
+        data: {
+          organization_id: actor.organizationId,
+          key: input.key,
+          name: input.name,
+          type: "self_hosted",
+          runtime_id: runtime.id,
+        },
+        include: { runtime: true },
+      });
+      await recordAudit(tx, auditBy(actor, {
+        action: "runtime.managed_provisioning.request",
+        targetType: "runtime",
+        targetId: runtime.id,
+        detail: { stage: input.stage, region: input.aws_region, profile_key: input.key },
+      }));
+      return { profile: toRuntimeProfileDto(profile), runtime: toRuntimeDto(runtime) };
+    });
+  }
+
+  async retryManagedProvisioning(actor: MemberActor, runtimeId: string): Promise<RuntimeDto> {
+    requireRole(actor, "admin");
+    return this.deps.db.run(scopeOf(actor), async (tx) => {
+      const runtime = await tx.runtimes.findFirst({ where: { id: runtimeId, organization_id: actor.organizationId } });
+      if (!runtime) throw notFound("Runtime");
+      if (runtime.provisioning_type !== "studio_managed" || runtime.provisioning_status !== "failed") {
+        throw preconditionFailed("失敗したAgent Studio管理Runtimeだけ再試行できます");
+      }
+      const nextStatus = runtime.aws_account_id ? "infrastructure_applying" : "queued";
+      const updated = await tx.runtimes.update({
+        where: { id: runtime.id },
+        data: {
+          status: "provisioning",
+          provisioning_status: nextStatus,
+          provisioning_step: runtime.aws_account_id ? "AWS基盤の再構築を待っています" : "専用AWSアカウントの再確認を待っています",
+          provisioning_progress: runtime.aws_account_id ? 45 : 5,
+          provisioning_error: null,
+          provisioning_request_id: runtime.aws_account_id ? runtime.provisioning_request_id : null,
+          provisioning_lease_owner: null,
+          provisioning_lease_until: null,
+          provisioning_attempts: { increment: 1 },
+          provisioning_completed_at: null,
+        },
+      });
+      await recordAudit(tx, auditBy(actor, {
+        action: "runtime.managed_provisioning.retry",
+        targetType: "runtime",
+        targetId: runtime.id,
+        detail: { resumed_from: nextStatus },
+      }));
+      return toRuntimeDto(updated);
+    });
+  }
+
   /** 一度だけ使える登録用トークン（RTM-02 / SEC-06）。平文はこの応答でしか返さない */
   async issueBootstrapToken(actor: MemberActor, runtimeId: string): Promise<BootstrapTokenDto> {
     requireRole(actor, "admin");
@@ -177,7 +293,7 @@ export class EnvironmentService {
     await this.deps.db.run(scopeOf(actor), async (tx) => {
       const r = await tx.runtimes.findFirst({ where: { id: runtimeId, organization_id: actor.organizationId } });
       if (!r) throw notFound("Runtime");
-      if (r.status === "revoked" || r.status === "pending") throw preconditionFailed("登録済みの Runtime にだけ配布できます");
+      if (r.status === "revoked" || r.status === "pending" || r.status === "provisioning") throw preconditionFailed("登録済みの Runtime にだけ配布できます");
       await tx.runtime_jobs.create({
         data: {
           organization_id: actor.organizationId,
@@ -582,4 +698,19 @@ export class EnvironmentService {
       return toDeploymentDto(updated);
     });
   }
+}
+
+function managedTenantShort(slug: string): string {
+  const normalized = slug.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  const shortened = normalized.slice(0, 20).replace(/-+$/g, "");
+  return shortened || "company";
+}
+
+function managedAccountName(slug: string, stage: string, suffix: string): string {
+  return `agent-studio-${slug}-${stage}-${suffix}`.slice(0, 50).replace(/-+$/g, "");
+}
+
+function managedAccountEmail(slug: string, stage: string, suffix: string, domain: string): string {
+  const local = `aws+${slug}-${stage}-${suffix}`.toLowerCase().replace(/[^a-z0-9+_.-]+/g, "-").slice(0, 64);
+  return `${local}@${domain}`;
 }

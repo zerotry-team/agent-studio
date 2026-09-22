@@ -26,6 +26,7 @@ import { GitHubAppProvider } from "./infrastructure/git/github-app.js";
 import { GitWebhookService } from "./application/git-webhooks.js";
 import { DeploymentTriggerService } from "./application/deployment-triggers.js";
 import { BrowserProfileService } from "./application/browser-profiles.js";
+import { AwsManagedRuntimeProvisioner, DisabledManagedRuntimeProvisioner } from "./infrastructure/aws/managed-runtime-provisioner.js";
 
 export interface Services {
   organizations: OrganizationService;
@@ -66,6 +67,9 @@ export function buildDeps(env: Env, logger: Logger, database: Database, override
     objects: createObjectStore(env),
     mcpDiscovery: discoverMcpTools,
     gitProvider: new GitHubAppProvider(),
+    managedRuntimeProvisioner: env.MANAGED_RUNTIME_PROVISIONING_ROLE_ARN
+      ? new AwsManagedRuntimeProvisioner(env, logger)
+      : new DisabledManagedRuntimeProvisioner(),
     ...overrides,
   };
 }

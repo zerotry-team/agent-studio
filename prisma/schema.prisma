@@ -377,11 +377,27 @@ model runtimes {
   stage              String
   /// studio_managed / customer_owned
   provisioning_type  String
-  aws_account_id     String
+  aws_account_id     String?
   aws_region         String
   expected_role_name String
-  /// pending / active / degraded / offline / revoked
+  /// provisioning / pending / active / degraded / offline / revoked
   status             String    @default("pending")
+  /// Studio-managed Runtime の自動構築状態。customer_owned では null。
+  provisioning_status     String?
+  provisioning_step       String?
+  provisioning_progress   Int       @default(0)
+  provisioning_error      String?
+  provisioning_request_id String?
+  provisioning_account_name String?
+  provisioning_account_email String?
+  provisioning_tenant_short String?
+  /// Terraform outputs needed to resume bootstrap configuration after a worker restart.
+  provisioning_outputs     Json      @default("{}")
+  provisioning_lease_owner String?
+  provisioning_lease_until DateTime? @db.Timestamptz(6)
+  provisioning_started_at DateTime?  @db.Timestamptz(6)
+  provisioning_completed_at DateTime? @db.Timestamptz(6)
+  provisioning_attempts   Int       @default(0)
   controller_version String?
   /// Session Worker から見た Tool Gateway の MCP エンドポイント（Controller が報告する）
   gateway_url        String?
@@ -407,6 +423,7 @@ model runtimes {
   /// 1つの AWS プリンシパルは、全組織を通じて1つの Runtime にしか対応しない
   @@unique([aws_account_id, expected_role_name])
   @@unique([organization_id, id])
+  @@index([provisioning_status, provisioning_lease_until, created_at])
 }
 
 model runtime_bootstrap_tokens {

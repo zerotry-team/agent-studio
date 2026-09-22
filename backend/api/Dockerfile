@@ -5,8 +5,19 @@
 #   Worker:       node dist/worker.js
 #   Migration:    node dist/scripts/migrate.js
 FROM node:22-bookworm-slim AS base
+ARG TERRAFORM_VERSION=1.15.8
+ARG TARGETARCH
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends openssl ca-certificates curl \
+  && apt-get install -y --no-install-recommends openssl ca-certificates curl unzip \
+  && case "${TARGETARCH}" in \
+       amd64) TERRAFORM_SHA256=d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d ;; \
+       arm64) TERRAFORM_SHA256=8891e9dcedc9e3b8950bc6af9d4d8af1f4cfade3062f53b9dc403a89f6ce8c9c ;; \
+       *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+     esac \
+  && curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${TARGETARCH}.zip" -o /tmp/terraform.zip \
+  && echo "${TERRAFORM_SHA256}  /tmp/terraform.zip" | sha256sum -c - \
+  && unzip /tmp/terraform.zip -d /usr/local/bin \
+  && rm /tmp/terraform.zip \
   && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 WORKDIR /app
@@ -47,6 +58,8 @@ COPY --from=build /app/packages/contracts/package.json packages/contracts/packag
 COPY --from=build /app/packages/contracts/dist packages/contracts/dist
 COPY --from=build /app/backend/api/package.json backend/api/package.json
 COPY --from=build /app/backend/api/dist backend/api/dist
+COPY infra/managed-runtime infra/managed-runtime
+COPY infra/modules infra/modules
 WORKDIR /app/backend/api
 USER node
 EXPOSE 3200

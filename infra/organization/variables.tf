@@ -64,3 +64,14 @@ variable "create_bootstrap_user" {
   type        = bool
   default     = false
 }
+
+variable "runtime_provisioner_principal_arns" {
+  description = "Managed Runtimeを構築できるControl Plane WorkerロールARN。空なら自動構築用ロールとstate bucketを作らない"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for arn in var.runtime_provisioner_principal_arns : can(regex("^arn:aws:iam::[0-9]{12}:role/.+$", arn))])
+    error_message = "runtime_provisioner_principal_arnsにはIAM role ARNを指定してください。"
+  }
+}

@@ -3,6 +3,7 @@
 import type { ProvisioningType, RuntimeDto, Stage } from "@agent-studio/contracts";
 import { FlaskConical, Plus, Rocket, Server } from "lucide-react";
 import { RuntimeStatusBadge, StageBadge } from "@/components/common/status-badges";
+import { Alert } from "@/components/ui/alert";
 import { Field } from "@/components/ui/field";
 import { Input, Select } from "@/components/ui/input";
 import { RadioCards, type RadioCardOption } from "@/components/ui/radio-cards";
@@ -57,7 +58,9 @@ export function AwsRuntimeFields({
     {
       value: "new",
       label: "新しく作る",
-      description: "AWS アカウントの情報を登録して、新しい Runtime を作ります",
+      description: provisioningType === "studio_managed"
+        ? "Agent Studioが専用AWSアカウントとRuntimeを自動で用意します"
+        : "AWS アカウントの情報を登録して、新しい Runtime を作ります",
       icon: Plus,
       disabled,
     },
@@ -126,16 +129,13 @@ export function AwsRuntimeFields({
             error={errors["runtime.stage"]}
           />
 
-          <div className="grid gap-5 sm:grid-cols-2">
+          <div className={provisioningType === "studio_managed" ? "" : "grid gap-5 sm:grid-cols-2"}>
+            {provisioningType === "customer_owned" ? (
             <Field
               label="AWS アカウント ID"
               required
               error={errors["runtime.aws_account_id"]}
-              hint={
-                provisioningType === "studio_managed"
-                  ? "Agent Studio が御社専用に用意した AWS アカウントの ID（12 桁の数字）です。"
-                  : "実行環境を作る、御社の AWS アカウントの ID（12 桁の数字）です。"
-              }
+              hint="実行環境を作る、御社の AWS アカウントの ID（12 桁の数字）です。"
             >
               <Input
                 value={state.awsAccountId}
@@ -148,6 +148,7 @@ export function AwsRuntimeFields({
                 disabled={disabled}
               />
             </Field>
+            ) : null}
             <Field label="リージョン" required error={errors["runtime.aws_region"]} hint="通常は東京リージョン（ap-northeast-1）のままで構いません。">
               <Input
                 value={state.awsRegion}
@@ -161,7 +162,7 @@ export function AwsRuntimeFields({
             </Field>
           </div>
 
-          <div className="grid gap-5 sm:grid-cols-2">
+          {provisioningType === "customer_owned" ? <div className="grid gap-5 sm:grid-cols-2">
             <Field
               label="テナントの短い名前"
               optional
@@ -195,7 +196,11 @@ export function AwsRuntimeFields({
                 disabled={disabled}
               />
             </Field>
-          </div>
+          </div> : (
+            <Alert tone="info" title="AWSの設定はAgent Studioが行います">
+              専用AWSアカウントの作成、VPC・ECS・IAMの構築、Runtimeの初回接続まで自動で進みます。AWSアカウントIDやIAMロール名の入力は不要です。
+            </Alert>
+          )}
         </div>
       )}
     </div>

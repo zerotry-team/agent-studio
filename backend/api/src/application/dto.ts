@@ -52,6 +52,7 @@ import type {
   EvalExpectations,
   EvalRunDto,
   MemberRole,
+  ManagedRuntimeProvisioningStatus,
   NetworkPolicy,
   OpenAiTemplate,
   OrganizationDto,
@@ -393,6 +394,17 @@ export const toRuntimeDto = (r: runtimes): RuntimeDto => ({
     risk: t.risk,
     reads_untrusted_content: t.reads_untrusted_content,
   })),
+  provisioning: r.provisioning_status
+    ? {
+        status: r.provisioning_status as ManagedRuntimeProvisioningStatus,
+        step: r.provisioning_step ?? "準備を開始しています",
+        progress: r.provisioning_progress,
+        error: r.provisioning_error,
+        can_retry: r.provisioning_status === "failed",
+        started_at: iso(r.provisioning_started_at),
+        completed_at: iso(r.provisioning_completed_at),
+      }
+    : null,
   created_at: r.created_at.toISOString(),
 });
 

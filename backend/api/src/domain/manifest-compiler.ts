@@ -190,6 +190,7 @@ export function compileAgent(input: {
       environment = { type: "none" };
     } else {
       if (profile.runtime.status === "revoked") errors.push("この実行環境の Runtime は無効にされています");
+      else if (profile.runtime.status === "provisioning") errors.push("この実行環境の Runtime はまだ構築中です");
       else if (profile.runtime.status === "pending") errors.push("この実行環境の Runtime はまだ登録されていません");
       if (runtimeTools.length > 0 && !profile.runtime.gateway_url) {
         errors.push("Runtime から Tool Gateway の接続先がまだ報告されていません。Runtime の起動を確認してください");

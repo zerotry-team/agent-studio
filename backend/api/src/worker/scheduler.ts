@@ -12,6 +12,7 @@ import { parseExternalJobResponse } from "./external-jobs.js";
 import { BuilderOrchestrator } from "./builder-orchestrator.js";
 import { BuilderSessionDriver } from "./builder-session-driver.js";
 import { ConnectionHealthMonitor } from "./connection-health.js";
+import { ManagedRuntimeProvisioningDriver } from "./managed-runtime-provisioning.js";
 
 const RUN_LEASE_SECONDS = 60;
 const RUNTIME_OFFLINE_AFTER_SECONDS = 180;
@@ -27,6 +28,7 @@ const JOB_MAX_ATTEMPTS = 3;
 export class WorkerScheduler {
   private readonly active = new Map<string, Promise<void>>();
   private readonly activeBuilderSessions = new Map<string, Promise<void>>();
+  private readonly activeManagedRuntimes = new Map<string, Promise<void>>();
   private readonly workflows: WorkflowEngine;
   private readonly evals: EvalEngine;
   private readonly audit: AuditExporter;
@@ -55,6 +57,7 @@ export class WorkerScheduler {
       this.every(10_000, signal, () => this.runDueSchedules()),
       this.every(2_000, signal, () => this.builders.tick()),
       this.every(1_000, signal, () => this.claimBuilderSessions(signal)),
+      this.every(5_000, signal, () => this.claimManagedRuntimes(signal)),
       this.every(10 * 60_000, signal, () => this.audit.tick()),
       this.every(5 * 60_000, signal, () => this.connectionHealth.tick()),
     ];
@@ -62,6 +65,7 @@ export class WorkerScheduler {
     // 停止時: 実行中の Run はリースを手放して終わる（別の Worker が引き継ぐ）
     await Promise.allSettled(this.active.values());
     await Promise.allSettled(this.activeBuilderSessions.values());
+    await Promise.allSettled(this.activeManagedRuntimes.values());
   }
 
   private async runDueSchedules() {
@@ -213,6 +217,18 @@ export class WorkerScheduler {
       const driver = new BuilderSessionDriver(this.deps, sessionId, organizationId, signal);
       const task = driver.drive().finally(() => this.activeBuilderSessions.delete(sessionId));
       this.activeBuilderSessions.set(sessionId, task);
+    }
+  }
+
+  private async claimManagedRuntimes(signal: AbortSignal) {
+    const capacity = this.deps.env.MANAGED_RUNTIME_MAX_CONCURRENT - this.activeManagedRuntimes.size;
+    if (capacity <= 0 || signal.aborted || !this.deps.env.MANAGED_RUNTIME_PROVISIONING_ROLE_ARN) return;
+    const claimed = await this.deps.system.claimManagedRuntimeProvisioning(this.deps.env.WORKER_ID, 60 * 60, capacity);
+    for (const { runtime_id: runtimeId, organization_id: organizationId } of claimed) {
+      if (this.activeManagedRuntimes.has(runtimeId)) continue;
+      const driver = new ManagedRuntimeProvisioningDriver(this.deps, runtimeId, organizationId);
+      const task = driver.drive().finally(() => this.activeManagedRuntimes.delete(runtimeId));
+      this.activeManagedRuntimes.set(runtimeId, task);
     }
   }
 

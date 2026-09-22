@@ -21,6 +21,11 @@ output "worker_service_name" {
   value = aws_ecs_service.worker.name
 }
 
+output "worker_task_role_arn" {
+  description = "Organizations側のManaged Runtime構築ロールが信頼するWorkerロール"
+  value       = aws_iam_role.worker_task.arn
+}
+
 output "web_service_name" {
   value = aws_ecs_service.web.name
 }

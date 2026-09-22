@@ -43,6 +43,16 @@ const envSchema = z
     ARTIFACTS_BUCKET: z.string().optional(),
     AUDIT_EXPORT_BUCKET: z.string().optional(),
 
+    // Agent Studio管理のAWS Runtimeを自動構築するWorker設定。
+    // role が空なら機能を無効にし、画面/APIは作成要求を受け付けない。
+    MANAGED_RUNTIME_PROVISIONING_ROLE_ARN: z.string().regex(/^arn:aws:iam::\d{12}:role\/.+$/).optional(),
+    MANAGED_RUNTIME_STATE_BUCKET: z.string().optional(),
+    MANAGED_RUNTIME_ACCOUNT_EMAIL_DOMAIN: z.string().regex(/^[A-Za-z0-9.-]+$/).default("zerotry.dev"),
+    MANAGED_RUNTIME_IMAGE_REGISTRY: z.string().optional(),
+    MANAGED_RUNTIME_IMAGE_TAG: z.string().optional(),
+    MANAGED_RUNTIME_TERRAFORM_ROOT: z.string().default("/app/infra/managed-runtime"),
+    MANAGED_RUNTIME_MAX_CONCURRENT: z.coerce.number().int().min(1).max(5).default(1),
+
     // OpenAI Agents API
     AGENTS_API_MODE: z.enum(["openai", "fake"]).default(isProduction ? "openai" : "fake"),
     OPENAI_DEFAULT_MODEL: z.string().default(""),
@@ -79,6 +89,14 @@ const envSchema = z
     }
     if (env.AUTH_MODE === "cognito" && (!env.COGNITO_USER_POOL_ID || !env.COGNITO_CLIENT_ID)) {
       ctx.addIssue({ code: "custom", message: "COGNITO_USER_POOL_ID と COGNITO_CLIENT_ID が必要です" });
+    }
+    if (env.MANAGED_RUNTIME_PROVISIONING_ROLE_ARN) {
+      const required: [string | undefined, string][] = [
+        [env.MANAGED_RUNTIME_STATE_BUCKET, "MANAGED_RUNTIME_STATE_BUCKET が必要です"],
+        [env.MANAGED_RUNTIME_IMAGE_REGISTRY, "MANAGED_RUNTIME_IMAGE_REGISTRY が必要です"],
+        [env.MANAGED_RUNTIME_IMAGE_TAG, "MANAGED_RUNTIME_IMAGE_TAG が必要です"],
+      ];
+      for (const [value, message] of required) if (!value) ctx.addIssue({ code: "custom", message });
     }
   });
 

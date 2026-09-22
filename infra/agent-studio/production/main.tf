@@ -39,6 +39,10 @@ module "control_plane" {
   openai_default_model     = var.openai_default_model
   manifest_generator_model = var.manifest_generator_model
 
+  managed_runtime_provisioning_role_arn = var.managed_runtime_provisioning_role_arn
+  managed_runtime_state_bucket          = var.managed_runtime_state_bucket
+  managed_runtime_account_email_domain  = var.managed_runtime_account_email_domain
+
   api_desired_count    = 2
   worker_desired_count = 1
   web_desired_count    = 2

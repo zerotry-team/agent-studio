@@ -96,3 +96,91 @@ resource "aws_organizations_policy_attachment" "companies_guardrails" {
   policy_id = aws_organizations_policy.companies_guardrails[0].id
   target_id = aws_organizations_organizational_unit.this["Companies"].id
 }
+
+# ---- Agent Studio管理Runtimeの自動構築 ----
+
+resource "aws_s3_bucket" "managed_runtime_state" {
+  count  = length(var.runtime_provisioner_principal_arns) > 0 ? 1 : 0
+  bucket = "agent-studio-managed-runtime-state-${var.management_account_id}"
+
+  lifecycle { prevent_destroy = true }
+}
+
+resource "aws_s3_bucket_versioning" "managed_runtime_state" {
+  count  = length(var.runtime_provisioner_principal_arns) > 0 ? 1 : 0
+  bucket = aws_s3_bucket.managed_runtime_state[0].id
+  versioning_configuration { status = "Enabled" }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "managed_runtime_state" {
+  count  = length(var.runtime_provisioner_principal_arns) > 0 ? 1 : 0
+  bucket = aws_s3_bucket.managed_runtime_state[0].id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "managed_runtime_state" {
+  count                   = length(var.runtime_provisioner_principal_arns) > 0 ? 1 : 0
+  bucket                  = aws_s3_bucket.managed_runtime_state[0].id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+data "aws_iam_policy_document" "runtime_provisioner_assume" {
+  count = length(var.runtime_provisioner_principal_arns) > 0 ? 1 : 0
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "AWS"
+      identifiers = var.runtime_provisioner_principal_arns
+    }
+  }
+}
+
+resource "aws_iam_role" "runtime_provisioner" {
+  count              = length(var.runtime_provisioner_principal_arns) > 0 ? 1 : 0
+  name               = "AgentStudioManagedRuntimeProvisioner"
+  description        = "Creates dedicated company accounts and applies Agent Studio Runtime infrastructure"
+  assume_role_policy = data.aws_iam_policy_document.runtime_provisioner_assume[0].json
+}
+
+data "aws_iam_policy_document" "runtime_provisioner" {
+  count = length(var.runtime_provisioner_principal_arns) > 0 ? 1 : 0
+  statement {
+    sid = "OrganizationsAccountLifecycle"
+    actions = [
+      "organizations:CreateAccount", "organizations:DescribeCreateAccountStatus",
+      "organizations:ListAccounts", "organizations:ListRoots",
+      "organizations:ListParents", "organizations:ListOrganizationalUnitsForParent",
+      "organizations:MoveAccount",
+    ]
+    resources = ["*"]
+  }
+  statement {
+    sid       = "AssumeNewAccountAdmin"
+    actions   = ["sts:AssumeRole"]
+    resources = ["arn:aws:iam::*:role/OrganizationAccountAccessRole"]
+  }
+  statement {
+    sid       = "ListStateBucket"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.managed_runtime_state[0].arn]
+  }
+  statement {
+    sid       = "ManageStateObjects"
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.managed_runtime_state[0].arn}/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "runtime_provisioner" {
+  count  = length(var.runtime_provisioner_principal_arns) > 0 ? 1 : 0
+  name   = "managed-runtime-provisioning"
+  role   = aws_iam_role.runtime_provisioner[0].id
+  policy = data.aws_iam_policy_document.runtime_provisioner[0].json
+}

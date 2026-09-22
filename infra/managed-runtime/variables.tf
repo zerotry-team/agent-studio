@@ -1,0 +1,10 @@
+variable "target_account_id" { type = string }
+variable "organization_id" { type = string }
+variable "runtime_id" { type = string }
+variable "tenant_short" { type = string }
+variable "stage" { type = string }
+variable "region" { type = string }
+variable "agent_studio_url" { type = string }
+variable "runtime_server_id" { type = string }
+variable "image_registry" { type = string }
+variable "image_tag" { type = string }

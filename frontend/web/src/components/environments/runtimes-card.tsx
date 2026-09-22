@@ -80,7 +80,7 @@ export function RuntimesCard({ query, canManage, createAction }: RuntimesCardPro
                   <TD className="hidden text-gray-500 sm:table-cell">
                     <TimeAgo value={runtime.last_heartbeat_at} fallback="なし" />
                   </TD>
-                  <TD className="hidden font-mono text-xs text-gray-600 lg:table-cell">{runtime.aws_account_id}</TD>
+                  <TD className="hidden font-mono text-xs text-gray-600 lg:table-cell">{runtime.aws_account_id ?? "割り当て中"}</TD>
                 </TR>
               ))}
             </TBody>

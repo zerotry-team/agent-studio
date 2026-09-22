@@ -1,9 +1,10 @@
 "use server";
 
-import type { CreateRuntimeProfileInput } from "@agent-studio/contracts";
+import type { CreateManagedRuntimeEnvironmentInput, CreateRuntimeProfileInput } from "@agent-studio/contracts";
 import { runAction } from "@/lib/api/run-action";
 import {
   CreateRuntimeProfileService,
+  CreateManagedRuntimeEnvironmentService,
   CreateSelfHostedEnvironmentService,
   DeleteRuntimeProfileService,
   ListRuntimeProfilesService,
@@ -22,6 +23,10 @@ export async function createRuntimeProfileAction(input: CreateRuntimeProfileInpu
 /** AWS で実行する環境を作る（必要なら Runtime も作る） */
 export async function createSelfHostedEnvironmentAction(input: CreateSelfHostedEnvironmentInput) {
   return runAction(() => new CreateSelfHostedEnvironmentService().invoke(input), "実行環境を作成できませんでした");
+}
+
+export async function createManagedRuntimeEnvironmentAction(input: CreateManagedRuntimeEnvironmentInput) {
+  return runAction(() => new CreateManagedRuntimeEnvironmentService().invoke(input), "Agent Studio管理AWSを作成できませんでした");
 }
 
 export async function deleteRuntimeProfileAction(id: string) {

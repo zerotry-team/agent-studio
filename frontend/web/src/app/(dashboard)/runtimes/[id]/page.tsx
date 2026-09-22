@@ -7,6 +7,7 @@ import {
   getRuntimeAction,
   issueBootstrapTokenAction,
   revokeRuntimeAction,
+  retryManagedRuntimeProvisioningAction,
   rotateEnvironmentKeyAction,
 } from "@/actions/runtimes";
 import { PageHeader } from "@/components/common/page-header";
@@ -32,6 +33,7 @@ import { PROVISIONING_TYPE_LABELS, RUNTIME_STATUS_DESCRIPTIONS } from "@/lib/uti
 const BACK = { href: "/environments", label: "実行環境の一覧" };
 
 const STATUS_ALERT_TONE: Record<RuntimeStatus, "info" | "success" | "warning" | "danger"> = {
+  provisioning: "info",
   pending: "info",
   active: "success",
   degraded: "warning",
@@ -42,7 +44,7 @@ const STATUS_ALERT_TONE: Record<RuntimeStatus, "info" | "success" | "warning" | 
 /** 準備中は登録を待つので短い間隔で、それ以外はゆっくり状態を取り直す（失効後は取り直さない） */
 function pollInterval(runtime: RuntimeDto | undefined): number | false {
   if (!runtime) return false;
-  if (runtime.status === "pending") return 5_000;
+  if (runtime.status === "pending" || runtime.status === "provisioning") return 5_000;
   if (runtime.status === "revoked") return false;
   return 30_000;
 }
@@ -92,12 +94,14 @@ function RuntimeDetail({ runtime, onUpdated }: { runtime: RuntimeDto; onUpdated:
   const canRevoke = can("runtime.revoke");
   const revoked = runtime.status === "revoked";
   const pending = runtime.status === "pending";
+  const managed = runtime.provisioning_type === "studio_managed";
   const [token, setToken] = useState<BootstrapTokenDto | null>(null);
   const [confirm, setConfirm] = useState<ConfirmKind>(null);
 
   const issue = useActionMutation(issueBootstrapTokenAction);
   const rotate = useActionMutation(rotateEnvironmentKeyAction, { successMessage: "環境キーの入れ替えを開始しました" });
   const revoke = useActionMutation(revokeRuntimeAction, { successMessage: "Runtime を失効させました" });
+  const retry = useActionMutation(retryManagedRuntimeProvisioningAction, { successMessage: "Runtimeの自動構築を再開しました" });
 
   const issueToken = async () => {
     const res = await issue.mutate(runtime.id);
@@ -108,7 +112,7 @@ function RuntimeDetail({ runtime, onUpdated }: { runtime: RuntimeDto; onUpdated:
 
   const actions = revoked ? null : (
     <>
-      {canManage ? (
+      {canManage && !managed ? (
         <Button
           variant={pending ? "primary" : "secondary"}
           onClick={issueToken}
@@ -118,7 +122,20 @@ function RuntimeDetail({ runtime, onUpdated }: { runtime: RuntimeDto; onUpdated:
           登録用トークンを発行
         </Button>
       ) : null}
-      {canManage && !pending ? (
+      {canManage && runtime.provisioning?.can_retry ? (
+        <Button
+          variant="primary"
+          onClick={async () => {
+            const result = await retry.mutate(runtime.id);
+            if (result.ok) onUpdated(result.data);
+          }}
+          loading={retry.pending}
+          icon={<RefreshCw className="h-4 w-4" aria-hidden="true" />}
+        >
+          自動構築を再試行
+        </Button>
+      ) : null}
+      {canManage && runtime.status !== "pending" && runtime.status !== "provisioning" ? (
         <Button variant="secondary" onClick={() => setConfirm("rotate")} icon={<RefreshCw className="h-4 w-4" aria-hidden="true" />}>
           環境キーを入れ替える
         </Button>
@@ -147,7 +164,19 @@ function RuntimeDetail({ runtime, onUpdated }: { runtime: RuntimeDto; onUpdated:
       />
 
       <Alert tone={STATUS_ALERT_TONE[runtime.status]} className="mb-6" title={RUNTIME_STATUS_DESCRIPTIONS[runtime.status]}>
-        {pending && !canManage ? (
+        {runtime.provisioning ? (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-4 text-sm">
+              <span>{runtime.provisioning.step}</span>
+              <span className="font-medium tabular-nums">{runtime.provisioning.progress}%</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-black/10" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={runtime.provisioning.progress}>
+              <div className="h-full rounded-full bg-current transition-[width]" style={{ width: `${runtime.provisioning.progress}%` }} />
+            </div>
+            {runtime.provisioning.error ? <p className="text-sm">{runtime.provisioning.error}</p> : null}
+            {runtime.provisioning.status === "connecting" ? <p className="text-sm">初回接続が完了すると、この画面は自動で「接続済み」に変わります。</p> : null}
+          </div>
+        ) : pending && !canManage ? (
           <p>登録用トークンの発行は、管理者以上の権限を持つメンバーが行います。この画面は自動で更新されます。</p>
         ) : pending ? (
           <ol className="mt-1 list-decimal space-y-0.5 pl-5">
@@ -186,7 +215,7 @@ function RuntimeDetail({ runtime, onUpdated }: { runtime: RuntimeDto; onUpdated:
                 },
                 { label: "登録日時", value: runtime.registered_at ? formatDateTime(runtime.registered_at) : "まだ登録されていません" },
                 { label: "作成", value: formatDateTime(runtime.created_at) },
-                { label: "AWS アカウント ID", value: <span className="font-mono text-[13px]">{runtime.aws_account_id}</span> },
+                { label: "AWS アカウント ID", value: <span className="font-mono text-[13px]">{runtime.aws_account_id ?? "割り当て中"}</span> },
                 { label: "リージョン", value: <span className="font-mono text-[13px]">{runtime.aws_region}</span> },
                 {
                   label: "IAM ロール名",
@@ -201,7 +230,7 @@ function RuntimeDetail({ runtime, onUpdated }: { runtime: RuntimeDto; onUpdated:
         <Card>
           <CardHeader title="シークレットの保存先" />
           <CardBody className="space-y-3 text-sm leading-relaxed text-gray-600">
-            <p>この Runtime の認証情報は、御社の AWS の Secrets Manager の次の場所に保管されます。</p>
+            <p>この Runtime の認証情報は、{managed ? "Agent Studioが管理する専用AWS" : "御社のAWS"}の Secrets Manager の次の場所に保管されます。</p>
             <code className="block break-all rounded-lg bg-gray-50 px-3 py-2 font-mono text-[13px] text-gray-900">{location.prefix}/</code>
             {location.tenant ? null : (
               <p className="text-xs text-gray-500">

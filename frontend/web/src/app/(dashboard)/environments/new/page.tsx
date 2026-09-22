@@ -3,7 +3,7 @@
 import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { createRuntimeProfileAction, createSelfHostedEnvironmentAction } from "@/actions/environments";
+import { createManagedRuntimeEnvironmentAction, createRuntimeProfileAction, createSelfHostedEnvironmentAction } from "@/actions/environments";
 import { listRuntimesAction } from "@/actions/runtimes";
 import { Forbidden } from "@/components/common/forbidden";
 import { PageHeader } from "@/components/common/page-header";
@@ -64,13 +64,17 @@ function EnvironmentWizard() {
         ? `実行環境と Runtime「${result.createdRuntime.name}」を作成しました。続けて登録用トークンを発行してください`
         : "実行環境を作成しました",
   });
-  const pending = createProfile.pending || createSelfHosted.pending;
-  const submitError = createProfile.error ?? createSelfHosted.error;
+  const createManaged = useActionMutation(createManagedRuntimeEnvironmentAction, {
+    successMessage: "専用AWSアカウントとRuntimeの構築を開始しました",
+  });
+  const pending = createProfile.pending || createSelfHosted.pending || createManaged.pending;
+  const submitError = createProfile.error ?? createSelfHosted.error ?? createManaged.error;
 
   const validation = useMemo(() => validateWizard(state), [state]);
   const errors = {
     ...createProfile.fieldErrors,
     ...mapServerErrors(createSelfHosted.fieldErrors, state),
+    ...mapServerErrors(createManaged.fieldErrors, state),
     ...(showErrors ? validation.errors : {}),
   };
 
@@ -87,6 +91,7 @@ function EnvironmentWizard() {
     setState((prev) => ({ ...prev, ...patch }));
     if (createProfile.error) createProfile.reset();
     if (createSelfHosted.error) createSelfHosted.reset();
+    if (createManaged.error) createManaged.reset();
   };
 
   const choose = (choice: EnvironmentChoice) => {
@@ -140,6 +145,12 @@ function EnvironmentWizard() {
       else if (Object.keys(res.error.fieldErrors ?? {}).length > 0) setStep(1);
       return;
     }
+    if (submission.kind === "managed") {
+      const res = await createManaged.mutate(submission.input);
+      if (res.ok) router.push(`/runtimes/${res.data.runtime.id}`);
+      else if (Object.keys(res.error.fieldErrors ?? {}).length > 0) setStep(1);
+      return;
+    }
     const res = await createSelfHosted.mutate({ key: submission.key, name: submission.name, runtime: submission.runtime });
     if (res.ok) {
       router.push(res.data.createdRuntime ? `/runtimes/${res.data.createdRuntime.id}` : "/environments");
@@ -157,7 +168,9 @@ function EnvironmentWizard() {
         : undefined
       : step === 2
         ? isAwsChoice(choice) && state.runtimeMode === "new"
-          ? "作成すると、Runtime の画面に移ります。続けて登録用トークンを発行し、AWS 側に設定してください。"
+          ? choice === "studio_managed"
+            ? "作成すると専用AWSアカウントとRuntimeの自動構築を開始し、進捗画面へ移ります。"
+            : "作成すると、Runtime の画面に移ります。続けて登録用トークンを発行し、AWS 側に設定してください。"
           : "この内容で作成します。"
         : undefined;
 

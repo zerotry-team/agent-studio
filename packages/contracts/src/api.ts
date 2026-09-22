@@ -685,7 +685,7 @@ export interface RuntimeProfileDto {
   created_at: string;
 }
 
-export const runtimeStatusSchema = z.enum(["pending", "active", "degraded", "offline", "revoked"]);
+export const runtimeStatusSchema = z.enum(["provisioning", "pending", "active", "degraded", "offline", "revoked"]);
 export type RuntimeStatus = z.infer<typeof runtimeStatusSchema>;
 
 export const provisioningTypeSchema = z.enum(["studio_managed", "customer_owned"]);
@@ -705,6 +705,38 @@ export const createRuntimeSchema = z
   .strict();
 export type CreateRuntimeInput = z.infer<typeof createRuntimeSchema>;
 
+export const managedRuntimeProvisioningStatusSchema = z.enum([
+  "queued",
+  "account_creating",
+  "infrastructure_applying",
+  "bootstrap_configuring",
+  "connecting",
+  "completed",
+  "failed",
+]);
+export type ManagedRuntimeProvisioningStatus = z.infer<typeof managedRuntimeProvisioningStatusSchema>;
+
+export const createManagedRuntimeEnvironmentSchema = z
+  .object({
+    key: slugSchema,
+    name: z.string().trim().min(1).max(100),
+    runtime_name: z.string().trim().min(1).max(100),
+    stage: stageSchema,
+    aws_region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/, "リージョンの形式が正しくありません"),
+  })
+  .strict();
+export type CreateManagedRuntimeEnvironmentInput = z.infer<typeof createManagedRuntimeEnvironmentSchema>;
+
+export interface ManagedRuntimeProvisioningDto {
+  status: ManagedRuntimeProvisioningStatus;
+  step: string;
+  progress: number;
+  error: string | null;
+  can_retry: boolean;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
 export interface RuntimeSummaryDto {
   id: string;
   name: string;
@@ -714,14 +746,20 @@ export interface RuntimeSummaryDto {
 }
 
 export interface RuntimeDto extends RuntimeSummaryDto {
-  aws_account_id: string;
+  aws_account_id: string | null;
   aws_region: string;
   expected_role_name: string;
   controller_version: string | null;
   last_heartbeat_at: string | null;
   registered_at: string | null;
   tools: { name: string; description: string; risk: ToolRisk; reads_untrusted_content: boolean }[];
+  provisioning: ManagedRuntimeProvisioningDto | null;
   created_at: string;
+}
+
+export interface ManagedRuntimeEnvironmentDto {
+  profile: RuntimeProfileDto;
+  runtime: RuntimeDto;
 }
 
 export interface BootstrapTokenDto {

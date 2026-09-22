@@ -1,6 +1,8 @@
 import {
   createRuntimeProfileSchema,
   createRuntimeSchema,
+  createManagedRuntimeEnvironmentSchema,
+  type CreateManagedRuntimeEnvironmentInput,
   type CreateRuntimeInput,
   type CreateRuntimeProfileInput,
   type NetworkPolicy,
@@ -69,6 +71,7 @@ export function domainLines(text: string): string[] {
 /** 送信する内容（検証済み） */
 export type EnvironmentSubmission =
   | { kind: "profile"; input: CreateRuntimeProfileInput }
+  | { kind: "managed"; input: CreateManagedRuntimeEnvironmentInput }
   | {
       kind: "self_hosted";
       key: string;
@@ -156,6 +159,27 @@ export function validateWizard(state: EnvironmentWizardState): WizardValidation 
     };
   }
 
+  if (choice === "studio_managed") {
+    const input: CreateManagedRuntimeEnvironmentInput = {
+      key,
+      name,
+      runtime_name: state.runtimeName.trim(),
+      stage: state.stage,
+      aws_region: state.awsRegion.trim(),
+    };
+    const parsed = createManagedRuntimeEnvironmentSchema.safeParse(input);
+    if (!parsed.success) {
+      for (const [path, message] of Object.entries(zodFieldErrors(parsed.error))) {
+        if (path === "runtime_name") errors["runtime.name"] = message;
+        else if (path === "aws_region") errors["runtime.aws_region"] = message;
+        else errors[path] = message;
+      }
+    }
+    if (!input.runtime_name) errors["runtime.name"] = "Runtime の名前を入力してください";
+    if (!input.aws_region) errors["runtime.aws_region"] = "リージョンを入力してください";
+    return { submission: parsed.success && Object.keys(errors).length === 0 ? { kind: "managed", input } : null, errors };
+  }
+
   const runtimeInput: CreateRuntimeInput = {
     name: state.runtimeName.trim(),
     stage: state.stage,
@@ -189,6 +213,12 @@ const RUNTIME_ONLY_FIELDS = ["stage", "provisioning_type", "aws_account_id", "aw
  */
 export function mapServerErrors(fieldErrors: Record<string, string>, state: EnvironmentWizardState): Record<string, string> {
   if (!isAwsChoice(state.choice) || state.runtimeMode !== "new") return fieldErrors;
+  if (state.choice === "studio_managed") {
+    return Object.fromEntries(Object.entries(fieldErrors).map(([key, message]) => [
+      key === "runtime_name" ? "runtime.name" : key === "aws_region" ? "runtime.aws_region" : key,
+      message,
+    ]));
+  }
   const keys = Object.keys(fieldErrors);
   const isRuntimeError = keys.some((k) => RUNTIME_ONLY_FIELDS.includes(k));
   if (!isRuntimeError) return fieldErrors;

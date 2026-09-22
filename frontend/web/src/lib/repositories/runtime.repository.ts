@@ -1,5 +1,5 @@
 import "server-only";
-import type { BootstrapTokenDto, CreateRuntimeInput, RuntimeDto } from "@agent-studio/contracts";
+import type { BootstrapTokenDto, CreateManagedRuntimeEnvironmentInput, CreateRuntimeInput, ManagedRuntimeEnvironmentDto, RuntimeDto } from "@agent-studio/contracts";
 import { ApiRepository } from "./base";
 
 export class RuntimeRepository extends ApiRepository {
@@ -13,6 +13,14 @@ export class RuntimeRepository extends ApiRepository {
 
   create(input: CreateRuntimeInput): Promise<RuntimeDto> {
     return this.api.post<RuntimeDto>("/runtimes", input);
+  }
+
+  createManagedEnvironment(input: CreateManagedRuntimeEnvironmentInput): Promise<ManagedRuntimeEnvironmentDto> {
+    return this.api.post<ManagedRuntimeEnvironmentDto>("/managed-runtime-environments", input);
+  }
+
+  retryManagedProvisioning(id: string): Promise<RuntimeDto> {
+    return this.api.post<RuntimeDto>(`/runtimes/${encodeURIComponent(id)}/provisioning/retry`);
   }
 
   /** 平文のトークンはこの応答でしか返らない */

@@ -8,6 +8,7 @@ import {
   IssueBootstrapTokenService,
   ListRuntimesService,
   RevokeRuntimeService,
+  RetryManagedRuntimeProvisioningService,
   RotateEnvironmentKeyService,
 } from "@/lib/services/runtimes";
 
@@ -26,6 +27,10 @@ export async function createRuntimeAction(input: CreateRuntimeInput) {
 /** 登録用トークンを発行する（平文はこの応答でしか受け取れない） */
 export async function issueBootstrapTokenAction(runtimeId: string) {
   return runAction(() => new IssueBootstrapTokenService().invoke(runtimeId), "登録用トークンを発行できませんでした");
+}
+
+export async function retryManagedRuntimeProvisioningAction(runtimeId: string) {
+  return runAction(() => new RetryManagedRuntimeProvisioningService().invoke(runtimeId), "Runtimeの自動構築を再試行できませんでした");
 }
 
 export async function revokeRuntimeAction(runtimeId: string) {
