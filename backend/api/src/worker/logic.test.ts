@@ -41,6 +41,27 @@ describe("renderTemplate（Workflow）", () => {
 });
 
 describe("Builder factoring workflow", () => {
+  it("Browser Download依頼をモデル/Web検索へ誤分類せずRuntime Browserへ固定する", () => {
+    const browserTools = ["browser_navigate", "browser_snapshot", "browser_screenshot", "browser_download"].map((name) => ({
+      name,
+      displayName: name,
+      description: name,
+      connectorId: "browser-connector",
+      connectorName: "Runtime Browser",
+      ready: true,
+    }));
+    const resolution = ensureRequiredScenarioTools(
+      "https://example.com をBrowserで開き、CSVをbrowser_downloadでArtifact保存する",
+      { requirements: [], selected_tools: [], missing_variables: [], ready: true },
+      browserTools,
+    );
+    expect(resolution.selected_tools).toEqual(expect.arrayContaining(browserTools.map((tool) => tool.name)));
+    expect(resolution.selected_tools).not.toContain("web_search");
+    expect(resolution.requirements).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool_names: expect.arrayContaining(["browser_download"]), state: "resolved" }),
+    ]));
+  });
+
   it("画像生成Previewは内部Artifact生成を実行し、読み取り操作とは扱わない", () => {
     const input = buildBuilderPreviewInput(
       "テーマから画像を生成する",

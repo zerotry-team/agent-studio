@@ -213,10 +213,11 @@ const INTAKE_TOPIC_PATTERNS: Record<string, RegExp> = {
   internal_denied_list: /(否決|落とした|審査落ち)/i,
   over_limit_route: /100\s*万円|1,?000,?000円|冗長のパス/i,
   public_x_post: /(^|[^A-Za-z])X(?:アカウント)?(へ|で|に|投稿)|twitter|公開投稿|(?:SNS|外部|非同期|アカウント).*(?:投稿|公開)|(?:投稿|公開).*(?:SNS|外部|アカウント)/i,
+  browser_artifact: /browser|ブラウザ|download|upload|artifact|ファイル|CSV|ダウンロード|アップロード/i,
 };
 
 const CODE_ADAPTER_TOPICS = new Set(["past_inquiry_source", "bank_document_source", "internal_denied_list", "public_x_post"]);
-const BROWSER_FLOW_TOPICS = new Set(["compliance_source"]);
+const BROWSER_FLOW_TOPICS = new Set(["compliance_source", "browser_artifact"]);
 const BROWSER_FLOW_TOOL_NAMES = [
   "browser_navigate",
   "browser_snapshot",
@@ -231,6 +232,7 @@ const BROWSER_FLOW_TOOL_NAMES = [
 ] as const;
 const REQUIRED_BROWSER_FLOW_TOOL_NAMES = new Set(["browser_navigate", "browser_snapshot", "browser_screenshot"]);
 const GENERATED_IMAGE_REQUEST = /(?:(?:画像|挿絵|イラスト|サムネイル).*(?:生成|作成|追加)|(?:生成|作成).*(?:画像|挿絵|イラスト|サムネイル))/i;
+const BROWSER_ARTIFACT_REQUEST = /browser|ブラウザ|browser_download|browser_upload|download|upload|ダウンロード|アップロード/i;
 const EXPLICIT_ORGANIZATION_BACKEND_REQUEST = /(?:会社|企業|自社|社内|顧客).*(?:専用|内部|社内).*(?:DB|データベース|サーバー|基幹|バックエンド)|(?:専用バックエンド|企業専用Runtime|会社専用Runtime)/i;
 /** Controllerは30秒ごとにheartbeatする。Schedulerのoffline判定と同じ3分を超えたRuntimeには新規Jobを渡さない。 */
 const RUNTIME_HEARTBEAT_FRESHNESS_MS = 180_000;
@@ -245,8 +247,10 @@ export function ensureRequiredScenarioTools(
   const modelCapabilities = inferModelCapabilities(request);
   const requiresFreshWeb = modelCapabilities.some((decision) => decision.capability === "web_search");
   const requiresGeneratedImage = modelCapabilities.some((decision) => decision.capability === "image_generation");
+  const requiresBrowserArtifact = BROWSER_ARTIFACT_REQUEST.test(request);
   if (requiresFreshWeb) required.add("web_search");
   if (requiresGeneratedImage) required.add("generate_image");
+  if (requiresBrowserArtifact) BROWSER_FLOW_TOOL_NAMES.forEach((name) => required.add(name));
   if (/ファクタリング|買取申込|審査.*(?:可|否|保留)/i.test(request)) {
     ["list_applications", "get_application", "analyze_bank_statement", "check_compliance", "evaluate_factoring_rules", "record_screening"]
       .forEach((name) => required.add(name));
@@ -254,7 +258,7 @@ export function ensureRequiredScenarioTools(
   if (/(^|[^A-Za-z])X(?:アカウント)?(へ|で|に|投稿)|twitter|公開投稿/i.test(request)) {
     ["list_accounts", "publish_post", "get_job"].forEach((name) => required.add(name));
   }
-  if (required.size === 0 && !requiresGeneratedImage) return resolution;
+  if (required.size === 0 && !requiresGeneratedImage && !requiresBrowserArtifact) return resolution;
 
   const tools = available.filter((tool) => required.has(tool.name));
   const selectedTools = [...new Set([
@@ -305,6 +309,18 @@ export function ensureRequiredScenarioTools(
       tool_names: ["generate_image"],
       confidence: 1,
       reason: "組織のOpenAI Projectを使う標準画像生成能力を割り当てました",
+      variables: [],
+    });
+  }
+  if (requiresBrowserArtifact && !requirements.some((requirement) => requirement.tool_names.some((name) => BROWSER_FLOW_TOOL_NAMES.includes(name as typeof BROWSER_FLOW_TOOL_NAMES[number])))) {
+    requirements.push({
+      requirement: "BrowserでファイルをDownloadし、Run専用Artifactとして保存する",
+      state: tools.some((tool) => tool.name === "browser_download" && tool.ready) ? "resolved" : "needs_connection",
+      connector_id: tools.find((tool) => tool.name === "browser_download")?.connectorId ?? null,
+      connector_name: tools.find((tool) => tool.name === "browser_download")?.connectorName ?? "Runtime Browser",
+      tool_names: tools.filter((tool) => BROWSER_FLOW_TOOL_NAMES.includes(tool.name as typeof BROWSER_FLOW_TOOL_NAMES[number])).map((tool) => tool.name),
+      confidence: 1,
+      reason: "Browser Download/Artifact依頼をBrowser Runtimeへ固定しました",
       variables: [],
     });
   }
@@ -374,6 +390,17 @@ const answerRecord = (item: AnsweredBuilderQuestion) =>
     : {};
 
 const requirementMatchesTopic = (requirement: string, topic: string) => INTAKE_TOPIC_PATTERNS[topic]?.test(requirement) ?? false;
+
+function browserArtifactDomain(request: string): string | null {
+  const match = request.match(/https?:\/\/[^\s)]+/i);
+  if (!match) return null;
+  try {
+    const url = new URL(match[0]);
+    return url.hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
 
 /** 明示された社内データ源をLLMが落としても、Capability Planから消さない。 */
 export function ensureAnsweredSourceRequirements(
@@ -1235,6 +1262,49 @@ export class BuilderOrchestrator {
           },
           finished_at: new Date(),
         } });
+      }
+      const artifactDomain = BROWSER_ARTIFACT_REQUEST.test(projectRequest) ? browserArtifactDomain(projectRequest) : null;
+      if (artifactDomain) {
+        const sourceHash = createHash("sha256").update(JSON.stringify({ artifactDomain, topic: "browser_artifact" })).digest("hex");
+        const existing = await tx.builder_change_sets.findFirst({
+          where: { project_id: projectId, kind: "browser_flow", source_hash: sourceHash },
+          select: { id: true },
+        });
+        if (!existing) {
+          const change = await tx.builder_change_sets.create({ data: {
+            organization_id: organizationId,
+            project_id: projectId,
+            kind: "browser_flow",
+            status: "planned",
+            summary: `${artifactDomain}だけを許可したBrowser Download Artifact Flowを生成`,
+            risk: "read",
+            artifacts: [
+              { type: "capability_topic", id: "browser_artifact", name: "browser_artifact" },
+              { type: "allowed_domain", id: artifactDomain, name: artifactDomain },
+              { type: "browser_mode", id: "public_ephemeral", name: "public_ephemeral" },
+              { type: "browser_step", id: "navigate", name: "指定URLを開く" },
+              { type: "browser_step", id: "download", name: "browser_downloadでRun専用Artifactへ保存" },
+              { type: "browser_step", id: "report", name: "filename・SHA-256・取得時刻だけを報告" },
+            ],
+            source_hash: sourceHash,
+          } });
+          await tx.builder_validation_runs.create({ data: {
+            organization_id: organizationId,
+            project_id: projectId,
+            suite: "security",
+            environment: "builder",
+            status: "passed",
+            evidence: {
+              change_set_id: change.id,
+              browser_mode: "public_ephemeral",
+              allowed_domains: [artifactDomain],
+              allow_public_web: false,
+              code_execution_enabled: false,
+              controls: ["exact_domain_allowlist", "private_ip_blocked", "artifact_hash_required", "external_send_approval_required"],
+            },
+            finished_at: new Date(),
+          } });
+        }
       }
       const browserTopics = new Set((await tx.builder_change_sets.findMany({
         where: { project_id: projectId, kind: "browser_flow", status: { in: ["planned", "applied"] } },
