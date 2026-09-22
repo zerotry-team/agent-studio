@@ -132,7 +132,16 @@ export async function callBrowserTool(session: BrowserSession, name: string, arg
           filename: String(args.filename ?? ""),
           sha256: String(args.sha256 ?? ""),
         });
-        await page.locator(String(args.selector)).first().setInputFiles({ name: artifact.filename, mimeType: artifact.mime_type, buffer: artifact.body });
+        const input = page.locator(String(args.selector)).first();
+        await input.setInputFiles({ name: artifact.filename, mimeType: artifact.mime_type, buffer: artifact.body });
+        // file inputへの設定だけでは外部送信にならない。承認済みのこのTool内で
+        // 必ず所属formをsubmitし、後続のwrite Toolによる承認バイパスを防ぐ。
+        await input.evaluate((element) => {
+          const form = (element as { form?: { requestSubmit: () => void } | null }).form;
+          if (!form) throw new Error("Upload先に送信用のformがありません");
+          form.requestSubmit();
+        });
+        await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
         return afterAction(session, `uploaded artifact ${artifact.artifact_id} (${artifact.filename}, ${artifact.sha256}) to ${destination.origin}`);
       }
       case "computer_action": {
