@@ -9,6 +9,7 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { DescriptionList } from "@/components/ui/description-list";
 import { formatDateTime, formatDuration, formatNumber } from "@/lib/utils/format";
 import { PROFILE_TYPE_LABELS } from "@/lib/utils/labels";
+import { RunOutput } from "./run-output";
 import { isTerminalRunStatus } from "./use-run-stream";
 
 /** 指示・結果など、長い文章を表示するカード */
@@ -17,18 +18,24 @@ export function RunTextPanel({
   text,
   placeholder,
   actions,
+  format = "plain",
 }: {
   title: string;
   text: string | null;
   placeholder: ReactNode;
   actions?: ReactNode;
+  format?: "plain" | "rich";
 }) {
   return (
     <Card>
       <CardHeader title={title} actions={actions} />
       <CardBody>
         {text ? (
-          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-gray-900">{text}</p>
+          format === "rich" ? (
+            <RunOutput output={text} />
+          ) : (
+            <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-gray-900">{text}</p>
+          )
         ) : (
           <div className="text-sm text-gray-500">{placeholder}</div>
         )}

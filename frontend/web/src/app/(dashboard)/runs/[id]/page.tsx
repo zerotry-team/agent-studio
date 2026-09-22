@@ -179,6 +179,7 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
           <RunTextPanel
             title="結果"
             text={run.output}
+            format="rich"
             placeholder={<RunOutputPlaceholder run={run} />}
             actions={run.output ? <CopyButton value={run.output} label="結果をコピー" /> : null}
           />
