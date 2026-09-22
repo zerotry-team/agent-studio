@@ -707,6 +707,8 @@ function DeploymentCredentials({ deploymentId }: { deploymentId: string }) {
     else await createWebhook.mutate(deploymentId, input);
   };
   const secret = issued && "secret" in issued ? issued.secret : issued && "signing_secret" in issued ? issued.signing_secret : null;
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
+  const endpoint = `${origin}/triggers/v1/deployments/${deploymentId}/runs`;
   return (
     <details className="mt-4 border-t border-gray-100 pt-3">
       <summary className="cursor-pointer text-sm font-medium text-gray-700">API・Webhookから呼び出す</summary>
@@ -720,6 +722,15 @@ function DeploymentCredentials({ deploymentId }: { deploymentId: string }) {
             <Button className="mt-2" size="sm" variant="secondary" onClick={() => setIssued(null)}>保存しました</Button>
           </div>
         ) : null}
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3" data-testid="deployment-endpoint">
+          <p className="text-sm font-semibold text-emerald-900">エンドポイント</p>
+          <p className="mt-1 text-xs text-emerald-800">API Keyを付けてPOSTすると、このDeploymentでAgentを実行します（受け付けたら202とrun_idを返します）。</p>
+          <code className="mt-2 block break-all rounded bg-white p-2 text-xs text-gray-900">POST {endpoint}</code>
+          <pre className="mt-2 overflow-x-auto rounded bg-gray-950 p-2 text-xs text-gray-100">{`curl -X POST ${endpoint} \\
+  -H "Authorization: Bearer <API Key>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"input":"Agentへの依頼内容"}'`}</pre>
+        </div>
         <form className="grid gap-3 rounded-lg bg-gray-50 p-3 md:grid-cols-4" onSubmit={submit}>
           <Field label="方式"><Select value={kind} onChange={(event) => setKind(event.target.value as "api_key" | "webhook")}><option value="api_key">API Key</option><option value="webhook">Webhook</option></Select></Field>
           <Field label="名前" required><Input value={name} onChange={(event) => setName(event.target.value)} /></Field>
