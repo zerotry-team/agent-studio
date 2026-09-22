@@ -570,10 +570,13 @@ export function organizationCodeWorkspaceQuestionsFor(
     const topic = answerTopic(item);
     return topic ? [topic] : [];
   }));
-  const pendingIntake = intakeQuestionsFor(projectRequest).filter((question) => !completedTopics.has(question.topic));
+  const intake = intakeQuestionsFor(projectRequest);
+  const pendingIntake = intake.filter((question) => !completedTopics.has(question.topic));
+  // 回答済みの専用トピック（否決一覧など）は codeWorkspaceQuestionsFor が実装先を聞くので、同じ要件を二重に聞かない
+  const answeredCodeTopics = intake.filter((question) => completedTopics.has(question.topic) && CODE_ADAPTER_TOPICS.has(question.topic));
   return requirements.flatMap((requirement) => {
     if (requirement.state === "resolved" || !["organization_private_adapter", "organization_tool"].includes(requirement.fulfillment?.mode ?? "")) return [];
-    if (coveredByIntake(requirement.requirement, pendingIntake)) return [];
+    if (coveredByIntake(requirement.requirement, pendingIntake) || coveredByIntake(requirement.requirement, answeredCodeTopics)) return [];
     const topic = `organization_${createHash("sha256").update(requirement.requirement).digest("hex").slice(0, 12)}`;
     if (plannedTopics.has(topic)) return [];
     return [{
@@ -1532,6 +1535,11 @@ export class BuilderOrchestrator {
           } });
           workspaceActionCount = 1;
         } else if (runtime) {
+          const codeWorkspaceInFlight = (await tx.builder_change_sets.count({
+            where: { project_id: projectId, kind: "code_workspace", status: { in: ["applied", "pr_open"] } },
+          })) + (await tx.builder_workspace_sessions.count({
+            where: { project_id: projectId, status: { in: ["creating", "waiting_worker", "connected", "running"] } },
+          })) > 0;
           for (const change of pendingChanges) {
             const artifacts = artifactList(change.artifacts);
             const previousJobId = artifacts.findLast((artifact) => artifact.type === "workspace_job")?.id;
@@ -1553,6 +1561,8 @@ export class BuilderOrchestrator {
               orderBy: { attempt: "desc" },
             });
             if (activeSession) continue;
+            // 同じProjectの生成は1つずつ行う。並行するとmergeで基点branchが進み、後のbranchを公開できなくなる
+            if (codeWorkspaceInFlight || dispatchedWorkspaceJobs > 0) break;
             const lastAttempt = await tx.builder_workspace_sessions.aggregate({ where: { change_set_id: change.id }, _max: { attempt: true } });
             const sessionInput = {
               projectId,

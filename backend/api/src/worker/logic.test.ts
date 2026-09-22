@@ -248,6 +248,24 @@ describe("Builder conversational intake", () => {
     expect(questions[0]?.fields.map((field) => field.name)).toEqual(["repository_url", "adapter_path", "interface_notes"]);
   });
 
+  it("回答済みの専用トピック（否決一覧）と同じ要件は、社内Toolとして二重に聞かない", () => {
+    const request = "否決した申込者を自社の否決一覧で照合したい";
+    const intake = intakeQuestionsFor(request).find((question) => question.topic === "internal_denied_list");
+    expect(intake).toBeDefined();
+    const questions = organizationCodeWorkspaceQuestionsFor(request, [{ resume_condition: { topic: "internal_denied_list" }, response: {} }] as never, [{
+      requirement: "自社の否決一覧を安定した業務スキーマで照合する",
+      state: "missing",
+      connector_id: null,
+      connector_name: null,
+      tool_names: [],
+      confidence: 1,
+      reason: "既存Toolなし",
+      variables: [],
+      fulfillment: { mode: "organization_private_adapter", owner: "organization", execution_location: "runtime", reason: "企業専用Runtimeへ実装", availability_target_minutes: null },
+    }]);
+    expect(questions).toEqual([]);
+  });
+
   it("ファクタリング依頼から推測してはいけない業務事実だけを質問にする", () => {
     const questions = intakeQuestionsFor("過去の問い合わせ履歴を確認します。口座写画像はファイルサーバーにあります。反社一覧サイトと自社で審査に落とした人一覧を照合し、100万円以上は冗長のパスです。最後に結果をXに投稿します。");
     expect(questions.map((question) => question.topic)).toEqual([
