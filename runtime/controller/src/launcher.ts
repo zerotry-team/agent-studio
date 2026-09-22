@@ -23,6 +23,8 @@ export interface LaunchRequest {
   builderWorkspace?: BuilderSessionWorkspace;
   /** 作業領域の成果物の送信先（Tool Gateway）と Session 専用 token。Builder Session では渡さない */
   outputs?: { url: string; token: string };
+  /** ECS の Builder Session: 作業領域の受け取り・結果の送信先（Tool Gateway）と Session 専用 token */
+  builderTransfer?: { url: string; token: string };
   /** ECS の冪等性トークン（ジョブ ID）。同じジョブの再配送で二重に起動しないため */
   idempotencyToken?: string;
 }
@@ -128,6 +130,10 @@ export class EcsSessionLauncher implements SessionLauncher {
                   { name: "BUILDER_BASE_BRANCH", value: req.builderWorkspace.base_branch },
                   { name: "BUILDER_BRANCH", value: req.builderWorkspace.branch },
                   { name: "BUILDER_ADAPTER_PATH", value: req.builderWorkspace.adapter_path },
+                ] : []),
+                ...(req.builderTransfer ? [
+                  { name: "BUILDER_TRANSFER_URL", value: req.builderTransfer.url },
+                  { name: "BUILDER_TRANSFER_TOKEN", value: req.builderTransfer.token },
                 ] : []),
               ],
             },

@@ -103,7 +103,12 @@
 
 GitHub App webhookは認証不要の`POST /webhooks/github`で受けるが、`X-Hub-Signature-256`、delivery ID、repository ID allowlistを必須とする。mergeイベントはProvider APIでPR head SHAとRequired Checksを再検証する。Preview配布イベントはmerge SHA、descriptor/contract hash、OCI digest、SBOM digestのattestationをConnection固定のEd25519公開鍵で検証し、dependency/Secret scanとprovenanceも検証する。
 
-Runtime向け`POST /runtime/v1/jobs/:id/git-credential`は、対象Runtimeへlease済みの`publish_builder_branch` Jobに限って1回だけ短期Installation tokenを返す。Tokenは永続化せず、Runtimeはstdin経由のaskpassで許可repositoryの`builder/*` branchだけへpushする。
+Runtime向け`POST /runtime/v1/jobs/:id/git-credential`は、対象Runtimeへlease済みのJobに限って短期Installation tokenを返す。Tokenは永続化しない。
+- `publish_builder_branch`: Connectionの権限（contents: write）で1回だけ。Runtimeはaskpassで許可repositoryの`builder/*` branchだけへpushする
+- `start_session`（`builder_workspace`付き）: 読み取り専用（contents: read）。ECSではControllerがcloneしてSession Workerへ作業領域を渡す（Workerにtokenは渡さない）
+- `install_adapter`: 読み取り専用。CIがGitHub Releaseへ添付したAdapter packageの取得に使う
+
+GitHub `deployment_status` webhookの`deployment.payload.agent_studio`に`package: { release_asset_id }`があれば、署名を検証したうえで対象Runtimeへ`install_adapter` Jobを1つだけ作る（同じChange Set・digestで再送されても重ねない）。Runtimeはdigest・descriptor hash・Ed25519署名を自分でも検証してから保存し、Tool Gatewayで起動してheartbeatでToolを報告する。
 
 Runtime向け`POST /runtime/v1/sessions/:id/artifacts`は、Tool Gatewayが`browser_download`の本文をRun Artifactとして保存するときだけ使う（Browser Worker → Tool Gateway → Controller 内部API → Agent Studio）。自分のRuntimeが持つ未終了Sessionに限り、base64本文（25MB以下）のサイズ・SHA-256を再検証し、安全検査を通ったものだけS3の`orgs/<org>/runs/<run>/browser-downloads/<artifact_id>/<filename>`へ保存する。拒否したファイルは`scan_status=rejected`の記録だけを残す。モデルへはメタデータとRun Artifact IDだけを返し、本文は返さない。
 

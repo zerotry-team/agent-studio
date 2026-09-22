@@ -23,6 +23,9 @@ import { DisabledGitPublisher, DockerGitPublisher } from "./git-publisher.js";
 import { DisabledBuilderResultCollector, DockerBuilderResultCollector } from "./builder-result-collector.js";
 import { createBrowserProfileStore } from "./browser-profile-store.js";
 import { BrowserProfileBroker } from "./browser-profile-broker.js";
+import { MemoryObjectStore, S3ObjectStore, type ObjectStore } from "./object-store.js";
+import { EcsBuilderWorkspaces } from "./ecs-builder.js";
+import { AdapterInstaller } from "./adapters.js";
 
 function readVersion(): string {
   try {
@@ -136,12 +139,18 @@ async function main(): Promise<void> {
   );
   const browserProfileBroker = new BrowserProfileBroker(browserLauncher, browserProfileStore, auth, config.agentStudioUrl, logger);
   const workspaceExecutor = createWorkspaceExecutor(config, secrets, studio, logger);
+  const artifactStore: ObjectStore | undefined = config.artifactStore.type === "s3"
+    ? new S3ObjectStore(new S3Client({ region: config.region }), config.artifactStore.bucket, config.artifactStore.kmsKeyArn)
+    : config.artifactStore.type === "memory" ? new MemoryObjectStore() : undefined;
+  // ECS では Session Worker と volume を共有できないため、作業領域は S3 と Tool Gateway 経由で受け渡す
+  const ecsBuilder = config.launcher.type === "ecs" && artifactStore ? new EcsBuilderWorkspaces(artifactStore, studio, logger) : undefined;
+  const adapterInstaller = artifactStore ? new AdapterInstaller(artifactStore, studio, logger) : undefined;
   const gitPublisher = config.launcher.type === "docker"
     ? new DockerGitPublisher(config.launcher.image, studio, logger, config.launcher.network)
-    : new DisabledGitPublisher();
+    : ecsBuilder ?? new DisabledGitPublisher();
   const builderResultCollector = config.launcher.type === "docker"
     ? new DockerBuilderResultCollector(config.launcher.image, logger)
-    : new DisabledBuilderResultCollector();
+    : ecsBuilder ?? new DisabledBuilderResultCollector();
 
   logger.info(
     {
@@ -152,12 +161,13 @@ async function main(): Promise<void> {
       browser_launcher: browserLauncher.kind,
       builder_workspace_executor: workspaceExecutor.kind,
       secret_store: config.secrets.store,
+      artifact_store: config.artifactStore.type,
       max_concurrent_sessions: config.maxConcurrentSessions,
     },
     "設定を読み込みました",
   );
 
-  const controller = new Controller({ config, logger, auth, studio, grants, launcher, browserLauncher, workspaceExecutor, gitPublisher, builderResultCollector, browserProfileBroker, secrets, controllerVersion: version });
+  const controller = new Controller({ config, logger, auth, studio, grants, launcher, browserLauncher, workspaceExecutor, gitPublisher, builderResultCollector, browserProfileBroker, secrets, controllerVersion: version, ...(ecsBuilder ? { builderWorkspaces: ecsBuilder } : {}), ...(adapterInstaller ? { adapterInstaller } : {}), ...(artifactStore ? { artifactStore } : {}) });
   await controller.start();
 
   const shutdown = (signal: string) => {

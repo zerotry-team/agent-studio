@@ -4,6 +4,9 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AuditBuffer } from "./audit-buffer.js";
+import type { AdapterInstaller } from "./adapters.js";
+import { BUILDER_ARTIFACT_LIMITS, builderArtifactKey, builderInputKey, type BuilderArtifactName } from "./builder-transfer.js";
+import type { ObjectStore } from "./object-store.js";
 import type { GrantStore } from "./grants.js";
 import type { Logger } from "./logger.js";
 import { errorInfo } from "./logger.js";
@@ -17,6 +20,10 @@ export interface InternalApiDeps {
   refreshActiveSessions: () => Promise<void>;
   health: () => Record<string, unknown>;
   logger: Logger;
+  /** ECS の Builder Session と作業領域を受け渡す保存先 */
+  builderArtifacts?: ObjectStore;
+  /** 導入済みの企業専用 Adapter（Tool Gateway が起動する） */
+  adapters?: Pick<AdapterInstaller, "list" | "bundle">;
   now?: () => number;
   /** 未知のトークンで activeSessions を取り直す最短間隔 */
   refreshIntervalMs?: number;
@@ -24,6 +31,7 @@ export interface InternalApiDeps {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH_RE = /^[0-9a-f]{64}$/;
+const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 const errorBody = (code: string, message: string) => ({ error: { code, message } });
 
@@ -129,6 +137,56 @@ export function createInternalApp(deps: InternalApiDeps): Hono {
     } catch (err) {
       return proxyError(c, err);
     }
+  });
+
+  /** Builder Session の作業領域（Tool Gateway が Session 専用 token を確かめてから中継する） */
+  const builderRecord = (c: Context) => {
+    const sessionId = c.req.param("session");
+    const changeSetId = c.req.param("changeSet");
+    if (!sessionId || !changeSetId || !UUID_RE.test(sessionId) || !UUID_RE.test(changeSetId)) return null;
+    // token（Session・Change Set・MCP token の hash から作る）は Tool Gateway が確かめ済み。
+    // Controller の再起動で Change Set の対応が消えていても、Session が有効なら受け付ける
+    const record = deps.grants.get(sessionId);
+    if (!record) return null;
+    if (record.builderChangeSetId && record.builderChangeSetId !== changeSetId) return null;
+    return { sessionId, changeSetId };
+  };
+
+  app.get("/internal/builder-workspaces/:session/:changeSet/input", async (c) => {
+    if (!deps.builderArtifacts) return c.json(errorBody("not_supported", "このRuntimeではBuilder作業領域の受け渡しが有効になっていません"), 404);
+    const target = builderRecord(c);
+    if (!target) return c.json(errorBody("not_found", "Builder Sessionが見つかりません"), 404);
+    const body = await deps.builderArtifacts.get(builderInputKey(target.changeSetId));
+    if (!body) return c.json(errorBody("not_found", "作業領域がまだ準備されていません"), 404);
+    return c.body(new Uint8Array(body), 200, { "content-type": "application/gzip", "cache-control": "no-store" });
+  });
+
+  app.put("/internal/builder-workspaces/:session/:changeSet/:name", bodyLimit({ maxSize: BUILDER_ARTIFACT_LIMITS.bundle }), async (c) => {
+    if (!deps.builderArtifacts) return c.json(errorBody("not_supported", "このRuntimeではBuilder作業領域の受け渡しが有効になっていません"), 404);
+    const name = c.req.param("name");
+    if (name !== "result" && name !== "bundle") return c.json(errorBody("not_found", "見つかりません"), 404);
+    const target = builderRecord(c);
+    if (!target) return c.json(errorBody("not_found", "Builder Sessionが見つかりません"), 404);
+    const body = Buffer.from(await c.req.arrayBuffer());
+    if (body.byteLength === 0 || body.byteLength > BUILDER_ARTIFACT_LIMITS[name as BuilderArtifactName]) {
+      return c.json(errorBody("too_large", "送られたファイルの大きさが上限を超えているか、空です"), 413);
+    }
+    await deps.builderArtifacts.put(builderArtifactKey(target.changeSetId, name as BuilderArtifactName), body);
+    deps.logger.info({ session_id: target.sessionId, change_set_id: target.changeSetId, artifact: name, bytes: body.byteLength }, "Builderの作業結果を受け取りました");
+    return c.json({ stored: true, bytes: body.byteLength });
+  });
+
+  app.get("/internal/adapters", async (c) => {
+    if (!deps.adapters) return c.json([]);
+    return c.json(await deps.adapters.list());
+  });
+
+  app.get("/internal/adapters/:key/bundle", async (c) => {
+    const key = c.req.param("key");
+    if (!deps.adapters || !SLUG_RE.test(key)) return c.json(errorBody("not_found", "Adapterが見つかりません"), 404);
+    const body = await deps.adapters.bundle(key);
+    if (!body) return c.json(errorBody("not_found", "Adapterが見つかりません"), 404);
+    return c.body(new Uint8Array(body), 200, { "content-type": "text/javascript", "cache-control": "no-store" });
   });
 
   app.post("/internal/audit", bodyLimit({ maxSize: 2 * 1024 * 1024 }), async (c) => {

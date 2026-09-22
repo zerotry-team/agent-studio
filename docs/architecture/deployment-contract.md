@@ -140,7 +140,9 @@ Dockerfile はすべてリポジトリのルートをビルドコンテキスト
   - `<secrets_prefix>/openai-environment-key`（Controller が登録時に書き込む）
   - `<secrets_prefix>/connections/<name>`（業務システムの認証情報。顧客が値を入れる。config.yaml の `connections` から空のシークレットだけ作る）
   - `secrets_prefix` = `agent-studio/runtime/<tenant_short>/<stage_short>`
-- SSM パラメータ `/<prefix>/tool-config`（config.yaml の `runtime.tools` を JSON にしたもの。`RuntimeToolConfig` スキーマ）
+- SSM パラメータ `/<prefix>/tool-config`（config.yaml の `runtime.tools` を JSON にしたもの。`RuntimeToolConfig` スキーマ。企業専用 Adapter に渡す値は `adapter_runtime`）
+- S3 `<prefix>-runtime-artifacts-<account>-<region>`（`adapter_delivery_enabled` のとき。SSE-KMS）: Builder の作業領域 `builder-workspaces/<change_set_id>/{input.tar.gz,result.json,repo.bundle}`（7 日で失効）と、導入済み Adapter `adapters/<connector_key>/{manifest.json,bundle.mjs}`
+- `adapter_delivery_enabled` のとき DNS Firewall に `github.com` / `api.github.com` / `objects.githubusercontent.com` / `release-assets.githubusercontent.com` を足す（Controller の clone・push と Release の取得）
 
 ### 5.2 セキュリティグループ
 
@@ -170,6 +172,8 @@ runtime-core / controller:
 | `GATEWAY_PUBLIC_URL` | Session Worker から見た MCP の URL: `http://gateway.<prefix>.internal:8080/mcp` |
 | `CONTROLLER_INTERNAL_PORT` | `8081`（127.0.0.1 にだけ bind） |
 | `MAX_CONCURRENT_SESSIONS` / `SESSION_MAX_LIFETIME_MINUTES` / `SESSION_IDLE_TIMEOUT_MINUTES` | config.yaml |
+| `RUNTIME_ARTIFACT_STORE` | `s3`（`adapter_delivery_enabled`）/ `disabled`。`s3` のときだけ ECS の Builder と Adapter の導入を広告する |
+| `RUNTIME_ARTIFACT_BUCKET` / `RUNTIME_ARTIFACT_KMS_KEY_ARN` | 上記 S3 と KMS キー |
 
 runtime-core / tool-gateway:
 
@@ -190,6 +194,11 @@ session-worker（Controller が RunTask の containerOverrides で渡す）:
 | `ENVIRONMENT_ID` | `environment.id` |
 | `WORKSPACE_DIRECTORY` | `/workspace` |
 | `CODEX_API_KEY` | タスク定義の `secrets` で `<secrets_prefix>/openai-environment-key` から注入 |
+| `BUILDER_*` | Builder Session のときだけ。対象 Repository・branch・生成先など（資格情報は含まない） |
+| `BUILDER_TRANSFER_URL` / `BUILDER_TRANSFER_TOKEN` | ECS の Builder Session のときだけ。`http://gateway.<prefix>.internal:8080/builder-workspaces/<session_id>/<change_set_id>` と Session・Change Set 専用 token。作業領域の受け取り（`GET .../input`）と結果の送信（`PUT .../bundle`、`PUT .../result`）にだけ使える。`codex exec-server` の環境からは外す |
+
+Tool Gateway の公開リスナー（8080）: `/mcp`、`/health`、`/session-outputs/<session_id>/...`、`/builder-workspaces/<session_id>/<change_set_id>/<input|result|bundle>`。
+企業専用 Adapter は Tool Gateway のコンテナの中で `node --permission` の子プロセスとして 127.0.0.1:18100 以降で起動し、`adapter_runtime` の値だけを環境変数で受け取る。
 
 ### 5.4 IAM
 
@@ -198,6 +207,7 @@ session-worker（Controller が RunTask の containerOverrides で渡す）:
   - `iam:PassRole`（session-worker のタスクロールと実行ロールに限定）
   - `secretsmanager:GetSecretValue` / `PutSecretValue`（bootstrap-token、openai-environment-key）
   - `secretsmanager:GetSecretValue`（`connections/*`）、`ssm:GetParameter`（tool-config）、KMS Decrypt
+  - `adapter_delivery_enabled` のとき: runtime-artifacts バケットの `s3:GetObject` / `PutObject` / `DeleteObject` / `ListBucket` と、S3 経由の KMS
 - `<prefix>-session-worker-task`: **ポリシーなし**（SEC-12）
 - `<prefix>-session-worker-exec`: ECR pull、ログ、`openai-environment-key` の GetSecretValue
 

@@ -39,6 +39,10 @@ RUN yarn workspaces focus --production @agent-studio/runtime-controller \
 # ---- 3. 実行（root 以外）
 FROM ${NODE_IMAGE}
 ENV NODE_ENV=production
+# ECS の Builder: 作業領域の clone と、検証済み bundle からの branch 公開に git を使う（hook は無効にして実行する）
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /out/ ./
 USER node

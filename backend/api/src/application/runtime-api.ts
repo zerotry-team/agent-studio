@@ -20,7 +20,7 @@ import type {
   ToolVersionSpec,
   GitCredentialResponse,
 } from "@agent-studio/contracts";
-import { adapterDescriptorSchema, browserLoginResultSchema, builderWorkspaceResultSchema, canonicalJson, gitPublishResultSchema, type RuntimeBrowserProfile } from "@agent-studio/contracts";
+import { adapterDescriptorSchema, adapterInstallResultSchema, browserLoginResultSchema, builderWorkspaceResultSchema, canonicalJson, gitPublishResultSchema, type RuntimeBrowserProfile } from "@agent-studio/contracts";
 import { inspectArtifact } from "../domain/artifact-security.js";
 import { AppError, notFound } from "../domain/errors.js";
 import { evaluateOrganizationAutoApproval } from "../domain/organization-auto-approval.js";
@@ -54,6 +54,30 @@ const revoked = () => new AppError("runtime_revoked", 403, "この Runtime は�
  * Runtime の身元は、署名済み GetCallerIdentity で確認した AWS アカウント ID + IAM ロール名で決まる（SEC-05）。
  * 組織は自己申告させない。
  */
+const GIT_CREDENTIAL_JOB_TYPES = ["publish_builder_branch", "start_session", "install_adapter"] as const;
+
+/** Git資格情報を渡してよいjobと、その範囲（repository・権限）。対象外のjobはnull */
+export function gitCredentialTarget(
+  type: string,
+  payload: Record<string, unknown>,
+): { repositoryUrl: string; connectionId: string | null; access: "read" | "write" } | null {
+  const str = (value: unknown) => (typeof value === "string" && value.length > 0 ? value : null);
+  if (type === "publish_builder_branch" || type === "install_adapter") {
+    const repositoryUrl = str(payload.repository_url);
+    const connectionId = str(payload.connection_id);
+    if (!repositoryUrl || !connectionId) return null;
+    return { repositoryUrl, connectionId, access: type === "publish_builder_branch" ? "write" : "read" };
+  }
+  if (type === "start_session") {
+    const session = payload.session && typeof payload.session === "object" ? payload.session as Record<string, unknown> : {};
+    const workspace = session.builder_workspace && typeof session.builder_workspace === "object"
+      ? session.builder_workspace as Record<string, unknown> : null;
+    const repositoryUrl = workspace ? str(workspace.repository_url) : null;
+    return repositoryUrl ? { repositoryUrl, connectionId: null, access: "read" } : null;
+  }
+  return null;
+}
+
 export class RuntimeApiService {
   private readonly gitAutomation: BuilderGitAutomationService;
 
@@ -448,29 +472,51 @@ export class RuntimeApiService {
     }
   }
 
-  /** leased中のbranch push jobへ、repository限定installation tokenを一度だけ返す。 */
+  /**
+   * leased中のjobへ、repository限定のinstallation tokenを返す。
+   * - publish_builder_branch: Connectionの権限（contents: write）。1回だけ
+   * - start_session（Builder）/ install_adapter: 読み取り専用（contents: read）。clone・Release取得に使う
+   */
   async gitCredential(ctx: RuntimeContext, jobId: string): Promise<GitCredentialResponse> {
     const claimed = await this.deps.db.org(ctx.organizationId, async (tx) => {
-      const updated = await tx.runtime_jobs.updateMany({
-        where: { id: jobId, runtime_id: ctx.runtimeId, type: "publish_builder_branch", status: "leased", credential_consumed_at: null },
-        data: { credential_consumed_at: new Date() },
+      const job = await tx.runtime_jobs.findFirst({
+        where: { id: jobId, runtime_id: ctx.runtimeId, status: "leased", type: { in: [...GIT_CREDENTIAL_JOB_TYPES] } },
       });
-      if (updated.count !== 1) throw new AppError("git_credential_unavailable", 409, "Git資格情報は利用済みか、このジョブでは利用できません");
-      const job = await tx.runtime_jobs.findUniqueOrThrow({ where: { id: jobId } });
+      if (!job) throw new AppError("git_credential_unavailable", 409, "Git資格情報は利用済みか、このジョブでは利用できません");
       const payload = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload) ? job.payload as Record<string, unknown> : {};
-      const connectionId = typeof payload.connection_id === "string" ? payload.connection_id : null;
-      const repositoryUrl = typeof payload.repository_url === "string" ? payload.repository_url : null;
-      if (!connectionId || !repositoryUrl) throw new AppError("invalid_job", 400, "Git公開ジョブの接続情報がありません");
-      const connection = await tx.connections.findFirst({ where: { id: connectionId, organization_id: ctx.organizationId, status: "connected" } });
+      const target = gitCredentialTarget(job.type, payload);
+      if (!target) throw new AppError("invalid_job", 400, "Git資格情報を使うジョブの接続情報がありません");
+      if (target.access === "write") {
+        const updated = await tx.runtime_jobs.updateMany({
+          where: { id: jobId, runtime_id: ctx.runtimeId, status: "leased", credential_consumed_at: null },
+          data: { credential_consumed_at: new Date() },
+        });
+        if (updated.count !== 1) throw new AppError("git_credential_unavailable", 409, "Git資格情報は利用済みか、このジョブでは利用できません");
+      }
+      const connection = await tx.connections.findFirst({
+        where: {
+          organization_id: ctx.organizationId,
+          status: "connected",
+          revoked_at: null,
+          ...(target.connectionId
+            ? { id: target.connectionId }
+            : { metadata: { path: ["repository_url"], equals: target.repositoryUrl } }),
+        },
+        orderBy: { last_validated_at: "desc" },
+      });
       if (!connection?.secret_locator) throw new AppError("git_connection_unavailable", 412, "GitHub App Connectionが利用できません");
       const metadata = parseGitHubAppMetadata(connection.metadata);
-      if (metadata.repository_url !== repositoryUrl) throw new AppError("repository_not_allowed", 403, "GitHub App Connectionのrepository allowlist外です");
-      return { connection, metadata, repositoryUrl };
+      if (metadata.repository_url !== target.repositoryUrl) throw new AppError("repository_not_allowed", 403, "GitHub App Connectionのrepository allowlist外です");
+      return { connection, metadata, repositoryUrl: target.repositoryUrl, access: target.access };
     });
     try {
       const stored = await this.deps.secrets.get(claimed.connection.secret_locator!);
       if (!stored) throw new AppError("git_connection_unavailable", 412, "GitHub Appの秘密鍵が見つかりません");
-      const token = await this.deps.gitProvider.createInstallationToken(claimed.metadata, parseGitHubAppSecret(stored));
+      const token = await this.deps.gitProvider.createInstallationToken(
+        claimed.metadata,
+        parseGitHubAppSecret(stored),
+        claimed.access === "read" ? { contents: "read", metadata: "read" } : undefined,
+      );
       await this.deps.db.org(ctx.organizationId, (tx) => recordAudit(tx, {
         organizationId: ctx.organizationId,
         actorType: "runtime",
@@ -479,13 +525,15 @@ export class RuntimeApiService {
         targetType: "runtime_job",
         targetId: jobId,
         sourceIp: ctx.sourceIp,
-        detail: { repository_id: claimed.metadata.repository_id, expires_at: token.expiresAt },
+        detail: { repository_id: claimed.metadata.repository_id, access: claimed.access, expires_at: token.expiresAt },
       }));
       return { username: "x-access-token", token: token.token, expires_at: token.expiresAt, repository_url: claimed.repositoryUrl };
     } catch (error) {
-      await this.deps.db.org(ctx.organizationId, (tx) => tx.runtime_jobs.updateMany({
-        where: { id: jobId, runtime_id: ctx.runtimeId, status: "leased" }, data: { credential_consumed_at: null },
-      }));
+      if (claimed.access === "write") {
+        await this.deps.db.org(ctx.organizationId, (tx) => tx.runtime_jobs.updateMany({
+          where: { id: jobId, runtime_id: ctx.runtimeId, status: "leased" }, data: { credential_consumed_at: null },
+        }));
+      }
       throw error;
     }
   }
@@ -628,6 +676,34 @@ export class RuntimeApiService {
             data: { runtime_object_key: null },
           });
         }
+      }
+      if (job.type === "install_adapter") {
+        const payload = job.payload && typeof job.payload === "object" && !Array.isArray(job.payload) ? job.payload as Record<string, unknown> : {};
+        const changeSetId = typeof payload.change_set_id === "string" ? payload.change_set_id : null;
+        const imageDigest = typeof payload.image_digest === "string" ? payload.image_digest : null;
+        const pkg = changeSetId ? await tx.builder_adapter_packages.findFirst({ where: { change_set_id: changeSetId, runtime_id: ctx.runtimeId } }) : null;
+        if (pkg && req.status === "succeeded") {
+          const output = adapterInstallResultSchema.safeParse(req.output);
+          if (!output.success || output.data.image_digest !== imageDigest || output.data.connector_key !== pkg.connector_key) {
+            throw new AppError("invalid_job_result", 400, "Adapter導入の証跡が一致しません");
+          }
+          // 登録済みへの遷移はTool Gatewayが起動してheartbeatでToolを報告したときに行う
+          await tx.builder_adapter_packages.update({ where: { id: pkg.id }, data: { health_status: "starting" } });
+        } else if (pkg && req.status === "failed") {
+          const error = (req.error ?? "RuntimeへAdapterを導入できませんでした").slice(0, 2000);
+          await tx.builder_adapter_packages.update({ where: { id: pkg.id }, data: { status: "failed", health_status: "failed", error_class: "adapter_install", error } });
+          await tx.builder_validation_runs.create({ data: {
+            organization_id: ctx.organizationId, project_id: pkg.project_id, suite: "adapter_install", environment: "preview", status: "failed",
+            evidence: { package_id: pkg.id, connector_key: pkg.connector_key, image_digest: pkg.image_digest, job_id: jobId },
+            error_class: "adapter_install", error, finished_at: new Date(),
+          } });
+          await tx.builder_projects.update({ where: { id: pkg.project_id }, data: { status: "failed" } });
+        }
+        await recordAudit(tx, {
+          organizationId: ctx.organizationId, actorType: "runtime", actorId: ctx.runtimeId, action: "builder.adapter.install",
+          targetType: "builder_change_set", targetId: changeSetId ?? jobId, sourceIp: ctx.sourceIp,
+          result: req.status === "succeeded" ? "success" : "failure", detail: { job_id: jobId, image_digest: imageDigest, evidence_only: true },
+        });
       }
       if (req.status === "failed" && job.type === "start_session") {
         if (job.session_id) {
@@ -775,6 +851,7 @@ export class RuntimeApiService {
             title: `[Agent Studio] ${change.summary}`.slice(0, 240),
             body: [
               `Change Set: ${change.id}`,
+              `Runtime: ${ctx.runtimeId}`,
               `Purpose: ${change.summary}`,
               `Changed files: ${changedFiles.join(", ") || "none"}`,
               `Tests: ${tests.map((test) => JSON.stringify(test)).join(", ") || "recorded in Builder evidence"}`,

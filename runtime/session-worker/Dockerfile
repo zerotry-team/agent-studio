@@ -29,6 +29,7 @@ COPY --chmod=0755 runtime/session-worker/entrypoint.sh /usr/local/bin/session-wo
 COPY --chmod=0755 runtime/session-worker/workspace-builder-entrypoint /usr/local/bin/workspace-builder-entrypoint
 COPY --chmod=0644 runtime/session-worker/workspace-result.mjs /usr/local/lib/workspace-result.mjs
 COPY --chmod=0644 runtime/session-worker/outputs-sync.mjs /usr/local/lib/outputs-sync.mjs
+COPY --chmod=0644 runtime/session-worker/builder-sync.mjs /usr/local/lib/builder-sync.mjs
 
 ENV HOME=/home/worker \
     WORKSPACE_DIRECTORY=/workspace

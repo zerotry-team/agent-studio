@@ -1,10 +1,10 @@
-import { createPrivateKey, createSign, generateKeyPairSync } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createPrivateKey, createSign } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { ConnectionDto } from "@agent-studio/contracts";
 import { ApiClient, CliError } from "./api.js";
 import { CALLBACK_URL, openBrowser, randomUrlSafe, serveOnce, waitForCallback } from "./browser.js";
-import { CALLBACK_PORT, configDir, loadConfig } from "./config.js";
+import { CALLBACK_PORT, loadConfig } from "./config.js";
+import { ensureSigningKey, initIntegrationRepo, storeSigningSecret } from "./integration-repo.js";
 import { flagString, prompt } from "./input.js";
 
 type Flags = Record<string, string | true>;
@@ -35,6 +35,12 @@ async function github<T>(path: string, token: string, init: RequestInit = {}): P
  * 秘密鍵と Webhook secret は API へ直接送り、Secret Store にだけ保存される（ローカルには残さない）。
  */
 export async function githubConnect(flags: Flags): Promise<void> {
+  // --create-repo owner/name: Adapter 用の private repository とその CI を先に用意する
+  const createRepo = flagString(flags, "create-repo");
+  if (createRepo) {
+    initIntegrationRepo(createRepo);
+    flags = { ...flags, repo: createRepo };
+  }
   const config = loadConfig();
   const api = new ApiClient(config);
   const org = flagString(flags, "org");
@@ -51,8 +57,10 @@ export async function githubConnect(flags: Flags): Promise<void> {
     setup_url: setupUrl,
     setup_on_update: false,
     public: false,
-    default_permissions: { administration: "write", contents: "write", pull_requests: "write", checks: "read", metadata: "read" },
-    default_events: ["pull_request", "push", "check_suite", "deployment"],
+    // workflows は付けない（Builder が CI の定義を書き換えられないようにする）。
+    // deployments は CI が作る Adapter の Deployment（deployment_status）を受け取るため
+    default_permissions: { administration: "write", contents: "write", pull_requests: "write", checks: "read", statuses: "read", deployments: "read", metadata: "read" },
+    default_events: ["pull_request", "push", "check_suite", "check_run", "deployment", "deployment_status"],
   };
   const target = org ? `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new?state=${state}` : `https://github.com/settings/apps/new?state=${state}`;
   const html = `<html><body style="font-family:sans-serif"><p>GitHub へ移動しています…</p>
@@ -89,19 +97,23 @@ export async function githubConnect(flags: Flags): Promise<void> {
     if (!repo) throw new CliError("番号が正しくありません");
   }
 
-  // Adapter package の署名鍵。CI が秘密鍵で署名し、Agent Studio は公開鍵で検証する
+  // Adapter package の署名鍵。CI が秘密鍵で署名し、Agent Studio と Runtime は公開鍵で検証する
+  const fullName = `${repo.owner.login}/${repo.name}`;
   let publicKey: string;
   const keyFile = flagString(flags, "signing-public-key-file");
   if (keyFile) {
     publicKey = readFileSync(keyFile, "utf8");
   } else {
-    const pair = generateKeyPairSync("ed25519");
-    publicKey = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
-    const dir = join(configDir(), "signing-keys");
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const privatePath = join(dir, `${repo.owner.login}-${repo.name}.pem`);
-    writeFileSync(privatePath, pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString(), { mode: 0o600 });
-    console.log(`署名用の鍵ペアを生成しました。秘密鍵（${privatePath}）は GitHub Actions の secret ADAPTER_SIGNING_KEY に登録してください。`);
+    const key = ensureSigningKey(fullName);
+    publicKey = key.publicKey;
+    if (key.created || !createRepo) {
+      if (storeSigningSecret(fullName, key.privateKeyPath)) {
+        console.log("署名用の秘密鍵を GitHub Actions の secret ADAPTER_SIGNING_KEY に登録しました。");
+      } else {
+        console.log(`署名用の秘密鍵（${key.privateKeyPath}）を GitHub Actions の secret ADAPTER_SIGNING_KEY に登録してください:`);
+        console.log(`  gh secret set ADAPTER_SIGNING_KEY --repo ${fullName} < ${key.privateKeyPath}`);
+      }
+    }
   }
 
   console.log("3/3 Agent Studio に接続を登録します。");

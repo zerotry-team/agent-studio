@@ -106,6 +106,19 @@ export const runtimeUpstreamMcpSchema = z
   .strict();
 export type RuntimeUpstreamMcp = z.infer<typeof runtimeUpstreamMcpSchema>;
 
+/**
+ * 企業専用Adapter（CIが署名した社内システム用Tool）をTool Gatewayで起動するときに渡す値。
+ * env は平文の設定（社内APIのURLなど）、secrets は環境変数名 → Runtime側Secret名。
+ * AdapterにはここにあるものしかRuntimeの値を渡さない。
+ */
+export const adapterRuntimeSchema = z
+  .object({
+    env: z.record(z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/), z.string().max(2000)).default({}),
+    secrets: z.record(z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/), secretNameSchema).default({}),
+  })
+  .strict();
+export type AdapterRuntime = z.infer<typeof adapterRuntimeSchema>;
+
 export const runtimeToolConfigSchema = z
   .object({
     version: z.literal(1).default(1),
@@ -113,6 +126,7 @@ export const runtimeToolConfigSchema = z
     upstream_mcp: z.array(runtimeUpstreamMcpSchema).default([]),
     /** すべてのツールに適用する Runtime 側のポリシー */
     policies: z.array(policySchema).default([]),
+    adapter_runtime: adapterRuntimeSchema.default({ env: {}, secrets: {} }),
   })
   .strict();
 export type RuntimeToolConfig = z.infer<typeof runtimeToolConfigSchema>;

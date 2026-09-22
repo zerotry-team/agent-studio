@@ -1,6 +1,6 @@
 import { createHash, createHmac, generateKeyPairSync, sign } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { canonicalJson, type GitHubAppConnectionMetadata, type HeartbeatRequest } from "@agent-studio/contracts";
+import { canonicalJson, installAdapterJobSchema, type GitHubAppConnectionMetadata, type HeartbeatRequest } from "@agent-studio/contracts";
 import { RuntimeApiService } from "../application/runtime-api.js";
 import type { GitHubAppSecret, GitProvider } from "../infrastructure/git/github-app.js";
 import { createHarness, type Harness } from "./harness.js";
@@ -13,9 +13,13 @@ const webhookSecret = "integration-webhook-secret";
 const packageSigningKeys = generateKeyPairSync("ed25519");
 const packageSigningPublicKey = packageSigningKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
 let mergeRequested = false;
+const tokenPermissions: Array<Record<string, string> | undefined> = [];
 
 const fakeGit: GitProvider = {
-  async createInstallationToken() { return { token: "installation-token-1234567890", expiresAt: "2099-01-01T00:00:00.000Z" }; },
+  async createInstallationToken(_metadata, _secret, permissions) {
+    tokenPermissions.push(permissions);
+    return { token: "installation-token-1234567890", expiresAt: "2099-01-01T00:00:00.000Z" };
+  },
   async provisionOrganizationRepository(input) { return { id: 999, full_name: `${input.metadata.owner}/${input.name}`, default_branch: "main", private: true }; },
   async validateRepository(metadata) { return { id: Number(metadata.repository_id), full_name: `${metadata.owner}/${metadata.repository}`, default_branch: "develop" }; },
   async createOrUpdatePullRequest(input) {
@@ -228,6 +232,25 @@ describe("GitHub App → signed Adapter delivery", () => {
     expect(await h.admin.human_actions.count({ where: { project_id: projectId, type: "repository_merge", status: "pending" } })).toBe(1);
   });
 
+  it("Builder Session の clone には、再送でも使える読み取り専用の資格情報を返す", async () => {
+    const repositoryUrl = (await h.admin.connections.findUniqueOrThrow({ where: { id: connectionId } })).metadata as { repository_url: string };
+    const job = await h.admin.runtime_jobs.create({ data: {
+      organization_id: orgId, runtime_id: runtimeId, type: "start_session", status: "leased",
+      payload: { type: "start_session", session: { session_id: "00000000-0000-4000-8000-0000000000aa", builder_workspace: { repository_url: repositoryUrl.repository_url } } },
+    } });
+    const plain = await h.admin.runtime_jobs.create({ data: {
+      organization_id: orgId, runtime_id: runtimeId, type: "start_session", status: "leased",
+      payload: { type: "start_session", session: { session_id: "00000000-0000-4000-8000-0000000000ab" } },
+    } });
+    const ctx = { runtimeId, organizationId: orgId, sourceIp: "127.0.0.1" };
+    tokenPermissions.length = 0;
+    await expect(service.gitCredential(ctx, job.id)).resolves.toMatchObject({ repository_url: repositoryUrl.repository_url });
+    await expect(service.gitCredential(ctx, job.id)).resolves.toMatchObject({ repository_url: repositoryUrl.repository_url });
+    expect(tokenPermissions).toEqual([{ contents: "read", metadata: "read" }, { contents: "read", metadata: "read" }]);
+    await expect(service.gitCredential(ctx, plain.id)).rejects.toMatchObject({ code: "invalid_job" });
+    await h.admin.runtime_jobs.updateMany({ where: { id: { in: [job.id, plain.id] } }, data: { status: "cancelled" } });
+  });
+
   it("GitHub Checksが未導入の新規Repositoryでも同一head SHAのBuilder検証後に自動mergeする", async () => {
     await h.admin.builder_validation_runs.create({ data: {
       organization_id: orgId,
@@ -293,9 +316,35 @@ describe("GitHub App → signed Adapter delivery", () => {
         contract_hash: contractHash, image_digest: imageDigest, package_signature: packageSignature, sbom_digest: sbomDigest,
         dependency_scan: { status: "passed", critical: 0 }, secret_scan: { status: "passed", findings: 0 },
         provenance: { builder: "github-actions", source_repository: "example/private-adapters", build_context: "runtime/adapters/factoring" }, descriptor,
+        package: { release_asset_id: 77 },
       } } },
     });
     expect(deployed.status).toBe(202);
+
+    // Release に添付された package を Runtime が取得・検証する job が 1 つだけできる
+    const installJobs = await h.admin.runtime_jobs.findMany({ where: { runtime_id: runtimeId, type: "install_adapter" } });
+    expect(installJobs).toHaveLength(1);
+    const installJob = installAdapterJobSchema.parse({ ...(installJobs[0]!.payload as Record<string, unknown>), job_id: installJobs[0]!.id });
+    expect(installJob).toMatchObject({ release_asset_id: 77, connector_key: "factoring-adapter", source_commit: mergeSha, image_digest: imageDigest, connection_id: connectionId, signing_public_key: packageSigningPublicKey });
+    const redelivered = await sendWebhook("delivery-deploy-rerun", "deployment_status", JSON.parse(JSON.stringify({
+      repository: { id: 300 }, deployment_status: { state: "success" },
+      deployment: { environment: "preview", ref: mergeSha, payload: { agent_studio: {
+        change_set_id: changeSetId, runtime_id: runtimeId, connector_key: "factoring-adapter", descriptor_hash: descriptorHash,
+        contract_hash: contractHash, image_digest: imageDigest, package_signature: packageSignature, sbom_digest: sbomDigest,
+        dependency_scan: { status: "passed", critical: 0 }, secret_scan: { status: "passed", findings: 0 },
+        provenance: { builder: "github-actions", source_repository: "example/private-adapters", build_context: "runtime/adapters/factoring" }, descriptor,
+        package: { release_asset_id: 77 },
+      } } },
+    })));
+    expect(redelivered.status).toBe(202);
+    expect(await h.admin.runtime_jobs.count({ where: { runtime_id: runtimeId, type: "install_adapter" } })).toBe(1);
+    const ctx = { runtimeId, organizationId: orgId, sourceIp: "127.0.0.1" };
+    await h.admin.runtime_jobs.update({ where: { id: installJob.job_id }, data: { status: "leased" } });
+    tokenPermissions.length = 0;
+    await expect(service.gitCredential(ctx, installJob.job_id)).resolves.toMatchObject({ token: "installation-token-1234567890" });
+    expect(tokenPermissions).toEqual([{ contents: "read", metadata: "read" }]);
+    await service.jobResult(ctx, installJob.job_id, { status: "succeeded", output: { connector_key: "factoring-adapter", image_digest: imageDigest, installed: true } });
+    expect(await h.admin.builder_adapter_packages.findUniqueOrThrow({ where: { change_set_id: changeSetId } })).toMatchObject({ status: "deployed", health_status: "starting" });
 
     const heartbeat: HeartbeatRequest = {
       controller_version: "test", gateway_url: "http://127.0.0.1:8080/mcp", active_sessions: [], capabilities: ["adapter_delivery"],

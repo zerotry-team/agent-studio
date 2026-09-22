@@ -96,6 +96,9 @@ locals {
     BROWSER_PROFILE_STORE          = local.browser_enabled ? "s3" : "disabled"
     BROWSER_PROFILE_BUCKET         = local.browser_enabled ? aws_s3_bucket.browser_profiles[0].id : ""
     BROWSER_PROFILE_KMS_KEY_ARN    = local.browser_enabled ? aws_kms_key.this.arn : ""
+    RUNTIME_ARTIFACT_STORE         = var.adapter_delivery_enabled ? "s3" : "disabled"
+    RUNTIME_ARTIFACT_BUCKET        = var.adapter_delivery_enabled ? aws_s3_bucket.runtime_artifacts[0].id : ""
+    RUNTIME_ARTIFACT_KMS_KEY_ARN   = var.adapter_delivery_enabled ? aws_kms_key.this.arn : ""
   }
 
   tool_gateway_environment = {

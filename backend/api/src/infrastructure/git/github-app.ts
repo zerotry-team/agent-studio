@@ -25,7 +25,8 @@ const secretSchema = z.object({
 export type GitHubAppSecret = z.infer<typeof secretSchema>;
 
 export interface GitProvider {
-  createInstallationToken(metadata: GitHubAppConnectionMetadata, secret: GitHubAppSecret): Promise<GitHubToken>;
+  /** permissions を渡すと、Connection の権限の範囲内でさらに絞った token を作る（読み取り専用など） */
+  createInstallationToken(metadata: GitHubAppConnectionMetadata, secret: GitHubAppSecret, permissions?: Record<string, string>): Promise<GitHubToken>;
   validateRepository(metadata: GitHubAppConnectionMetadata, secret: GitHubAppSecret): Promise<GitHubRepo>;
   createOrUpdatePullRequest(input: {
     metadata: GitHubAppConnectionMetadata;
@@ -115,14 +116,14 @@ export class GitHubAppProvider implements GitProvider {
       .sign(key);
   }
 
-  async createInstallationToken(metadata: GitHubAppConnectionMetadata, secret: GitHubAppSecret): Promise<GitHubToken> {
+  async createInstallationToken(metadata: GitHubAppConnectionMetadata, secret: GitHubAppSecret, permissions?: Record<string, string>): Promise<GitHubToken> {
     const jwt = await this.appJwt(metadata, secret);
     const body = await this.json<{ token: string; expires_at: string; permissions?: Record<string, string> }>(
       `${this.apiBase}/app/installations/${metadata.installation_id}/access_tokens`,
       {
         method: "POST",
         headers: { ...this.headers(jwt), "content-type": "application/json" },
-        body: JSON.stringify({ repository_ids: [Number(metadata.repository_id)], permissions: metadata.permissions }),
+        body: JSON.stringify({ repository_ids: [Number(metadata.repository_id)], permissions: permissions ?? metadata.permissions }),
       },
     );
     if (!body.token || !body.expires_at) throw new Error("GitHub Appがinstallation tokenを返しませんでした");

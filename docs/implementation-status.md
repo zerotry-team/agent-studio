@@ -47,6 +47,17 @@ AWS は過去の基盤commitで production の Control Plane と Sample A 社 Ru
 
 したがって、現時点では最終Definition of Done未達であり「Agent Studio完成」とは報告しない。
 
+## 本番（ECS）での社内システム用 Tool の自動生成と配布（2026-09-22）
+
+使える Tool が無い社内システムについて、Builder が Adapter のコードを書き、PR → CI → merge → 顧客 Runtime への導入 → Tool 登録まで本番の ECS Runtime で進められるようにした。
+
+- ECS の Builder Session: Controller が読み取り専用の Installation token で clone し、作業領域を S3（SSE-KMS）に置く。Session Worker は Tool Gateway の `/builder-workspaces/...`（Session・Change Set 専用 token）から受け取り、結果 JSON と `git bundle` を返す。Worker には Git の資格情報も AWS の権限も渡さない
+- 公開: Controller が bundle のヘッダ（commit と基点）を git を実行せずに照合し、新しい repository に取り込んで `builder/*` だけへ push する。Worker が書いた `.git` の設定・hook は Controller で実行しない（実 git のテストで確認）
+- Integration Repository のテンプレート（`templates/integration-repo`）: `adapters/<key>/` に 1 ファイルの Adapter（Node の組み込みモジュールだけ）と descriptor とテストを置く。CI が形式・import・秘密情報・テストを検査し、main への merge 後に Ed25519 で署名して Release に添付し、Deployment を作る
+- Control Plane は deployment webhook の署名を検証して `install_adapter` Job を作る。Runtime はRelease の添付を読み取り専用 token で取得し、digest・descriptor・署名を自分でも検証して保存する。Tool Gateway が `node --permission`（読めるのは自分のファイルだけ）で起動し、`adapter_runtime` の値だけを環境変数で渡す。heartbeat で Tool を報告すると既存の登録処理が Tool Version を作る
+- CLI: `agent-studio github init-repo <owner/name>`（gh CLI で private repository・テンプレート・署名鍵の secret を用意）と `github connect --create-repo`。GitHub App は deployment_status / check_run を受け取り、workflow を書き換える権限は持たない
+- 未実施: 本番の GitHub App・Integration Repository を使った通し（利用者の GitHub 操作が必要）
+
 ## CLI（2026-09-22）
 
 `packages/cli`（`agent-studio` コマンド）を追加した。連携サービスの接続（API キーは標準入力/環境変数、OAuth はブラウザで許可→ローカル待ち受け）、OAuth アプリ登録、貴社 AWS 用 Runtime の作成と登録用トークン、GitHub App の manifest flow による作成〜接続、本番承認、`doctor`（待ち中の Human Action と解決コマンド）を画面なしで行える。Human Action の `cli_command` を作成状況カードにも表示する。本番のブラウザログインは Cognito の CLI 用公開クライアント（Terraform `aws_cognito_user_pool_client.cli`、API は両方の client ID を aud として受け付ける）が前提。ローカルの dev ログイン・API キー方式・runtime_secret 方式は実 API で確認済み。OAuth と GitHub manifest flow の実 Provider 通しは未実施。
