@@ -16,6 +16,7 @@ import { EnvConnectionSecrets, SecretsManagerConnectionSecrets, type ConnectionS
 import { ToolCallService } from "./tool-call.js";
 import { loadToolConfig, ToolConfigError } from "./tool-config.js";
 import { createUpstreamConnector, listUpstreamTools, UpstreamSessionPool } from "./upstream.js";
+import { createSessionOutputsHandler } from "./session-outputs-handler.js";
 
 function readVersion(): string {
   try {
@@ -91,6 +92,7 @@ async function main(): Promise<void> {
     resolver,
     createMcpServer: (grant) => createSessionMcpServer(grant, { catalog, toolCalls, version }),
     logger,
+    sessionOutputs: createSessionOutputsHandler({ controller, logger }),
   });
   const internalServer = createInternalServer(catalog);
   await listen(publicServer, config.port, config.host);

@@ -314,6 +314,28 @@ describe("実行の流れ（擬似 OpenAI）", () => {
       const rejectedRow = await h.admin.run_artifacts.findFirst({ where: { run_id: run.body.id, path: { endsWith: "eicar.txt" } } });
       expect(rejectedRow?.scan_status).toBe("rejected");
       expect([...h.objects.objects.keys()].some((key) => key.endsWith("eicar.txt"))).toBe(false);
+      // 作業領域の成果物: 同じ内容は送り直しても1件、内容が変われば更新する
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+      const output = { source: "session_output", path: "generated_images/dog.png", sha256: createHash("sha256").update(png).digest("hex"), size_bytes: png.byteLength, content_base64: png.toString("base64") };
+      const first = await h.request("POST", `/runtime/v1/sessions/${session.session_id}/artifacts`, { token: access, body: output });
+      expect(first.status, JSON.stringify(first.body)).toBe(200);
+      expect(first.body.path).toBe("generated_images/dog.png");
+      const again2 = await h.request("POST", `/runtime/v1/sessions/${session.session_id}/artifacts`, { token: access, body: output });
+      expect(again2.body.run_artifact_id).toBe(first.body.run_artifact_id);
+      const report = Buffer.from("# 報告\n");
+      const reportBody = { source: "session_output", path: "outputs/report.md", sha256: createHash("sha256").update(report).digest("hex"), size_bytes: report.byteLength, content_base64: report.toString("base64") };
+      expect((await h.request("POST", `/runtime/v1/sessions/${session.session_id}/artifacts`, { token: access, body: reportBody })).body.path).toBe("report.md");
+      const report2 = Buffer.from("# 報告（更新）\n");
+      const updated = await h.request("POST", `/runtime/v1/sessions/${session.session_id}/artifacts`, {
+        token: access, body: { ...reportBody, sha256: createHash("sha256").update(report2).digest("hex"), size_bytes: report2.byteLength, content_base64: report2.toString("base64") },
+      });
+      expect(updated.status).toBe(200);
+      const reportRows = await h.admin.run_artifacts.findMany({ where: { run_id: run.body.id, path: "report.md" } });
+      expect(reportRows).toHaveLength(1);
+      expect(reportRows[0]!.sha256).toBe(createHash("sha256").update(report2).digest("hex"));
+      const outside = await h.request("POST", `/runtime/v1/sessions/${session.session_id}/artifacts`, { token: access, body: { ...output, path: "repo/.env" } });
+      expect(outside.status).toBe(400);
+
       // 自分のRuntimeのものではないSessionには保存できない
       const foreign = await h.request("POST", `/runtime/v1/sessions/${randomUUID()}/artifacts`, { token: access, body: download });
       expect(foreign.status).toBe(404);
@@ -340,6 +362,13 @@ describe("実行の流れ（擬似 OpenAI）", () => {
       const inputs = await h.admin.run_inputs.findMany({ where: { run_id: run.body.id }, orderBy: { created_at: "asc" } });
       expect(inputs.map((i) => i.kind)).toEqual(["initial", "approval"]);
       expect(inputs.every((i) => i.status === "started")).toBe(true);
+
+      // 実行が完了した直後に届いた作業領域の成果物も保存する
+      const late = Buffer.from("late");
+      const lateStored = await h.request("POST", `/runtime/v1/sessions/${session.session_id}/artifacts`, {
+        token: access, body: { source: "session_output", path: "outputs/late.txt", sha256: createHash("sha256").update(late).digest("hex"), size_bytes: late.byteLength, content_base64: late.toString("base64") },
+      });
+      expect(lateStored.status, JSON.stringify(lateStored.body)).toBe(200);
 
       // 終了後: セッションが後片付けされ、Worker の停止が依頼される
       const stop = await h.waitFor(

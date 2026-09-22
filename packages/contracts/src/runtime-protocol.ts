@@ -407,22 +407,51 @@ export type ApprovalResponse = z.infer<typeof approvalResponseSchema>;
 /** Browser Downloadなど、Runtime内で取得したファイルの本文上限（base64前） */
 export const SESSION_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024;
 
+const artifactBodyFields = {
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  size_bytes: z.number().int().nonnegative().max(SESSION_ARTIFACT_MAX_BYTES),
+  content_base64: z.string().max(Math.ceil(SESSION_ARTIFACT_MAX_BYTES / 3) * 4 + 4),
+};
+
+/** Session Workerが回収する作業領域のディレクトリ（/workspace からの相対） */
+export const SESSION_OUTPUT_DIRECTORIES = ["outputs", "generated_images"] as const;
+
+/** /workspace からの相対パス。回収対象のディレクトリ配下だけを受け付け、親ディレクトリ参照を拒否する */
+export const sessionOutputPathSchema = z
+  .string()
+  .min(1)
+  .max(500)
+  .refine((value) => {
+    const parts = value.split("/");
+    return (SESSION_OUTPUT_DIRECTORIES as readonly string[]).includes(parts[0] ?? "")
+      && parts.length >= 2
+      && parts.every((part) => part !== "" && part !== "." && part !== ".." && !part.startsWith(".") && !/[\\\0\r\n]/.test(part));
+  }, "回収できないパスです");
+
 /**
  * Runtime内で取得したファイルをRun Artifactとして保存する（Tool Gateway → Controller → Agent Studio）。
  * 本文はモデルへ返さず、保存後のメタデータだけをTool結果に載せる。
  */
-export const sessionArtifactRequestSchema = z
-  .object({
-    source: z.enum(["browser_download"]),
-    /** Browser Worker内のArtifact ID。Upload時にも同じIDを使う */
-    source_artifact_id: z.uuid(),
-    filename: z.string().min(1).max(255).refine((value) => !/[\\/\0\r\n]/.test(value) && value !== "." && value !== "..", "ファイル名が不正です"),
-    mime_type: z.string().min(1).max(200),
-    sha256: z.string().regex(/^[0-9a-f]{64}$/),
-    size_bytes: z.number().int().nonnegative().max(SESSION_ARTIFACT_MAX_BYTES),
-    content_base64: z.string().max(Math.ceil(SESSION_ARTIFACT_MAX_BYTES / 3) * 4 + 4),
-  })
-  .strict();
+export const sessionArtifactRequestSchema = z.discriminatedUnion("source", [
+  z
+    .object({
+      source: z.literal("browser_download"),
+      /** Browser Worker内のArtifact ID。Upload時にも同じIDを使う */
+      source_artifact_id: z.uuid(),
+      filename: z.string().min(1).max(255).refine((value) => !/[\\/\0\r\n]/.test(value) && value !== "." && value !== "..", "ファイル名が不正です"),
+      mime_type: z.string().min(1).max(200),
+      ...artifactBodyFields,
+    })
+    .strict(),
+  z
+    .object({
+      /** Session Workerの /workspace/outputs などに置かれたファイル */
+      source: z.literal("session_output"),
+      path: sessionOutputPathSchema,
+      ...artifactBodyFields,
+    })
+    .strict(),
+]);
 export type SessionArtifactRequest = z.infer<typeof sessionArtifactRequestSchema>;
 
 export const sessionArtifactResponseSchema = z.object({

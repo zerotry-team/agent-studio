@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { WorkspaceFileLink, workspaceArtifactPath } from "./workspace-file-link";
 
 type OutputKind = { kind: "json"; value: unknown } | { kind: "markdown"; value: string };
 
@@ -24,8 +25,15 @@ function link({ href, children }: { href?: string; children?: ReactNode }) {
   );
 }
 
-export function RunOutput({ output }: { output: string }) {
+export function RunOutput({ output, runId }: { output: string; runId?: string }) {
   const content = classifyRunOutput(output);
+  const anchor = ({ href, children }: { href?: string; children?: ReactNode }) => {
+    const path = workspaceArtifactPath(href);
+    if (path && runId) return <WorkspaceFileLink runId={runId} path={path}>{children}</WorkspaceFileLink>;
+    // 作業領域のパスはブラウザから開けないため、リンクにしない
+    if (path) return <span className="font-medium text-gray-900" title={href}>{children}</span>;
+    return link({ href, children });
+  };
 
   if (content.kind === "json") {
     return (
@@ -43,7 +51,7 @@ export function RunOutput({ output }: { output: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: link,
+          a: anchor,
           h1: ({ children }) => <h1 className="mb-4 mt-7 border-b border-gray-200 pb-2 text-2xl font-semibold tracking-tight text-gray-950 first:mt-0">{children}</h1>,
           h2: ({ children }) => <h2 className="mb-3 mt-7 text-xl font-semibold tracking-tight text-gray-950 first:mt-0">{children}</h2>,
           h3: ({ children }) => <h3 className="mb-2 mt-6 text-base font-semibold text-gray-950 first:mt-0">{children}</h3>,

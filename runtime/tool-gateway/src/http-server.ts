@@ -71,6 +71,8 @@ export interface PublicServerDeps {
   createMcpServer: (grant: SessionGrant) => McpServer;
   logger: Logger;
   maxBodyBytes?: number;
+  /** Session Worker からの作業領域の成果物（/session-outputs/...） */
+  sessionOutputs?: (req: IncomingMessage, res: ServerResponse, path: string) => Promise<void>;
 }
 
 /**
@@ -83,11 +85,15 @@ export function createPublicHandler(deps: PublicServerDeps): (req: IncomingMessa
   const limit = deps.maxBodyBytes ?? MAX_BODY_BYTES;
 
   return async (req, res) => {
-    const path = (req.url ?? "/").split("?")[0];
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
 
     if (path === "/health") {
       if (req.method === "GET" || req.method === "HEAD") sendJson(res, 200, { status: "ok" });
       else sendJson(res, 405, { error: "method_not_allowed" }, { allow: "GET" });
+      return;
+    }
+    if (deps.sessionOutputs && path.startsWith("/session-outputs/")) {
+      await deps.sessionOutputs(req, res, path);
       return;
     }
     if (path !== "/mcp") {
@@ -162,7 +168,7 @@ export function createPublicServer(deps: PublicServerDeps): Server {
 /** Controller のハートビート用（127.0.0.1:8082） */
 export function createInternalServer(catalog: Pick<ToolCatalog, "entries">): Server {
   return createServer((req, res) => {
-    const path = (req.url ?? "/").split("?")[0];
+    const path = (req.url ?? "/").split("?")[0] ?? "/";
     if (req.method === "GET" && path === "/internal/catalog") return sendJson(res, 200, catalog.entries());
     if (req.method === "GET" && path === "/internal/health") return sendJson(res, 200, { status: "ok" });
     sendJson(res, 404, { error: "not_found" });

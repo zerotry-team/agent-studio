@@ -28,6 +28,7 @@ RUN groupadd --gid 10001 worker \
 COPY --chmod=0755 runtime/session-worker/entrypoint.sh /usr/local/bin/session-worker-entrypoint
 COPY --chmod=0755 runtime/session-worker/workspace-builder-entrypoint /usr/local/bin/workspace-builder-entrypoint
 COPY --chmod=0644 runtime/session-worker/workspace-result.mjs /usr/local/lib/workspace-result.mjs
+COPY --chmod=0644 runtime/session-worker/outputs-sync.mjs /usr/local/lib/outputs-sync.mjs
 
 ENV HOME=/home/worker \
     WORKSPACE_DIRECTORY=/workspace

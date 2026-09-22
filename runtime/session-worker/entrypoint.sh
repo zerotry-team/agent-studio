@@ -49,5 +49,13 @@ if [[ -n "${BUILDER_REPOSITORY_URL:-}" ]]; then
 fi
 cd "$WORKSPACE_DIRECTORY"
 
+# Self-hostedではOpenAIのArtifacts APIからファイルを取り出せないため、作業領域の成果物を
+# Tool Gateway経由でこのRunの成果物として送る（Builder Sessionは別の回収経路を使う）。
+if [[ -n "${SESSION_OUTPUTS_URL:-}" && -n "${SESSION_OUTPUTS_TOKEN:-}" && -z "${BUILDER_REPOSITORY_URL:-}" ]]; then
+  mkdir -p "$WORKSPACE_DIRECTORY/outputs"
+  node /usr/local/lib/outputs-sync.mjs &
+  log "作業領域の成果物の回収を開始しました"
+fi
+
 log "codex exec-server を起動します（environment_id=${ENVIRONMENT_ID}、workspace=${WORKSPACE_DIRECTORY}）"
-exec codex exec-server --remote "$REMOTE_URL" --environment-id "$ENVIRONMENT_ID"
+exec env -u SESSION_OUTPUTS_URL -u SESSION_OUTPUTS_TOKEN codex exec-server --remote "$REMOTE_URL" --environment-id "$ENVIRONMENT_ID"

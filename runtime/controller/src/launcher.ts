@@ -21,6 +21,8 @@ export interface LaunchRequest {
   remoteUrl: string;
   environmentId: string;
   builderWorkspace?: BuilderSessionWorkspace;
+  /** 作業領域の成果物の送信先（Tool Gateway）と Session 専用 token。Builder Session では渡さない */
+  outputs?: { url: string; token: string };
   /** ECS の冪等性トークン（ジョブ ID）。同じジョブの再配送で二重に起動しないため */
   idempotencyToken?: string;
 }
@@ -114,6 +116,10 @@ export class EcsSessionLauncher implements SessionLauncher {
                 { name: "REMOTE_URL", value: req.remoteUrl },
                 { name: "ENVIRONMENT_ID", value: req.environmentId },
                 { name: "WORKSPACE_DIRECTORY", value: WORKSPACE_DIRECTORY },
+                ...(req.outputs ? [
+                  { name: "SESSION_OUTPUTS_URL", value: req.outputs.url },
+                  { name: "SESSION_OUTPUTS_TOKEN", value: req.outputs.token },
+                ] : []),
                 ...(req.builderWorkspace ? [
                   { name: "BUILDER_PROJECT_ID", value: req.builderWorkspace.project_id },
                   { name: "BUILDER_CHANGE_SET_ID", value: req.builderWorkspace.change_set_id },
@@ -251,6 +257,7 @@ export class DockerSessionLauncher implements SessionLauncher {
       "-e",
       "CODEX_API_KEY",
     ];
+    if (req.outputs) args.push("-e", "SESSION_OUTPUTS_URL", "-e", "SESSION_OUTPUTS_TOKEN");
     if (req.builderWorkspace) {
       args.push(
         "--mount", `type=volume,source=as-builder-${req.builderWorkspace.change_set_id.replaceAll("-", "")},target=/workspace`,
@@ -272,6 +279,7 @@ export class DockerSessionLauncher implements SessionLauncher {
         ENVIRONMENT_ID: req.environmentId,
         WORKSPACE_DIRECTORY,
         CODEX_API_KEY: key,
+        ...(req.outputs ? { SESSION_OUTPUTS_URL: req.outputs.url, SESSION_OUTPUTS_TOKEN: req.outputs.token } : {}),
         ...(req.builderWorkspace ? {
           BUILDER_PROJECT_ID: req.builderWorkspace.project_id,
           BUILDER_CHANGE_SET_ID: req.builderWorkspace.change_set_id,

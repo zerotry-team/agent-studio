@@ -92,6 +92,7 @@ export class Controller {
       studio,
       secrets,
       logger,
+      gatewayPublicUrl: config.gatewayPublicUrl,
       limits: {
         maxConcurrentSessions: config.maxConcurrentSessions,
         sessionMaxLifetimeMinutes: config.sessionMaxLifetimeMinutes,
