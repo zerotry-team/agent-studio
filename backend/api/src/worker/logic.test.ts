@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toManifestDraft } from "../application/agents.js";
 import { workflowDefinitionSchema } from "@agent-studio/contracts";
-import { buildFactoringWorkflow, codeWorkspaceQuestionsFor, ensureAnsweredSourceRequirements, ensureRequiredScenarioTools, explicitOrganizationToolDraft, humanCapabilityRequirements, intakeQuestionsFor, organizationCodeWorkspaceQuestionsFor, registeredAdapterToolNames } from "./builder-orchestrator.js";
+import { buildBuilderPreviewInput, buildFactoringWorkflow, codeWorkspaceQuestionsFor, ensureAnsweredSourceRequirements, ensureRequiredScenarioTools, explicitOrganizationToolDraft, humanCapabilityRequirements, intakeQuestionsFor, organizationCodeWorkspaceQuestionsFor, registeredAdapterToolNames } from "./builder-orchestrator.js";
 import { judge, renderArgumentsTemplate, renderTemplate } from "./engines.js";
 import { isPrivateAddress } from "./studio-functions.js";
 
@@ -41,6 +41,27 @@ describe("renderTemplate（Workflow）", () => {
 });
 
 describe("Builder factoring workflow", () => {
+  it("画像生成Previewは内部Artifact生成を実行し、読み取り操作とは扱わない", () => {
+    const input = buildBuilderPreviewInput(
+      "テーマから画像を生成する",
+      ["generate_image", "publish_post"],
+      ["generate_image"],
+    );
+    expect(input).toContain("generate_image を実際に1回呼び出し");
+    expect(input).toContain("RunのArtifactとして保存");
+    expect(input).toContain("publish_post を含む外部書き込み・外部送信は行わない");
+    expect(input).not.toContain("generate_image のうち依頼に必要な読み取り操作");
+    expect(buildBuilderPreviewInput("画像", ["generate_image"], ["generate_image"], true))
+      .toContain('[[call:generate_image {"prompt":"青空の下の白い折り紙の鳥"}]]');
+  });
+
+  it("読み取りToolだけのPreviewは従来どおり実呼び出しを要求する", () => {
+    const input = buildBuilderPreviewInput("会社を調査する", ["web_search"], ["web_search"]);
+    expect(input).toContain("web_search のうち依頼に必要な読み取り操作を実際に1回以上呼び出し");
+    expect(input).toContain("外部書き込み・外部送信は行わない");
+    expect(input).not.toContain(" を含む外部書き込み");
+  });
+
   it("最新情報にはOpenAI標準Web Searchを必須化し、画像生成不足も取りこぼさない", () => {
     const resolution = ensureRequiredScenarioTools(
       "今日の最新テックニュースをまとめ、挿絵を生成して投稿する",

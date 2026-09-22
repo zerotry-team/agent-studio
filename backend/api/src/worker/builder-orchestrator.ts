@@ -136,6 +136,42 @@ function codeWorkspaceActionTitle(question: CodeWorkspaceQuestion) {
 
 type DiscoveryFailure = { sourceTopic: string; title: string; url: string; error: string };
 
+/**
+ * Builderの自動Previewは、外部作用を持たないToolだけを実行する。
+ * generate_image はS3 Artifactを作るため書き込みToolだが、Agent Studio内に閉じた成果物なので
+ * Previewで実際に呼び出さないと永続化経路を検証できない。
+ */
+export function buildBuilderPreviewInput(
+  request: string,
+  toolNames: string[],
+  previewToolNames: string[],
+  testMode = false,
+): string {
+  if (previewToolNames.length === 0) {
+    return `これはBuilder AgentのPreview受け入れ試験です。外部サービスや追加Toolを使わず、OpenAIモデルの能力だけで元の依頼を最後まで実行してください。実データや画像などの入力がまだない場合は、必要な入力形式と、与えられたときに返す結果の例を簡潔に示してください。推測した値を事実として扱わないでください。\n\n元の依頼:\n${request}`;
+  }
+
+  const generatesImage = previewToolNames.includes("generate_image");
+  const readToolNames = previewToolNames.filter((name) => name !== "generate_image");
+  const prohibitedToolNames = toolNames.filter((name) => !previewToolNames.includes(name));
+  const actions = [
+    ...(readToolNames.length
+      ? [`${readToolNames.join("、")} のうち依頼に必要な読み取り操作を実際に1回以上呼び出し、取得結果を根拠にする`]
+      : []),
+    ...(generatesImage
+      ? ["generate_image を実際に1回呼び出し、テーマが未指定なら「青空の下の白い折り紙の鳥」を安全な検証用テーマとしてPNG画像を生成し、RunのArtifactとして保存する"]
+      : []),
+  ];
+  const prohibited = prohibitedToolNames.length
+    ? `${prohibitedToolNames.join("、")} を含む外部書き込み・外部送信は行わないでください。`
+    : "外部書き込み・外部送信は行わないでください。";
+  const testArguments = previewToolNames[0] === "generate_image"
+    ? { prompt: "青空の下の白い折り紙の鳥" }
+    : {};
+  const testCall = testMode ? `\n[[call:${previewToolNames[0]} ${JSON.stringify(testArguments)}]]` : "";
+  return `これはBuilder AgentのPreview受け入れ試験です。${actions.join("。")}。実行結果、Artifact、使用モデル、安全判定、取得できた費用情報を日本語で簡潔に報告してください。${prohibited}\n\n元の依頼:\n${request}${testCall}`;
+}
+
 type FactoringWorkflowOptions = {
   /** Xへの公開を要求された場合だけ設定する。値はHuman Actionで確定した公開先ID。 */
   xAccountId?: string;
@@ -1987,11 +2023,7 @@ export class BuilderOrchestrator {
     }
     const deployment = await this.environments.createPreview(actor, agent.id);
     if (!deployment.build_id) throw new Error("Preview Buildが作成されませんでした");
-    const modelOnly = previewToolNames.length === 0;
-    const testCall = !modelOnly && this.deps.env.NODE_ENV === "test" ? `\n[[call:${previewToolNames[0]} {}]]` : "";
-    const previewInput = modelOnly
-      ? `これはBuilder AgentのPreview受け入れ試験です。外部サービスや追加Toolを使わず、OpenAIモデルの能力だけで元の依頼を最後まで実行してください。実データや画像などの入力がまだない場合は、必要な入力形式と、与えられたときに返す結果の例を簡潔に示してください。推測した値を事実として扱わないでください。\n\n元の依頼:\n${request}`
-      : `これはBuilder AgentのPreview受け入れ試験です。${previewToolNames.join("、")} のうち依頼に必要な読み取り操作を実際に1回以上呼び出し、取得した結果を日本語で簡潔に報告してください。${toolNames.filter((name) => !previewToolNames.includes(name)).join("、")} を含む書き込み・外部送信は行わないでください。\n\n元の依頼:\n${request}${testCall}`;
+    const previewInput = buildBuilderPreviewInput(request, toolNames, previewToolNames, this.deps.env.NODE_ENV === "test");
     const run = await this.runs.create(actor, { deployment_id: deployment.id, input: previewInput });
     const configHash = await this.deps.db.org(actor.organizationId, async (tx) => {
       const build = await tx.agent_builds.findUniqueOrThrow({ where: { id: deployment.build_id! } });
