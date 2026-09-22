@@ -69,6 +69,44 @@ describe("実行の流れ（擬似 OpenAI）", () => {
     expect(done.requested_by_email).toBe(operator.email);
   });
 
+  it("202受付後にTurnが始まらない場合はSessionを作り直して自律復旧する", async () => {
+    const profiles = await h.request("GET", "/api/v1/environments", owner);
+    const openai = profiles.body.find((profile: { key: string }) => profile.key === "openai");
+    const dep = await createAgentAndDeploy("agent:\n  key: turn-recovery\n  name: Turn自己復旧\ninstructions: 入力へ回答する\n", openai.id);
+    expect(dep.status).toBe(201);
+
+    const run = await h.request("POST", "/api/v1/runs", {
+      ...operator,
+      body: { deployment_id: dep.body.id, input: "[[drop-turn-once]] 自己復旧して回答してください" },
+    });
+    const done = await h.waitFor(() => runStatus(run.body.id), (value) => value.status === "completed" || value.status === "failed");
+    expect(done.status).toBe("completed");
+    expect(done.outcome).toBe("succeeded");
+
+    const sessions = await h.admin.agent_sessions.findMany({ where: { run_id: run.body.id }, orderBy: { created_at: "asc" } });
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]).toMatchObject({ status: "ended", ended_at: expect.any(Date) });
+    const recovery = await h.admin.run_events.findFirst({ where: { run_id: run.body.id, type: "openai.event", summary: "turn_start_recovery" } });
+    expect(recovery).not.toBeNull();
+    const inputs = await h.admin.run_inputs.findMany({ where: { run_id: run.body.id } });
+    expect(inputs.map((input) => input.status)).toEqual(["started"]);
+  });
+
+  it("自動復旧後もTurnが始まらなければ無限待ちせず失敗を表示する", async () => {
+    const profiles = await h.request("GET", "/api/v1/environments", owner);
+    const openai = profiles.body.find((profile: { key: string }) => profile.key === "openai");
+    const dep = await createAgentAndDeploy("agent:\n  key: turn-recovery-limit\n  name: Turn復旧上限\ninstructions: 入力へ回答する\n", openai.id);
+    const run = await h.request("POST", "/api/v1/runs", {
+      ...operator,
+      body: { deployment_id: dep.body.id, input: "[[drop-turn-always]] 復旧上限を確認してください" },
+    });
+
+    const failed = await h.waitFor(() => runStatus(run.body.id), (value) => value.status === "completed" || value.status === "failed");
+    expect(failed.status).toBe("failed");
+    expect(failed.error).toContain("自動復旧 1 回実施済み");
+    expect(await h.admin.agent_sessions.count({ where: { run_id: run.body.id } })).toBe(2);
+  });
+
   it("成果物は完了前に S3 に保存され、期限付き URL で取得できる", async () => {
     const deps = await h.request("GET", "/api/v1/deployments", owner);
     const hello = deps.body.find((d: { agent: { key: string } }) => d.agent.key === "hello");
@@ -269,7 +307,7 @@ describe("実行の流れ（擬似 OpenAI）", () => {
       // 承認の結果がエージェントへの入力として送られている
       const inputs = await h.admin.run_inputs.findMany({ where: { run_id: run.body.id }, orderBy: { created_at: "asc" } });
       expect(inputs.map((i) => i.kind)).toEqual(["initial", "approval"]);
-      expect(inputs.every((i) => i.status === "sent")).toBe(true);
+      expect(inputs.every((i) => i.status === "started")).toBe(true);
 
       // 終了後: セッションが後片付けされ、Worker の停止が依頼される
       const stop = await h.waitFor(
