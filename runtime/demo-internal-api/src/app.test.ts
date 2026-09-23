@@ -34,4 +34,20 @@ describe("demo-internal-api", () => {
     expect((await post("P-001", { price_change: "abc" })).status).toBe(400);
     expect((await post("NOPE", { price_change: 1 })).status).toBe(404);
   });
+
+  it("受注・仕入先・入出庫を読み取れる", async () => {
+    const app = createApp({ token: "test-token" });
+    const orders = (await (await app.request("/orders", { headers: auth })).json()) as { orders: Array<{ status: string }> };
+    expect(orders.orders.length).toBeGreaterThanOrEqual(5);
+    const open = (await (await app.request("/orders?status=受注中", { headers: auth })).json()) as { orders: Array<{ status: string }> };
+    expect(open.orders.every((order) => order.status === "受注中")).toBe(true);
+    expect((await app.request("/orders?status=unknown", { headers: auth })).status).toBe(400);
+
+    const suppliers = (await (await app.request("/suppliers", { headers: auth })).json()) as { suppliers: Array<{ product_id: string; lead_time_days: number }> };
+    expect(suppliers.suppliers.find((supplier) => supplier.product_id === "P-005")?.lead_time_days).toBe(45);
+
+    const movements = (await (await app.request("/stock-movements?product_id=P-005", { headers: auth })).json()) as { movements: Array<{ product_id: string }> };
+    expect(movements.movements.every((movement) => movement.product_id === "P-005")).toBe(true);
+    expect((await app.request("/stock-movements?product_id=NOPE", { headers: auth })).status).toBe(404);
+  });
 });
